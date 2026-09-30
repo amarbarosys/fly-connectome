@@ -424,7 +424,9 @@ SEED_COMPOUNDS = [
         "bioassay_target": "Insect nicotinic acetylcholine receptor",
         "affinity_type": "Ki",
         "affinity_val_nm": 1.9,
-        "gains": {"ach": 3.0, "glu": 0.8, "gaba": -1.0, "dop": 0.4, "ser": 0.1, "oct": 0.5}
+        "profile_status": "hypothesis",
+        "model_mapping_note": "Global presynaptic acetylcholine gain only; receptor-specific nAChR agonism/desensitization and dose are not represented.",
+        "gains": {"ach": 3.0, "glu": 1.0, "gaba": 1.0, "dop": 1.0, "ser": 1.0, "oct": 1.0}
     },
     {
         "slug": "thiamethoxam",
@@ -724,6 +726,10 @@ def init_registry():
             "affinity_val_nm": aff_val,
             "gains": g
         }
+        if c.get("profile_status"):
+            profile["profile_status"] = c["profile_status"]
+        if c.get("model_mapping_note"):
+            profile["model_mapping_note"] = c["model_mapping_note"]
         with open(f"{PROFILES_DIR}/{c['slug']}.json", "w") as f:
             json.dump(profile, f, indent=2)
             

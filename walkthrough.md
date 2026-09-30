@@ -41,11 +41,15 @@ The recorded target was an AMD Radeon RX 7900 XTX (gfx1100 / ROCm); the run was 
 
 Synchrony is the standard deviation of per-step active-neuron counts divided by the mean count plus one. Descending activity is an aggregate count over the engine's descending-index set; neither metric alone establishes a behavior such as walking, seizure, paralysis, or survival.
 
-## Independent validation status
+## Independent reference check
 
-No compatible reference endpoint was found in the checked local assets. FlyGym's bundled motion-capture clips describe limb kinematics, without matched drug exposure or neural counts. The local NWB file used by `sun_compass_verifier.py` supplies 42-ROI calcium traces for a separate ring-attractor demo, not FlyWire connectome activity under a matched compound. Neither supports a fair held-out test of the current aggregate metrics. No calibration/validation split, agreement score, or biological threshold is claimed.
+The Denecke et al. (2017) imidacloprid DGRP raw Wiggle Index CSV is stored in `data/references/denecke_2017_imidacloprid_dgrp/`, with provenance, checksum, analysis code, and a complete genotype-level summary. The source reports a larval motility assay at 25 and 100 ppm. The fixed held-out subset (RAL numeric ID divisible by 5; 37 genotypes per dose) had median 60-minute / pre-exposure relative movement ratios of 0.716 at 25 ppm and 0.565 at 100 ppm; all held-out genotype ratios were below 1 at both doses.
 
-To validate later, obtain a vehicle/baseline and a target-matched perturbation with an independent endpoint that can be mapped to the model. Pre-register the expected direction and endpoint, reserve distinct conditions for held-out evaluation, then report agreements, disagreements, and untestable predictions without tuning on held-out observations.
+The original profile increased modeled descending-neuron activity by 283.60%; it also inverted signed GABA edges. I corrected it to an ACh-only global gain hypothesis (ACh 3.0; other transmitter gains neutral at 1.0). The corrected profile still increased descending activity by 250.38% (250.81 to 878.79), active-neuron count by 245.01%, and synchrony by 85.37%. Receipt: `.work/neuropharmacology/denecke-corrected-profile-20260930/receipt.json`. This follow-up is a sensitivity check, not an independent validation result.
+
+This is **not a validated behavior prediction**. The source's 0-minute baseline is pre-exposure within-well, not a time-matched vehicle control. Larval motility is not the model's whole-connectome descending-neuron count, and the profile has no mapping from 25/100 ppm to transmitter gains. The corrected engine path still does not represent receptor binding or desensitization; its 3.0 ACh gain is illustrative. The profile correction followed signed-edge semantics and target specificity, not Denecke outcome values. The earlier local FlyGym motion-capture assets and unrelated 42-ROI NWB ring-attractor data still do not validate this screener.
+
+Biological validation remains open. A stronger test needs an appropriate time-matched vehicle condition, target- and dose-matched perturbation evidence, and a defensible mapping from model output to the measured behavior. Keep calibration separate from held-out evaluation and do not tune on held-out observations.
 
 ## Limitations
 

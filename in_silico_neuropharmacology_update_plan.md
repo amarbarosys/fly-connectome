@@ -26,12 +26,16 @@ Keep the current GPU simulation as a reproducible connectome perturbation protot
 - No classification thresholds or supporting reference data exist; therefore the screener reports metric changes only. Biological validation remains step 6.
 - Verification: `./.venv/bin/python -m unittest discover -s tests -v` passed all four focused tests, including a stubbed CLI run confirming seven steps reached both control and compound engine invocations. `py_compile`, `--help`, and `git diff --check` passed. No GPU workload was launched.
 
-## Execution record: steps 6–7 completed with validation stop (2026-09-30)
+## Execution record: steps 6–7 advanced; biological validation remains unmet (2026-09-30)
 
 - Audited local independent-data candidates. The bundled FlyGym assets are locomotion/motion-imitation clips without matched compound exposure or neural activity endpoints. `data/sub-13_ses-20201201_behavior_ophys.nwb` is used by the separate `sun_compass_verifier.py`, which builds an unrelated 42-unit ring attractor; its endpoint cannot validate this connectome-wide gain simulator. The FCA audit also confirms there is no FlyWire-to-FCA cell identity map.
-- No independent observation currently matches this simulator's mean active-neuron count, descending-cell activity, or population-count synchrony for a baseline plus a target-matched compound. Consequently, no calibration/held-out comparison or biological prediction score is supportable. Step 6 is closed as **not validated / endpoint unavailable**; no reference-derived labels or thresholds were added.
+- Downloaded and audited the Denecke et al. 2017 raw imidacloprid DGRP Wiggle Index file under `data/references/denecke_2017_imidacloprid_dgrp/`. A fixed analysis protocol was written before calculating outcomes or running the model, but after inspecting the file and labels, so it is not a prospective preregistration. The 0-minute values are within-well pre-exposure baselines, not a time-matched vehicle arm.
+- On the held-out genotype subset (RAL number divisible by 5), median 60-minute/0-minute relative movement ratio was 0.716 at 25 ppm and 0.565 at 100 ppm; all 37 genotype ratios at each dose were below 1. Eight rows without parseable condition labels were excluded. Full tables and limitations are recorded in `data/references/denecke_2017_imidacloprid_dgrp/analysis_summary.json` and `comparison_report.md`.
+- A 100-step GPU run of the unchanged imidacloprid gain profile increased mean descending-neuron activity by 283.60% vs neutral control, opposite the predeclared motor-suppression proxy direction. The profile also sets global GABA gain to -1.0, flipping already signed inhibitory edges and confounding attribution to imidacloprid's nAChR target. This is a diagnostic directional mismatch, not direct behavior-vs-neural validation: there is no dose-to-gain mapping, receptor-level action, vehicle control, or validated neural-to-locomotion mapping. No calibration or model tuning was performed. Step 6 remains **not biologically validated**. Receipt: `.work/neuropharmacology/denecke-imidacloprid-20260930/receipt.json`.
+- Corrected the imidacloprid profile to preserve the existing illustrative ACh gain (3.0), set GABA and all other non-target gains to neutral 1.0, and label the entry an unvalidated global ACh-gain hypothesis. Synced `compounds/imidacloprid.json`, `compounds/profiles/imidacloprid.json`, the seed, DuckDB, and exported JSON/Parquet registry. This was based on the engine's signed-edge semantics and target specificity, without fitting to Denecke outcomes.
+- A follow-up 100-step GPU run with the corrected profile still increased descending activity (+250.38%; 250.81 to 878.79), active count (+245.01%), and synchrony (+85.37%). It remains a simulator-only response: no receptor binding/desensitization or dose is represented. Receipt: `.work/neuropharmacology/denecke-corrected-profile-20260930/receipt.json`. The comparison protocol was not prospectively amended before this follow-up, so it is a sensitivity check, not new held-out validation.
 - Step 7 walkthrough: `walkthrough.md` records setup, data provenance, exact run command, representative measured output and runtime receipt, and scientific limitations. Receipt: `.work/neuropharmacology/no-map-run-final/receipt.json` (100 steps, 3.16 ms reported step latency for neutral control, RX 7900 XTX run in the recorded GPU lane). These runtime numbers are performance evidence only.
-- Release status: network perturbation demonstrator; not an independently validated pharmacological screener. Existing compound gains remain hypotheses.
+- Release status: network perturbation demonstrator; not an independently validated pharmacological screener. Compound gains remain hypotheses. Step 7 walkthrough links the external dataset and both profile runs.
 
 ## Work plan
 
@@ -94,7 +98,7 @@ Acceptance:
 - A CLI smoke case confirms the same requested step count reaches baseline and compound runs.
 - No classification thresholds are used until supporting reference data is available; output is limited to measured metric changes.
 
-### 6. Validate against independent fly observations (blocked by endpoint availability; not validated)
+### 6. Validate against independent fly observations (partial directional check; biological validation unmet)
 
 Choose a small reference panel with published or locally available neural/behavioral measurements, including vehicle/baseline and at least one perturbation with a matching model target. Use the FlyGym/behavior resources only where the measured endpoint and model output can be aligned. Keep calibration compounds separate from held-out validation compounds or conditions.
 
