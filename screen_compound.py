@@ -19,11 +19,11 @@ def run_simulation(compound_name: str, gains: dict, steps: int = 100) -> dict:
     env_vars = [
         f"PHARMA_COMPOUND={compound_name}",
         f"PHARMA_G_ACH={gains.get('ach', 1.0)}",
-        f"PHARMA_G_GLU={gains.get('glu', 0.8)}",
-        f"PHARMA_G_GABA={gains.get('gaba', -1.0)}",
-        f"PHARMA_G_DOP={gains.get('dop', 0.2)}",
-        f"PHARMA_G_SER={gains.get('ser', 0.1)}",
-        f"PHARMA_G_OCT={gains.get('oct', 0.3)}",
+        f"PHARMA_G_GLU={gains.get('glu', 1.0)}",
+        f"PHARMA_G_GABA={gains.get('gaba', 1.0)}",
+        f"PHARMA_G_DOP={gains.get('dop', 1.0)}",
+        f"PHARMA_G_SER={gains.get('ser', 1.0)}",
+        f"PHARMA_G_OCT={gains.get('oct', 1.0)}",
         f"PHARMA_STEPS={steps}",
     ]
     
@@ -121,7 +121,7 @@ def screen_file(filepath: str, base_telemetry: dict = None) -> dict:
     
     if base_telemetry is None:
         base_telemetry = run_simulation("Baseline", {
-            "ach": 1.0, "glu": 0.8, "gaba": -1.0, "dop": 0.2, "ser": 0.1, "oct": 0.3
+            "ach": 1.0, "glu": 1.0, "gaba": 1.0, "dop": 1.0, "ser": 1.0, "oct": 1.0
         }, steps=100)
         
     phenotype, rationale = classify_phenotype(base_telemetry, telemetry)
@@ -189,15 +189,15 @@ def main():
     args = parser.parse_args()
 
     print("================================================================================")
-    print(" FlyBrain In-Silico Neuropharmacology & Drug Toxicity Screener")
-    print(" Engine: Mojo SpMV Kernel · Hardware: AMD Radeon RX 7900 XTX 24GB (gfx1100)")
-    print(" Multi-Omics: 139,255 Neurons (FlyWire v783) + Single-Cell FCA Receptors")
+    print(" FlyWire Connectome Gain-Perturbation Prototype")
+    print(" Engine: Mojo SpMV Kernel · Receptor mode: no neuron-level FCA map")
+    print(" 139,255 FlyWire neurons; signed CSR weights; unvalidated gain profiles")
     print("================================================================================")
 
     # Run baseline first
     print("\n[Stage 1/2] Calibrating Physiological Baseline...")
     base = run_simulation("Baseline", {
-        "ach": 1.0, "glu": 0.8, "gaba": -1.0, "dop": 0.2, "ser": 0.1, "oct": 0.3
+        "ach": 1.0, "glu": 1.0, "gaba": 1.0, "dop": 1.0, "ser": 1.0, "oct": 1.0
     }, steps=args.steps)
     print(f"Baseline established: Mean Active={base.get('mean_active', 0.0):.1f} | DN Motor={base.get('mean_dn', 0.0):.1f} | Latency={base.get('step_ms', 0.0):.2f} ms")
 

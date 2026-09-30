@@ -5,10 +5,10 @@
   "description": "Natural resting physiological state with intact excitation-inhibition balance.",
   "gains": {
     "ach": 1.0,
-    "glu": 0.8,
-    "gaba": -1.0,
-    "dop": 0.2,
-    "ser": 0.1,
-    "oct": 0.3
+    "glu": 1.0,
+    "gaba": 1.0,
+    "dop": 1.0,
+    "ser": 1.0,
+    "oct": 1.0
   }
 }

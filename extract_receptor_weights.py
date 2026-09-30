@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""
-extract_receptor_weights.py
-Extracts neurotransmitter assignments and receptor sensitivity profiles
-for 139,255 Drosophila connectome neurons, integrating FlyWire annotations
-and Fly Cell Atlas (FCA) single-cell transcriptomics.
+"""Extract FlyWire neuron labels and audit whether FCA receptors can be mapped.
+
+The current FCA file has barcode observations but no FlyWire root-ID crosswalk.
+This script therefore emits no per-neuron receptor sensitivity matrix.
 """
 
-import sys
+import json
 import numpy as np
 import polars as pl
 import anndata as ad
@@ -80,60 +79,47 @@ def main():
         print(f"  {nt_name:<15}: {count:6d} neurons ({count/N*100:5.1f}%)")
     print(f"Identified {len(descending_indices)} descending motor command neurons (super_class == descending)")
 
-    print("[3/4] Extracting receptor gene expression from Fly Cell Atlas...")
+    print("[3/4] Auditing FCA receptor mapping availability...")
     adata = ad.read_h5ad(h5ad_path, backed="r")
-    
-    # Target receptor genes:
-    # 0: nAChR (acetylcholine receptor - nAChRalpha1 + nAChRalpha2)
-    # 1: GluCl (glutamate-gated chloride channel - GluClalpha)
-    # 2: Rdl (GABA-A receptor - Rdl)
-    # 3: DopR (dopamine receptor - Dop1R1)
-    # 4: 5HT-R (serotonin receptor - 5-HT1A)
-    # 5: Oct-R (octopamine receptor - Oamb)
     receptor_genes = ["nAChRalpha1", "GluClalpha", "Rdl", "Dop1R1", "5-HT1A", "Oamb"]
-    
-    # Get mean expression of these receptors across CNS neurons in FCA
-    cns_mask = adata.obs["afca_annotation_broad"] == "CNS neuron"
-    cns_indices = np.where(cns_mask)[0]
-    # Sample 5000 CNS cells for robust mean baseline
-    sample_cns = cns_indices[:5000]
-    
-    var_names = list(adata.var_names)
-    gene_indices = [var_names.index(g) for g in receptor_genes]
-    
-    # Read chunk
-    sub_X = adata.X[sample_cns, :][:, gene_indices]
-    if hasattr(sub_X, "toarray"):
-        sub_X = sub_X.toarray()
-    
-    mean_expr = np.mean(sub_X, axis=0)
-    # Normalize expression relative to average
-    norm_expr = mean_expr / (np.sum(mean_expr) + 1e-6)
-    print("Baseline receptor expression weights in CNS:")
-    for g, e, ne in zip(receptor_genes, mean_expr, norm_expr):
-        print(f"  {g:<15}: raw {e:.3f} | relative weight {ne:.3f}")
-
-    # Build per-neuron receptor sensitivity matrix (N, 6)
-    # Default each neuron's receptor sensitivity to 1.0 (calibrated baseline)
-    # Scaled slightly by cell class (e.g. descending neurons enriched for motor/cholinergic drive)
-    receptor_sensitivities = np.ones((N, 6), dtype=np.float32)
-    # Descending neurons have elevated cholinergic input sensitivity
-    descending_mask = (class_types == 3)
-    receptor_sensitivities[descending_mask, 0] = 1.25  # elevated nAChR sensitivity
-    receptor_sensitivities[descending_mask, 1] = 1.20  # elevated GluCl sensitivity
-    receptor_sensitivities[descending_mask, 2] = 1.15  # elevated Rdl sensitivity
+    obs_columns = list(adata.obs.columns)
+    candidate_crosswalk_columns = [
+        c for c in obs_columns
+        if any(term in c.lower() for term in ("root_id", "flywire", "segmentation", "neuron_id"))
+    ]
+    cns_count = int((adata.obs["afca_annotation_broad"] == "CNS neuron").sum())
+    mapping_audit = {
+        "mapping_mode": "no_map",
+        "flywire_release": "783",
+        "flywire_neurons": N,
+        "flywire_nt_annotated": int(np.count_nonzero(nt_types)),
+        "fca_file": h5ad_path,
+        "fca_shape": [int(adata.n_obs), int(adata.n_vars)],
+        "fca_obs_columns": obs_columns,
+        "fca_observation_id_examples": [str(x) for x in adata.obs_names[:3]],
+        "fca_cns_neurons": cns_count,
+        "receptor_genes_present": {g: g in adata.var_names for g in receptor_genes},
+        "candidate_flywire_crosswalk_columns": candidate_crosswalk_columns,
+        "per_neuron_receptor_mapping_supported": False,
+        "reason": "FCA observations are barcode-keyed and this file has no FlyWire root-ID/crosswalk field; population expression cannot be assigned to FlyWire neurons.",
+        "receptor_sensitivity_matrix_written": False,
+        "legacy_matrix_note": "An older neuron_receptor_sensitivities.bin may remain on disk; it is synthetic and must not be used as measured receptor data."
+    }
+    adata.file.close()
 
     print("[4/4] Writing binary artifacts...")
     nt_types.tofile("data/neuron_nt_types.bin")
     class_types.tofile("data/neuron_classes.bin")
     np.array(descending_indices, dtype=np.int32).tofile("data/descending_indices.bin")
-    receptor_sensitivities.tofile("data/neuron_receptor_sensitivities.bin")
+    with open("data/receptor_mapping_audit.json", "w", encoding="utf-8") as f:
+        json.dump(mapping_audit, f, indent=2)
+        f.write("\n")
 
     print(f"Wrote data/neuron_nt_types.bin ({nt_types.nbytes} bytes)")
     print(f"Wrote data/neuron_classes.bin ({class_types.nbytes} bytes)")
     print(f"Wrote data/descending_indices.bin ({len(descending_indices)*4} bytes)")
-    print(f"Wrote data/neuron_receptor_sensitivities.bin ({receptor_sensitivities.nbytes} bytes)")
-    print("Receptor extraction complete.")
+    print("Wrote data/receptor_mapping_audit.json (mode=no_map)")
+    print("FlyWire neurotransmitter extraction complete; no receptor map was inferred.")
 
 if __name__ == "__main__":
     main()
