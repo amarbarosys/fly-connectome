@@ -22,10 +22,11 @@ curl -C - -L --retry 5 --retry-delay 5 \
 
 echo "[1/2] PubChem download complete."
 
-# Download ChEMBL 37 SQLite tarball (5.40 GB)
+# Download ChEMBL 37 SQLite tarball (5.40 GB) with 16 parallel connections
 echo "[2/2] Downloading ChEMBL chembl_37_sqlite.tar.gz..."
-curl -C - -L --retry 5 --retry-delay 5 \
-     -o "${DEST_DIR}/chembl_37_sqlite.tar.gz" \
+aria2c -c -s 16 -x 16 -k 1M \
+     -d "${DEST_DIR}" \
+     -o "chembl_37_sqlite.tar.gz" \
      "${CHEMBL_URL}"
 
 echo "[2/2] ChEMBL download complete."

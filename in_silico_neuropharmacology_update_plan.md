@@ -98,19 +98,25 @@ Acceptance:
 - A CLI smoke case confirms the same requested step count reaches baseline and compound runs.
 - No classification thresholds are used until supporting reference data is available; output is limited to measured metric changes.
 
-### 6. Validate against independent fly observations (partial directional check; biological validation unmet)
+### 6. Compare with independent fly observations (directional comparison complete; biological validation unmet)
 
-Choose a small reference panel with published or locally available neural/behavioral measurements, including vehicle/baseline and at least one perturbation with a matching model target. Use the FlyGym/behavior resources only where the measured endpoint and model output can be aligned. Keep calibration compounds separate from held-out validation compounds or conditions.
+The bounded comparison uses the available Denecke et al. imidacloprid DGRP larval Wiggle Index data and the fixed imidacloprid transmitter-gain hypothesis. The protocol and held-out rule were recorded before outcome calculation/model execution, though after inspecting source structure; this is not prospective preregistration. Results and limitations are in `data/references/denecke_2017_imidacloprid_dgrp/comparison_report.md`.
 
 Acceptance:
 
-- Pre-register the expected direction and endpoint for each reference condition before running it.
-- Report agreement, disagreement, and untestable predictions; do not tune and score on the same observations.
-- GPU speed is reported separately from biological predictive performance.
+- Expected directions and endpoints were recorded before calculating outcome summaries or running the model; the held-out genotype subset was RAL ID divisible by 5. No parameters were fit to those genotypes.
+- Result: behavior showed reduced larval motility at both 25 ppm and 100 ppm; the ACh-only model hypothesis increased descending activity by 250.38%, opposite the exploratory motor-suppression proxy. This is a directional disagreement, not a validated behavior prediction, because no dose-to-gain or neural-to-locomotion map exists and the dataset lacks a time-matched vehicle.
+- Untestable: vehicle-corrected chemical effect, calibrated dose response, neural activity correspondence, adult behavior, and rescue/cocktail predictions.
+- GPU runtime evidence is reported separately in `.work/neuropharmacology/denecke-corrected-profile-20260930/receipt.json`; it is not biological validation.
+- **Acceptance status:** the available directional comparison and reporting are complete. The step’s independent matched-endpoint biological-validation criterion is unmet; do not call the screener validated.
 
 ### 7. Deliver an auditable release candidate (walkthrough delivered)
 
 Publish a concise `walkthrough.md` in the repository with setup, exact commands, hardware/runtime receipt, data provenance, limitations, and representative outputs. Keep generated logs and large reports under `.work/`; commit only code, schemas, compact fixtures, and documentation intended for reuse.
+
+## Step 6 closeout (2026-09-30)
+
+No further validation claim is supported by the available data. The experiment needed to close the biological-validation gap requires a matched vehicle/time control, independently measured fly neural or behavior endpoints for a target- and dose-matched perturbation, and a defensible mapping from model outputs to that endpoint. Until those data exist, the project status remains an unvalidated network perturbation demonstrator. The directional comparison is complete and records a disagreement; the biological validation subgoal is explicitly unmet.
 
 ## Order and scope control
 
