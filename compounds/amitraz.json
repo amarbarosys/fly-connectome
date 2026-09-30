@@ -1,0 +1,14 @@
+{
+  "name": "Amitraz",
+  "cas_number": "33089-61-1",
+  "class": "Octopaminergic Oamb Receptor Agonist (Acaricide / Stimulant)",
+  "description": "Octopamine receptor agonist mimicking insect fight-or-flight adrenaline surge. Produces hyperexcitability, continuous tremors, and motor restlessness.",
+  "gains": {
+    "ach": 1.2,
+    "glu": 0.8,
+    "gaba": -0.8,
+    "dop": 0.5,
+    "ser": 0.1,
+    "oct": 4.5
+  }
+}

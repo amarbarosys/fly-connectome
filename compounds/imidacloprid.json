@@ -1,0 +1,14 @@
+{
+  "name": "Imidacloprid",
+  "cas_number": "138261-41-3",
+  "class": "Neonicotinoid nAChR Super-Agonist (Neurotoxic Insecticide)",
+  "description": "High-affinity agonist of insect nicotinic acetylcholine receptors. Causes sustained open-channel depolarization, sensory tremor, and subsequent depolarization block.",
+  "gains": {
+    "ach": 3.0,
+    "glu": 0.8,
+    "gaba": -1.0,
+    "dop": 0.2,
+    "ser": 0.1,
+    "oct": 0.3
+  }
+}

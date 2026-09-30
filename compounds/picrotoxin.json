@@ -1,0 +1,14 @@
+{
+  "name": "Picrotoxin (PTX)",
+  "cas_number": "124-87-8",
+  "class": "GABA-A / Rdl Channel Blocker (Convulsant)",
+  "description": "Potent non-competitive blocker of ionotropic GABA-A chloride channels. Causes runaway recurrent excitation and severe epileptiform seizures.",
+  "gains": {
+    "ach": 1.0,
+    "glu": 0.8,
+    "gaba": 0.0,
+    "dop": 0.2,
+    "ser": 0.1,
+    "oct": 0.3
+  }
+}

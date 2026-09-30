@@ -1,0 +1,14 @@
+{
+  "name": "Physiological Baseline",
+  "cas_number": "N/A",
+  "class": "Control / Unperturbed",
+  "description": "Natural resting physiological state with intact excitation-inhibition balance.",
+  "gains": {
+    "ach": 1.0,
+    "glu": 0.8,
+    "gaba": -1.0,
+    "dop": 0.2,
+    "ser": 0.1,
+    "oct": 0.3
+  }
+}
