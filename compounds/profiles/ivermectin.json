@@ -1,21 +1,26 @@
 {
-  "compound_id": "CMP-0015",
+  "compound_id": "CMP-0029",
   "slug": "ivermectin",
   "name": "Ivermectin (B1a)",
   "category": "Antiparasitic / Insecticide",
   "cas_number": "70288-86-7",
-  "formula": "C48H74O14",
-  "mw_g_mol": 875.1060000000001,
-  "canonical_smiles": "CCC(C)C1CC(C)CC2(CC3CC(CC=C(C)C(OC4CC(OC)C(OC5CC(OC)C(O)C(C)O5)C(C)O4)C(C)C=CC=C4COC5C(O)C(C)=CC(C(=O)O3)C45O)O2)O1",
-  "inchikey": "DVJNPTCJUKBSDN-UHFFFAOYSA-N",
-  "primary_target": "GluClalpha (Chloride Channel)",
-  "action_mode": "Allosteric Irreversible Activator",
+  "formula": "C46H70O14",
+  "mw_g_mol": 847.0520000000002,
+  "canonical_smiles": "CCC(C)C1CC2CC(O)CC=C(C)C(=O)OC3CC4(OC5CC(OC)C(OC6CC(OC)C(O)C(C)O6)C(C)O5)CC=C(C(C)CC=CC=C(C)C(O1)C(=O)O2)C(C4)O3",
+  "inchikey": "MTSRLCZUGZTCNI-UHFFFAOYSA-N",
+  "primary_target": "Glutamate-Gated Chloride (GluClalpha)",
+  "action_mode": "Positive Allosteric Opener / Hyperpolarizer",
+  "pubchem_cid": 6321424,
+  "chembl_id": "CHEMBL1201103",
+  "bioassay_target": "Glutamate-gated chloride channel",
+  "affinity_type": "EC50",
+  "affinity_val_nm": 150.0,
   "gains": {
-    "ach": 0.3,
-    "glu": -3.0,
-    "gaba": -1.0,
-    "dop": 0.2,
+    "ach": 0.8,
+    "glu": -2.0,
+    "gaba": -1.8,
+    "dop": 0.1,
     "ser": 0.1,
-    "oct": 0.1
+    "oct": 0.2
   }
 }

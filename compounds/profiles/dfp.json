@@ -1,5 +1,5 @@
 {
-  "compound_id": "CMP-0019",
+  "compound_id": "CMP-0034",
   "slug": "dfp",
   "name": "Diisopropyl Fluorophosphate (DFP)",
   "category": "Organophosphate Reference",
@@ -9,7 +9,12 @@
   "canonical_smiles": "CC(C)OP(=O)(F)OC(C)C",
   "inchikey": "MUCZHBLJLSDCSD-UHFFFAOYSA-N",
   "primary_target": "Serine Hydrolases / AChE",
-  "action_mode": "Irreversible Phosphorylation",
+  "action_mode": "Phosphorylation",
+  "pubchem_cid": 5936,
+  "chembl_id": "CHEMBL417463",
+  "bioassay_target": "Cholinesterase",
+  "affinity_type": "Ki",
+  "affinity_val_nm": 45.0,
   "gains": {
     "ach": 5.5,
     "glu": 1.0,

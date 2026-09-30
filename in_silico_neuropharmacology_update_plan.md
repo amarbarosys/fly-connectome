@@ -26,6 +26,13 @@ Keep the current GPU simulation as a reproducible connectome perturbation protot
 - No classification thresholds or supporting reference data exist; therefore the screener reports metric changes only. Biological validation remains step 6.
 - Verification: `./.venv/bin/python -m unittest discover -s tests -v` passed all four focused tests, including a stubbed CLI run confirming seven steps reached both control and compound engine invocations. `py_compile`, `--help`, and `git diff --check` passed. No GPU workload was launched.
 
+## Execution record: steps 6–7 completed with validation stop (2026-09-30)
+
+- Audited local independent-data candidates. The bundled FlyGym assets are locomotion/motion-imitation clips without matched compound exposure or neural activity endpoints. `data/sub-13_ses-20201201_behavior_ophys.nwb` is used by the separate `sun_compass_verifier.py`, which builds an unrelated 42-unit ring attractor; its endpoint cannot validate this connectome-wide gain simulator. The FCA audit also confirms there is no FlyWire-to-FCA cell identity map.
+- No independent observation currently matches this simulator's mean active-neuron count, descending-cell activity, or population-count synchrony for a baseline plus a target-matched compound. Consequently, no calibration/held-out comparison or biological prediction score is supportable. Step 6 is closed as **not validated / endpoint unavailable**; no reference-derived labels or thresholds were added.
+- Step 7 walkthrough: `walkthrough.md` records setup, data provenance, exact run command, representative measured output and runtime receipt, and scientific limitations. Receipt: `.work/neuropharmacology/no-map-run-final/receipt.json` (100 steps, 3.16 ms reported step latency for neutral control, RX 7900 XTX run in the recorded GPU lane). These runtime numbers are performance evidence only.
+- Release status: network perturbation demonstrator; not an independently validated pharmacological screener. Existing compound gains remain hypotheses.
+
 ## Work plan
 
 ### 1. Freeze and reproduce the current reference run
@@ -87,7 +94,7 @@ Acceptance:
 - A CLI smoke case confirms the same requested step count reaches baseline and compound runs.
 - No classification thresholds are used until supporting reference data is available; output is limited to measured metric changes.
 
-### 6. Validate against independent fly observations
+### 6. Validate against independent fly observations (blocked by endpoint availability; not validated)
 
 Choose a small reference panel with published or locally available neural/behavioral measurements, including vehicle/baseline and at least one perturbation with a matching model target. Use the FlyGym/behavior resources only where the measured endpoint and model output can be aligned. Keep calibration compounds separate from held-out validation compounds or conditions.
 
@@ -97,7 +104,7 @@ Acceptance:
 - Report agreement, disagreement, and untestable predictions; do not tune and score on the same observations.
 - GPU speed is reported separately from biological predictive performance.
 
-### 7. Deliver an auditable release candidate
+### 7. Deliver an auditable release candidate (walkthrough delivered)
 
 Publish a concise `walkthrough.md` in the repository with setup, exact commands, hardware/runtime receipt, data provenance, limitations, and representative outputs. Keep generated logs and large reports under `.work/`; commit only code, schemas, compact fixtures, and documentation intended for reuse.
 

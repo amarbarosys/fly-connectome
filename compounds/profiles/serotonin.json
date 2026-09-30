@@ -10,6 +10,11 @@
   "inchikey": "QZAYGJVTTNCVMB-UHFFFAOYSA-N",
   "primary_target": "5-HT1A / 5-HT2A / 5-HT7",
   "action_mode": "Endogenous Agonist (State Control)",
+  "pubchem_cid": 5202,
+  "chembl_id": "CHEMBL95",
+  "bioassay_target": "Serotonin 1a (5-HT1a) receptor",
+  "affinity_type": "Ki",
+  "affinity_val_nm": 4.1,
   "gains": {
     "ach": 1.0,
     "glu": 0.8,

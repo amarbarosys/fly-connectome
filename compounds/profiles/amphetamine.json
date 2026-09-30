@@ -1,0 +1,26 @@
+{
+  "compound_id": "CMP-0037",
+  "slug": "amphetamine",
+  "name": "Amphetamine",
+  "category": "CNS Stimulant / Transporter Substrate",
+  "cas_number": "300-62-9",
+  "formula": "C9H13N",
+  "mw_g_mol": 135.20999999999995,
+  "canonical_smiles": "CC(N)Cc1ccccc1",
+  "inchikey": "KWTSXDURSIMDCE-UHFFFAOYSA-N",
+  "primary_target": "DAT / VMAT2 / Trace Amine Receptors",
+  "action_mode": "Dopamine & Octopamine Releaser",
+  "pubchem_cid": 3007,
+  "chembl_id": "CHEMBL39",
+  "bioassay_target": "Sodium-dependent dopamine transporter",
+  "affinity_type": "Ki",
+  "affinity_val_nm": 34.0,
+  "gains": {
+    "ach": 1.1,
+    "glu": 1.0,
+    "gaba": -0.8,
+    "dop": 3.2,
+    "ser": 0.4,
+    "oct": 2.5
+  }
+}

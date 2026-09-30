@@ -1,0 +1,26 @@
+{
+  "compound_id": "CMP-0007",
+  "slug": "tyramine",
+  "name": "Tyramine",
+  "category": "Endogenous Neuromodulator",
+  "cas_number": "51-67-2",
+  "formula": "C8H11NO",
+  "mw_g_mol": 137.18200000000002,
+  "canonical_smiles": "NCCc1ccc(O)cc1",
+  "inchikey": "DZGWFCGJZKJUFP-UHFFFAOYSA-N",
+  "primary_target": "TyrR (Tyramine Receptor)",
+  "action_mode": "Trace Amine Agonist",
+  "pubchem_cid": 5610,
+  "chembl_id": "CHEMBL704",
+  "bioassay_target": "Trace amine-associated receptor 1",
+  "affinity_type": "EC50",
+  "affinity_val_nm": 110.0,
+  "gains": {
+    "ach": 1.0,
+    "glu": 0.8,
+    "gaba": -0.9,
+    "dop": 0.3,
+    "ser": 0.1,
+    "oct": 1.8
+  }
+}

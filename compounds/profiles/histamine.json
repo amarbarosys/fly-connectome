@@ -1,0 +1,26 @@
+{
+  "compound_id": "CMP-0008",
+  "slug": "histamine",
+  "name": "Histamine",
+  "category": "Endogenous Neurotransmitter",
+  "cas_number": "51-45-6",
+  "formula": "C5H9N3",
+  "mw_g_mol": 111.14800000000001,
+  "canonical_smiles": "NCCc1c[nH]cn1",
+  "inchikey": "NTYJJOPFIAHURM-UHFFFAOYSA-N",
+  "primary_target": "HisCl1 / Ort (Histamine-gated chloride)",
+  "action_mode": "Photoreceptor Inhibitory Transmitter",
+  "pubchem_cid": 774,
+  "chembl_id": "CHEMBL90",
+  "bioassay_target": "Histamine H1 receptor",
+  "affinity_type": "Ki",
+  "affinity_val_nm": 450.0,
+  "gains": {
+    "ach": 0.9,
+    "glu": 0.8,
+    "gaba": -1.2,
+    "dop": 0.1,
+    "ser": 0.1,
+    "oct": 0.2
+  }
+}

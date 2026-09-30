@@ -1,0 +1,26 @@
+{
+  "compound_id": "CMP-0021",
+  "slug": "carbachol",
+  "name": "Carbachol",
+  "category": "Cholinergic Research Agonist",
+  "cas_number": "51-83-2",
+  "formula": "C6H15N2O2+",
+  "mw_g_mol": 147.19799999999998,
+  "canonical_smiles": "C[N+](C)(C)CCOC(N)=O",
+  "inchikey": "VPJXQGSRWJZDOB-UHFFFAOYSA-O",
+  "primary_target": "nAChR and mAChR Subtypes",
+  "action_mode": "Resistant to AChE Hydrolysis Agonist",
+  "pubchem_cid": 5831,
+  "chembl_id": "CHEMBL716",
+  "bioassay_target": "Muscarinic acetylcholine receptor M1",
+  "affinity_type": "EC50",
+  "affinity_val_nm": 12000.0,
+  "gains": {
+    "ach": 2.2,
+    "glu": 0.9,
+    "gaba": -1.0,
+    "dop": 0.3,
+    "ser": 0.1,
+    "oct": 0.4
+  }
+}

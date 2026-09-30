@@ -1,5 +1,5 @@
 {
-  "compound_id": "CMP-0014",
+  "compound_id": "CMP-0035",
   "slug": "caffeine",
   "name": "Caffeine",
   "category": "CNS Stimulant",
@@ -8,14 +8,19 @@
   "mw_g_mol": 194.194,
   "canonical_smiles": "Cn1c(=O)c2c(ncn2C)n(C)c1=O",
   "inchikey": "RYYVLZVUVIJVGH-UHFFFAOYSA-N",
-  "primary_target": "Adenosine Receptors / RyR",
-  "action_mode": "Antagonist / Arousal Enhancer",
+  "primary_target": "Adenosine Receptors (AdoR) / Phosphodiesterase",
+  "action_mode": "Competitive Antagonist",
+  "pubchem_cid": 2519,
+  "chembl_id": "CHEMBL113",
+  "bioassay_target": "Adenosine receptor A1",
+  "affinity_type": "Ki",
+  "affinity_val_nm": 100000.0,
   "gains": {
-    "ach": 1.2,
-    "glu": 0.9,
+    "ach": 1.1,
+    "glu": 1.0,
     "gaba": -0.9,
-    "dop": 0.5,
-    "ser": 0.2,
+    "dop": 0.8,
+    "ser": 0.1,
     "oct": 1.2
   }
 }

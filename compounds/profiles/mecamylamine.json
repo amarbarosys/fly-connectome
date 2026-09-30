@@ -1,0 +1,26 @@
+{
+  "compound_id": "CMP-0024",
+  "slug": "mecamylamine",
+  "name": "Mecamylamine",
+  "category": "Ganglionic / Central nAChR Antagonist",
+  "cas_number": "60-40-2",
+  "formula": "C11H21N",
+  "mw_g_mol": 167.296,
+  "canonical_smiles": "CNC1C2(C)CCC(C2)C1(C)C",
+  "inchikey": "TUBMCSVBLIVDLY-UHFFFAOYSA-N",
+  "primary_target": "Nicotinic Channel Pore",
+  "action_mode": "Non-Competitive Open Channel Blocker",
+  "pubchem_cid": 4077,
+  "chembl_id": "CHEMBL626",
+  "bioassay_target": "Neuronal acetylcholine receptor; alpha3/beta4",
+  "affinity_type": "IC50",
+  "affinity_val_nm": 1200.0,
+  "gains": {
+    "ach": 0.2,
+    "glu": 0.8,
+    "gaba": -1.0,
+    "dop": 0.1,
+    "ser": 0.1,
+    "oct": 0.2
+  }
+}

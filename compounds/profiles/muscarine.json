@@ -1,0 +1,26 @@
+{
+  "compound_id": "CMP-0022",
+  "slug": "muscarine",
+  "name": "Muscarine",
+  "category": "Mushroom Alkaloid / Muscarinic Probe",
+  "cas_number": "300-54-9",
+  "formula": "C9H20NO2+",
+  "mw_g_mol": 174.264,
+  "canonical_smiles": "CC1OC(C[N+](C)(C)C)CC1O",
+  "inchikey": "UQOFGTXDASPNLL-UHFFFAOYSA-N",
+  "primary_target": "Muscarinic Acetylcholine Receptors",
+  "action_mode": "Selective Agonist",
+  "pubchem_cid": 9308,
+  "chembl_id": "CHEMBL289728",
+  "bioassay_target": "Muscarinic acetylcholine receptor M2",
+  "affinity_type": "EC50",
+  "affinity_val_nm": 420.0,
+  "gains": {
+    "ach": 1.8,
+    "glu": 0.8,
+    "gaba": -1.0,
+    "dop": 0.2,
+    "ser": 0.1,
+    "oct": 0.3
+  }
+}

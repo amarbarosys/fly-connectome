@@ -1,0 +1,26 @@
+{
+  "compound_id": "CMP-0025",
+  "slug": "tubocurarine",
+  "name": "d-Tubocurarine",
+  "category": "Curare Alkaloid / nAChR Blocker",
+  "cas_number": "57-95-4",
+  "formula": "C36H38N2O5",
+  "mw_g_mol": 578.7090000000003,
+  "canonical_smiles": "COc1cc2c(cc1O)C(Cc1ccc3c(c1)Oc1ccc(cc1)CC1c4cc(OC)c(cc4CCN1C)O3)N(C)CC2",
+  "inchikey": "ZFSDOTSXMWJRDS-UHFFFAOYSA-N",
+  "primary_target": "Neuromuscular & Ganglionic nAChRs",
+  "action_mode": "Competitive Antagonist",
+  "pubchem_cid": 6000,
+  "chembl_id": "CHEMBL421453",
+  "bioassay_target": "Muscle-type nicotinic acetylcholine receptor",
+  "affinity_type": "Ki",
+  "affinity_val_nm": 33.0,
+  "gains": {
+    "ach": 0.1,
+    "glu": 0.8,
+    "gaba": -1.0,
+    "dop": 0.1,
+    "ser": 0.1,
+    "oct": 0.1
+  }
+}

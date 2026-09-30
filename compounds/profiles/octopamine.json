@@ -10,6 +10,11 @@
   "inchikey": "QHGUCRYDKWKLMG-UHFFFAOYSA-N",
   "primary_target": "Oamb / Octbeta1R / Octbeta2R",
   "action_mode": "Endogenous Agonist (Fight-or-Flight)",
+  "pubchem_cid": 4581,
+  "chembl_id": "CHEMBL429",
+  "bioassay_target": "Octopamine receptor",
+  "affinity_type": "Ki",
+  "affinity_val_nm": 48.0,
   "gains": {
     "ach": 1.2,
     "glu": 0.8,

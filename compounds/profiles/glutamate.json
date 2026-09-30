@@ -10,6 +10,11 @@
   "inchikey": "WHUUTDBJXJRKMK-UHFFFAOYSA-N",
   "primary_target": "iGluR / GluClalpha",
   "action_mode": "Endogenous Agonist",
+  "pubchem_cid": 33032,
+  "chembl_id": "CHEMBL421654",
+  "bioassay_target": "Glutamate receptor ionotropic, NMDA 1",
+  "affinity_type": "EC50",
+  "affinity_val_nm": 2300.0,
   "gains": {
     "ach": 1.0,
     "glu": 1.2,

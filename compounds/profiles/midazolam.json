@@ -1,21 +1,26 @@
 {
-  "compound_id": "CMP-0010",
+  "compound_id": "CMP-0013",
   "slug": "midazolam",
   "name": "Midazolam",
   "category": "Anticonvulsant / Sedative",
   "cas_number": "59467-70-8",
   "formula": "C18H13ClFN3",
-  "mw_g_mol": 325.77400000000006,
-  "canonical_smiles": "Cc1ncc2n1-c1ccc(Cl)cc1C(=Nc1ccccc1F)C2",
-  "inchikey": "YFFVIKYBXUOIGK-UHFFFAOYSA-N",
+  "mw_g_mol": 325.774,
+  "canonical_smiles": "Cc1ncc2n1-c1ccc(Cl)cc1C(c1ccccc1F)=NC2",
+  "inchikey": "DDLIGBOFAVUZHB-UHFFFAOYSA-N",
   "primary_target": "GABA-A Receptor Complex",
-  "action_mode": "High-Affinity GABA-A PAM",
+  "action_mode": "Rapid-Onset Positive Allosteric Modulator",
+  "pubchem_cid": 4192,
+  "chembl_id": "CHEMBL644",
+  "bioassay_target": "GABA-A receptor alpha-1 subunit",
+  "affinity_type": "Ki",
+  "affinity_val_nm": 4.8,
   "gains": {
-    "ach": 0.8,
+    "ach": 0.7,
     "glu": 0.6,
     "gaba": -3.0,
     "dop": 0.1,
-    "ser": 0.2,
+    "ser": 0.1,
     "oct": 0.1
   }
 }

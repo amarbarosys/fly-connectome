@@ -1,0 +1,26 @@
+{
+  "compound_id": "CMP-0019",
+  "slug": "nmda",
+  "name": "N-Methyl-D-Aspartic Acid (NMDA)",
+  "category": "Excitatory Amino Acid Probe",
+  "cas_number": "6384-92-5",
+  "formula": "C6H11NO4",
+  "mw_g_mol": 161.15699999999998,
+  "canonical_smiles": "CC(C(=O)O)N(C)CC(=O)O",
+  "inchikey": "UUBXFHLAVMTWOB-UHFFFAOYSA-N",
+  "primary_target": "NMDA Receptor Complex",
+  "action_mode": "Selective Agonist",
+  "pubchem_cid": 22880,
+  "chembl_id": "CHEMBL286590",
+  "bioassay_target": "NMDA receptor",
+  "affinity_type": "EC50",
+  "affinity_val_nm": 31000.0,
+  "gains": {
+    "ach": 1.0,
+    "glu": 3.0,
+    "gaba": -1.0,
+    "dop": 0.2,
+    "ser": 0.1,
+    "oct": 0.3
+  }
+}

@@ -1,5 +1,5 @@
 {
-  "compound_id": "CMP-0013",
+  "compound_id": "CMP-0020",
   "slug": "nicotine",
   "name": "Nicotine",
   "category": "Natural Alkaloid / Stimulant",
@@ -8,14 +8,19 @@
   "mw_g_mol": 162.236,
   "canonical_smiles": "CN1CCCC1c1cccnc1",
   "inchikey": "SNICXCGAKADSCV-UHFFFAOYSA-N",
-  "primary_target": "Nicotinic AChR (nAChR)",
-  "action_mode": "Agonist (Desensitizing)",
+  "primary_target": "Insect / Mammalian nAChRs",
+  "action_mode": "Partial / Full Agonist",
+  "pubchem_cid": 89594,
+  "chembl_id": "CHEMBL3",
+  "bioassay_target": "Neuronal acetylcholine receptor; alpha4/beta2",
+  "affinity_type": "Ki",
+  "affinity_val_nm": 1.05,
   "gains": {
-    "ach": 2.2,
-    "glu": 0.8,
+    "ach": 2.5,
+    "glu": 1.0,
     "gaba": -1.0,
     "dop": 0.8,
-    "ser": 0.1,
-    "oct": 0.5
+    "ser": 0.2,
+    "oct": 0.8
   }
 }

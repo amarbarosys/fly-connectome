@@ -1,5 +1,5 @@
 {
-  "compound_id": "CMP-0007",
+  "compound_id": "CMP-0009",
   "slug": "atropine",
   "name": "Atropine",
   "category": "Medical Countermeasure",
@@ -10,6 +10,11 @@
   "inchikey": "RKUNBYITZUJHSG-UHFFFAOYSA-N",
   "primary_target": "Muscarinic / Cholinergic Receptors",
   "action_mode": "Competitive Antagonist",
+  "pubchem_cid": 174174,
+  "chembl_id": "CHEMBL517712",
+  "bioassay_target": "Muscarinic acetylcholine receptor",
+  "affinity_type": "Ki",
+  "affinity_val_nm": 0.45,
   "gains": {
     "ach": 0.3,
     "glu": 0.8,

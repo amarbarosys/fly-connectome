@@ -10,6 +10,11 @@
   "inchikey": "VYFYYTLLBUKUHU-UHFFFAOYSA-N",
   "primary_target": "Dop1R1 / Dop1R2 / Dop2R",
   "action_mode": "Endogenous Agonist (Arousal)",
+  "pubchem_cid": 681,
+  "chembl_id": "CHEMBL59",
+  "bioassay_target": "Dopamine D1 receptor",
+  "affinity_type": "Ki",
+  "affinity_val_nm": 234.0,
   "gains": {
     "ach": 1.0,
     "glu": 0.8,

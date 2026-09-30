@@ -1,0 +1,26 @@
+{
+  "compound_id": "CMP-0011",
+  "slug": "obidoxime",
+  "name": "Obidoxime",
+  "category": "Medical Countermeasure",
+  "cas_number": "114-90-9",
+  "formula": "C14H16N4O3+2",
+  "mw_g_mol": 288.30699999999996,
+  "canonical_smiles": "ON=Cc1cc[n+](COC[n+]2ccc(C=NO)cc2)cc1",
+  "inchikey": "HIGRLDNHDGYWQJ-UHFFFAOYSA-P",
+  "primary_target": "Bis-Pyridinium AChE Reactivator",
+  "action_mode": "Catalytic Dephosphorylation",
+  "pubchem_cid": 4543,
+  "chembl_id": "CHEMBL3182163",
+  "bioassay_target": "Acetylcholinesterase",
+  "affinity_type": "IC50",
+  "affinity_val_nm": 180000.0,
+  "gains": {
+    "ach": 0.4,
+    "glu": 0.8,
+    "gaba": -1.0,
+    "dop": 0.2,
+    "ser": 0.1,
+    "oct": 0.3
+  }
+}

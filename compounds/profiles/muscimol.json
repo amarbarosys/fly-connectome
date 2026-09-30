@@ -1,0 +1,26 @@
+{
+  "compound_id": "CMP-0017",
+  "slug": "muscimol",
+  "name": "Muscimol",
+  "category": "GABA-A Agonist / Sedative Probe",
+  "cas_number": "2763-96-4",
+  "formula": "C4H6N2O2",
+  "mw_g_mol": 114.104,
+  "canonical_smiles": "NCc1cc(O)on1",
+  "inchikey": "CDJUWFWWVBYRRC-UHFFFAOYSA-N",
+  "primary_target": "GABA-A Orthosteric Site",
+  "action_mode": "Potent Full Agonist",
+  "pubchem_cid": 4237,
+  "chembl_id": "CHEMBL1310",
+  "bioassay_target": "GABA-A receptor",
+  "affinity_type": "Ki",
+  "affinity_val_nm": 6.0,
+  "gains": {
+    "ach": 0.9,
+    "glu": 0.7,
+    "gaba": -3.5,
+    "dop": 0.1,
+    "ser": 0.1,
+    "oct": 0.1
+  }
+}

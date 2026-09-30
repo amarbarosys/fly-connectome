@@ -10,6 +10,11 @@
   "inchikey": "OIPILFWXSMYKGL-UHFFFAOYSA-N",
   "primary_target": "nAChR / mAChR",
   "action_mode": "Endogenous Agonist",
+  "pubchem_cid": 187,
+  "chembl_id": "CHEMBL667",
+  "bioassay_target": "Neuronal acetylcholine receptor subunit alpha-7",
+  "affinity_type": "EC50",
+  "affinity_val_nm": 155000.0,
   "gains": {
     "ach": 1.0,
     "glu": 0.8,

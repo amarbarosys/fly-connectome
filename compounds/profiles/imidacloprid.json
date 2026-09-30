@@ -1,5 +1,5 @@
 {
-  "compound_id": "CMP-0016",
+  "compound_id": "CMP-0026",
   "slug": "imidacloprid",
   "name": "Imidacloprid",
   "category": "Neonicotinoid Insecticide",
@@ -8,14 +8,19 @@
   "mw_g_mol": 255.66499999999996,
   "canonical_smiles": "O=[N+]([O-])N=C1NCCN1Cc1cccnc1Cl",
   "inchikey": "JBDGDNPVKIDGBW-UHFFFAOYSA-N",
-  "primary_target": "Insect nAChR Subunits",
-  "action_mode": "Irreversible Super-Agonist",
+  "primary_target": "Insect nAChR Subunits (Dalpha1/Dbeta1)",
+  "action_mode": "Selective Agonist / Desensitizer",
+  "pubchem_cid": 86289,
+  "chembl_id": "CHEMBL1883196",
+  "bioassay_target": "Insect nicotinic acetylcholine receptor",
+  "affinity_type": "Ki",
+  "affinity_val_nm": 1.9,
   "gains": {
     "ach": 3.0,
     "glu": 0.8,
     "gaba": -1.0,
-    "dop": 0.2,
+    "dop": 0.4,
     "ser": 0.1,
-    "oct": 0.3
+    "oct": 0.5
   }
 }

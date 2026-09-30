@@ -1,5 +1,5 @@
 {
-  "compound_id": "CMP-0008",
+  "compound_id": "CMP-0010",
   "slug": "pralidoxime",
   "name": "Pralidoxime (2-PAM)",
   "category": "Medical Countermeasure",
@@ -8,8 +8,13 @@
   "mw_g_mol": 137.162,
   "canonical_smiles": "C[n+]1ccccc1C=NO",
   "inchikey": "JBKPUQTUERUYQE-UHFFFAOYSA-O",
-  "primary_target": "Acetylcholinesterase (AChE)",
-  "action_mode": "Enzymatic Oxime Reactivator",
+  "primary_target": "Phosphorylated AChE Reactivator",
+  "action_mode": "Oxime Reactivator",
+  "pubchem_cid": 135398747,
+  "chembl_id": "CHEMBL1420",
+  "bioassay_target": "Acetylcholinesterase",
+  "affinity_type": "IC50",
+  "affinity_val_nm": 340000.0,
   "gains": {
     "ach": 0.5,
     "glu": 0.8,

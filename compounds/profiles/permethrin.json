@@ -1,0 +1,26 @@
+{
+  "compound_id": "CMP-0031",
+  "slug": "permethrin",
+  "name": "Permethrin",
+  "category": "Synthetic Pyrethroid Insecticide",
+  "cas_number": "52645-53-1",
+  "formula": "C21H20Cl2O3",
+  "mw_g_mol": 391.29400000000004,
+  "canonical_smiles": "CC1(C)C(C=C(Cl)Cl)C1C(=O)OCc1cccc(Oc2ccccc2)c1",
+  "inchikey": "RLLPVAHGXHCWKJ-UHFFFAOYSA-N",
+  "primary_target": "Voltage-Gated Sodium Channels (Para)",
+  "action_mode": "Slow Inactivation / Repetitive Spiking",
+  "pubchem_cid": 40326,
+  "chembl_id": "CHEMBL116674",
+  "bioassay_target": "Sodium channel protein para",
+  "affinity_type": "EC50",
+  "affinity_val_nm": 85.0,
+  "gains": {
+    "ach": 1.5,
+    "glu": 1.5,
+    "gaba": -0.7,
+    "dop": 0.4,
+    "ser": 0.2,
+    "oct": 0.5
+  }
+}
