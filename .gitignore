@@ -1,5 +1,8 @@
 .venv/
 __pycache__/
 *.pyc
-data/proofread_connections_783.feather
-data/*.zip
+data/
+*.blend
+*.blend1
+*.png
+flygym/
