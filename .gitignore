@@ -1,0 +1,5 @@
+.venv/
+__pycache__/
+*.pyc
+data/proofread_connections_783.feather
+data/*.zip
