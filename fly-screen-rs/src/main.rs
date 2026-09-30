@@ -1,0 +1,648 @@
+use duckdb::{Connection, params};
+use serde::Serialize;
+use sha2::{Digest, Sha256};
+use std::env;
+use std::fs::{self, File};
+use std::io::{self, Read, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+const MAX_CONDITIONS: usize = 50;
+const GAINS_PER_CONDITION: usize = 8;
+const DEFAULT_STEPS: u32 = 100;
+
+#[derive(Debug, Clone, Serialize)]
+struct Condition {
+    condition_id: String,
+    compound_id: String,
+    name: String,
+    dose_level: String,
+    dose_nm: f64,
+    gains: [f32; GAINS_PER_CONDITION],
+}
+
+#[derive(Serialize)]
+struct InputHash {
+    path: String,
+    size_bytes: u64,
+    sha256: String,
+}
+
+#[derive(Serialize)]
+struct ResultRow {
+    condition_id: String,
+    compound_id: String,
+    name: String,
+    dose_level: String,
+    dose_nm: f64,
+    steps: u32,
+    mean_active: f64,
+    active_pct: f64,
+    mean_descending: f64,
+    descending_pct: f64,
+    synchrony: f64,
+}
+
+#[derive(Serialize)]
+struct Receipt {
+    schema_version: u32,
+    run_id: String,
+    created_unix_seconds: u64,
+    conditions: usize,
+    steps: u32,
+    condition_manifest: Vec<Condition>,
+    engine: String,
+    engine_sha256: String,
+    driver_sha256: String,
+    engine_reported_wall_ms: f64,
+    gpujob_wall_ms: f64,
+    host_wall_ms: f64,
+    peak_rss_bytes: Option<u64>,
+    compact_readback_bytes: usize,
+    input_hashes: Vec<InputHash>,
+    manifest_sha256: String,
+    results_sha256: String,
+    worker_stdout_sha256: String,
+    results: Vec<ResultRow>,
+}
+
+fn fail<T>(message: impl Into<String>) -> Result<T, String> {
+    Err(message.into())
+}
+
+fn sha256_file(path: &Path) -> io::Result<InputHash> {
+    let mut file = File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 1024 * 1024];
+    let mut size = 0_u64;
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        size += read as u64;
+        hasher.update(&buffer[..read]);
+    }
+    Ok(InputHash {
+        path: path.display().to_string(),
+        size_bytes: size,
+        sha256: format!("{:x}", hasher.finalize()),
+    })
+}
+
+fn resolve_channel(target: &str) -> Option<usize> {
+    let target = target.to_lowercase();
+    // Preserve biophysical_kinetics.py target-map insertion order.
+    const TARGETS: [(&str, usize); 29] = [
+        ("rdl", 2),
+        ("gaba_a", 2),
+        ("gaba_b", 2),
+        ("gaba receptor", 2),
+        ("gaba-a", 2),
+        ("chloride channel", 2),
+        ("nachr", 0),
+        ("machr", 0),
+        ("ache", 0),
+        ("acetylcholinesterase", 0),
+        ("nicotinic", 0),
+        ("muscarinic", 0),
+        ("glucl", 1),
+        ("mglur", 1),
+        ("nmdar", 1),
+        ("ampar", 1),
+        ("vglut", 1),
+        ("dop1r", 3),
+        ("dop2r", 3),
+        ("dat", 3),
+        ("dopamine receptor", 3),
+        ("5-ht1", 4),
+        ("5-ht2", 4),
+        ("sert", 4),
+        ("5-ht", 4),
+        ("serotonin receptor", 4),
+        ("oamb", 5),
+        ("octr", 5),
+        ("octopamine receptor", 5),
+    ];
+    // Python also checks octbeta last.
+    TARGETS
+        .iter()
+        .find_map(|(needle, channel)| target.contains(needle).then_some(*channel))
+        .or_else(|| target.contains("octbeta").then_some(5))
+}
+
+fn gain_for(action: &str, dose_nm: f64, affinity_nm: f64) -> f64 {
+    if dose_nm <= 0.0 || affinity_nm <= 0.0 || !dose_nm.is_finite() || !affinity_nm.is_finite() {
+        return 1.0;
+    }
+    let ratio = dose_nm / affinity_nm; // Hill coefficient is 1 in the oracle.
+    let mode = action.to_lowercase();
+    if mode.contains("antagonist") || mode.contains("blocker") || mode.contains("channel_blocker") {
+        (1.0 / (1.0 + ratio)).clamp(0.0, 1.0)
+    } else if mode.contains("agonist")
+        || mode.contains("inhibitor")
+        || mode.contains("ache")
+        || mode.contains("nerve_agent")
+    {
+        1.0 + (2.0 * ratio) / (1.0 + ratio)
+    } else if mode.contains("positive_allosteric_modulator") || mode.contains("pam") {
+        1.0 + (1.6 * ratio) / (1.0 + ratio)
+    } else {
+        1.0
+    }
+}
+
+fn build_conditions(registry: &Path, target_count: usize) -> Result<Vec<Condition>, String> {
+    let connection = Connection::open_in_memory().map_err(|e| format!("open DuckDB: {e}"))?;
+    let path = registry.to_string_lossy().replace('\'', "''");
+    let sql = format!(
+        "SELECT compound_id, name, primary_target, bioassay_target, action_mode, affinity_val_nm \
+         FROM read_parquet('{path}') ORDER BY name"
+    );
+    let mut statement = connection
+        .prepare(&sql)
+        .map_err(|e| format!("prepare catalog query: {e}"))?;
+    let mut rows = statement
+        .query([])
+        .map_err(|e| format!("query catalog: {e}"))?;
+    let mut conditions = Vec::with_capacity(target_count);
+    for (i, name) in ["Water", "Saline", "D-Glucose"].iter().enumerate() {
+        if conditions.len() >= target_count {
+            break;
+        }
+        conditions.push(Condition {
+            condition_id: format!("control-{i:02}"),
+            compound_id: (*name).into(),
+            name: format!("{name} (Control)"),
+            dose_level: "Control (0 nM)".into(),
+            dose_nm: 0.0,
+            gains: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0],
+        });
+    }
+    let doses = [
+        (0.2, "Low (0.2x Ki)"),
+        (1.0, "Standard (1.0x Ki)"),
+        (5.0, "High (5.0x Ki)"),
+    ];
+    while let Some(row) = rows.next().map_err(|e| format!("read catalog row: {e}"))? {
+        let compound_id: Option<String> = row.get(0).map_err(|e| format!("compound_id: {e}"))?;
+        let name: Option<String> = row.get(1).map_err(|e| format!("name: {e}"))?;
+        let primary: Option<String> = row.get(2).map_err(|e| format!("primary_target: {e}"))?;
+        let bioassay: Option<String> = row.get(3).map_err(|e| format!("bioassay_target: {e}"))?;
+        let action: Option<String> = row.get(4).map_err(|e| format!("action_mode: {e}"))?;
+        let affinity: Option<f64> = row.get(5).map_err(|e| format!("affinity_val_nm: {e}"))?;
+        let Some(affinity) = affinity.filter(|value| value.is_finite() && *value > 0.0) else {
+            continue;
+        };
+        let Some(name) = name else { continue };
+        let compound_id = compound_id.unwrap_or_else(|| name.clone());
+        let target = primary.filter(|s| !s.is_empty()).or(bioassay);
+        let action = action.unwrap_or_else(|| "antagonist".into());
+        for (multiplier, label) in doses {
+            if conditions.len() >= target_count {
+                break;
+            }
+            let dose_nm = affinity * multiplier;
+            let mut gains = [1.0_f32; GAINS_PER_CONDITION];
+            gains[7] = 0.0;
+            if let Some(channel) = target.as_deref().and_then(resolve_channel) {
+                let oracle_gain = gain_for(&action, dose_nm, affinity);
+                gains[channel + 1] = ((oracle_gain * 10_000.0).round() / 10_000.0) as f32;
+            }
+            conditions.push(Condition {
+                condition_id: format!("{}-{label}", compound_id),
+                compound_id: compound_id.clone(),
+                name: format!("{name} [{label}]"),
+                dose_level: label.into(),
+                dose_nm,
+                gains,
+            });
+        }
+        if conditions.len() >= MAX_CONDITIONS {
+            break;
+        }
+    }
+    Ok(conditions)
+}
+
+fn write_binary_manifest(path: &Path, conditions: &[Condition], steps: u32) -> io::Result<()> {
+    let mut file = File::create(path)?;
+    file.write_all(b"FLYBAT01")?;
+    file.write_all(&(conditions.len() as u32).to_le_bytes())?;
+    file.write_all(&steps.to_le_bytes())?;
+    file.write_all(&(GAINS_PER_CONDITION as u32).to_le_bytes())?;
+    for condition in conditions {
+        for gain in condition.gains {
+            file.write_all(&gain.to_le_bytes())?;
+        }
+    }
+    file.sync_all()
+}
+
+fn parse_output(
+    output: &str,
+    conditions: &[Condition],
+    steps: u32,
+) -> Result<(f64, usize, Vec<ResultRow>), String> {
+    let mut wall_ms = None;
+    let mut count = None;
+    let mut reported_conditions = None;
+    let mut reported_steps = None;
+    let mut version = None;
+    let mut rows = Vec::with_capacity(conditions.len());
+    let mut current: Option<usize> = None;
+    let mut metrics = [0.0_f64; 5];
+    let mut seen = vec![false; conditions.len()];
+    let mut complete = false;
+    for line in output.lines() {
+        if line.trim() == "FLY_BATCH_COMPLETE=1" {
+            complete = true;
+        }
+        if let Some(value) = line.strip_prefix("FLY_BATCH_RESULT_VERSION=") {
+            version = value.trim().parse::<u32>().ok();
+        }
+        if let Some(value) = line.strip_prefix("FLY_BATCH_RESULT_CONDITIONS= ") {
+            reported_conditions = value.trim().parse::<usize>().ok();
+        }
+        if let Some(value) = line.strip_prefix("FLY_BATCH_RESULT_STEPS= ") {
+            reported_steps = value.trim().parse::<u32>().ok();
+        }
+        if let Some(value) = line.strip_prefix("FLY_BATCH_RESULT_WALL_MS= ") {
+            wall_ms = value.trim().parse().ok();
+        }
+        if let Some(value) = line.strip_prefix("FLY_BATCH_RESULT_STEP_COUNT_READBACK_BYTES= ") {
+            count = value.trim().parse().ok();
+        }
+        if let Some(value) = line.strip_prefix("FLY_CONDITION_BEGIN= ") {
+            let i = value
+                .trim()
+                .parse::<usize>()
+                .map_err(|_| "worker emitted an invalid condition index")?;
+            if i >= conditions.len() || seen[i] || current.is_some() {
+                return fail(format!(
+                    "worker emitted duplicate or invalid condition index {i}"
+                ));
+            }
+            current = Some(i);
+            metrics = [0.0; 5];
+        }
+        if let Some(i) = current {
+            for (key, slot) in [
+                ("PHARMA_RESULT_MEAN_ACTIVE= ", 0),
+                ("PHARMA_RESULT_ACTIVE_PCT= ", 1),
+                ("PHARMA_RESULT_MEAN_DN= ", 2),
+                ("PHARMA_RESULT_DN_PCT= ", 3),
+                ("PHARMA_RESULT_SYNCHRONY= ", 4),
+            ] {
+                if let Some(value) = line.strip_prefix(key) {
+                    metrics[slot] = value.trim().parse().unwrap_or(f64::NAN);
+                }
+            }
+            if line.starts_with("FLY_CONDITION_END= ") {
+                if !metrics.iter().all(|value| value.is_finite()) {
+                    return fail(format!("worker condition {i} omitted finite metrics"));
+                }
+                let c = conditions
+                    .get(i)
+                    .ok_or_else(|| format!("worker returned unknown condition index {i}"))?;
+                rows.push(ResultRow {
+                    condition_id: c.condition_id.clone(),
+                    compound_id: c.compound_id.clone(),
+                    name: c.name.clone(),
+                    dose_level: c.dose_level.clone(),
+                    dose_nm: c.dose_nm,
+                    steps,
+                    mean_active: metrics[0],
+                    active_pct: metrics[1],
+                    mean_descending: metrics[2],
+                    descending_pct: metrics[3],
+                    synchrony: metrics[4],
+                });
+                seen[i] = true;
+                current = None;
+            }
+        }
+    }
+    if !complete {
+        return fail("worker omitted FLY_BATCH_COMPLETE marker");
+    }
+    if version != Some(1)
+        || reported_conditions != Some(conditions.len())
+        || reported_steps != Some(steps)
+    {
+        return fail("worker version, condition count, or step count did not match the manifest");
+    }
+    if rows.len() != conditions.len() || seen.iter().any(|value| !value) {
+        return fail(format!(
+            "worker returned {} of {} condition rows",
+            rows.len(),
+            conditions.len()
+        ));
+    }
+    if rows.iter().any(|r| {
+        !r.mean_active.is_finite() || !r.mean_descending.is_finite() || !r.synchrony.is_finite()
+    }) {
+        return fail("worker emitted missing or non-finite metrics");
+    }
+    Ok((
+        wall_ms.ok_or("worker omitted batch wall time")?,
+        count.ok_or("worker omitted readback size")?,
+        rows,
+    ))
+}
+
+fn sql_quote(value: &str) -> String {
+    value.replace('\'', "''")
+}
+
+fn peak_rss_bytes() -> Option<u64> {
+    let status = fs::read_to_string("/proc/self/status").ok()?;
+    let kib = status.lines().find_map(|line| {
+        line.strip_prefix("VmHWM:")?
+            .split_whitespace()
+            .next()?
+            .parse::<u64>()
+            .ok()
+    })?;
+    Some(kib * 1024)
+}
+
+fn write_parquet(path: &Path, rows: &[ResultRow]) -> Result<(), String> {
+    let connection =
+        Connection::open_in_memory().map_err(|e| format!("open result DuckDB: {e}"))?;
+    connection.execute_batch("CREATE TABLE results(condition_id VARCHAR, compound_id VARCHAR, name VARCHAR, dose_level VARCHAR, dose_nm DOUBLE, steps UINTEGER, mean_active DOUBLE, active_pct DOUBLE, mean_descending DOUBLE, descending_pct DOUBLE, synchrony DOUBLE);").map_err(|e| format!("create results table: {e}"))?;
+    let mut insert = connection
+        .prepare("INSERT INTO results VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+        .map_err(|e| format!("prepare results insert: {e}"))?;
+    for r in rows {
+        insert
+            .execute(params![
+                r.condition_id,
+                r.compound_id,
+                r.name,
+                r.dose_level,
+                r.dose_nm,
+                r.steps,
+                r.mean_active,
+                r.active_pct,
+                r.mean_descending,
+                r.descending_pct,
+                r.synchrony
+            ])
+            .map_err(|e| format!("insert result: {e}"))?;
+    }
+    let dest = sql_quote(&path.to_string_lossy());
+    connection
+        .execute_batch(&format!(
+            "COPY results TO '{dest}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+        ))
+        .map_err(|e| format!("write Parquet: {e}"))
+}
+
+fn run() -> Result<(), String> {
+    let host_started = Instant::now();
+    let project = PathBuf::from(
+        env::var("FLY_CONNECTOME_DIR")
+            .unwrap_or_else(|_| "/home/<user>/Projects/science/fly-connectome".into()),
+    );
+    let engine_dir = PathBuf::from(
+        env::var("FLY_SPMV_DIR").unwrap_or_else(|_| "/home/<user>/Projects/mojo/fly-spmv".into()),
+    );
+    let engine = PathBuf::from(
+        env::var("FLY_GPU_ENGINE")
+            .unwrap_or_else(|_| engine_dir.join(".work/fly_batch_gpu").display().to_string()),
+    );
+    let registry = project.join("compounds/registry.parquet");
+    let data_dir = PathBuf::from(
+        env::var("FLY_DATA_DIR").unwrap_or_else(|_| project.join("data").display().to_string()),
+    );
+    let steps: u32 = env::var("FLY_STEPS")
+        .ok()
+        .map(|v| v.parse())
+        .transpose()
+        .map_err(|e| format!("invalid FLY_STEPS: {e}"))?
+        .unwrap_or(DEFAULT_STEPS);
+    if !(1..=128).contains(&steps) {
+        return fail("FLY_STEPS must be in [1,128]");
+    }
+    let target_count: usize = env::var("FLY_CONDITIONS")
+        .ok()
+        .map(|v| v.parse())
+        .transpose()
+        .map_err(|e| format!("invalid FLY_CONDITIONS: {e}"))?
+        .unwrap_or(MAX_CONDITIONS);
+    if !(1..=MAX_CONDITIONS).contains(&target_count) {
+        return fail("FLY_CONDITIONS must be in [1,50]");
+    }
+    let since_epoch = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| e.to_string())?;
+    let now = since_epoch.as_secs();
+    let run_id = format!("{}-{}", std::process::id(), since_epoch.as_nanos());
+    let out_dir = project.join(".work/runs").join(&run_id);
+    fs::create_dir_all(&out_dir).map_err(|e| format!("create run directory: {e}"))?;
+    let manifest_path = out_dir.join("manifest.bin");
+    let conditions = build_conditions(&registry, target_count)?;
+    let manifest_tmp = out_dir.join("manifest.bin.tmp");
+    write_binary_manifest(&manifest_tmp, &conditions, steps)
+        .map_err(|e| format!("write batch manifest: {e}"))?;
+    fs::rename(&manifest_tmp, &manifest_path)
+        .map_err(|e| format!("publish batch manifest: {e}"))?;
+
+    let mut input_hashes = Vec::new();
+    for path in [
+        registry.clone(),
+        data_dir.join("row_ptr.bin"),
+        data_dir.join("col_idx.bin"),
+        data_dir.join("weights.bin"),
+        data_dir.join("neuron_nt_types.bin"),
+        data_dir.join("descending_indices.bin"),
+    ] {
+        input_hashes.push(sha256_file(&path).map_err(|e| format!("hash {}: {e}", path.display()))?);
+    }
+    let engine_hash = sha256_file(&engine)
+        .map_err(|e| format!("hash engine {}: {e}", engine.display()))?
+        .sha256;
+    let driver_path = env::current_exe().map_err(|e| format!("locate fly-screen binary: {e}"))?;
+    let driver_hash = sha256_file(&driver_path)
+        .map_err(|e| format!("hash driver {}: {e}", driver_path.display()))?
+        .sha256;
+    let manifest_hash = sha256_file(&manifest_path)
+        .map_err(|e| format!("hash manifest: {e}"))?
+        .sha256;
+
+    if env::var("FLY_DRY_ONLY").as_deref() == Ok("1") {
+        let status = Command::new(&engine)
+            .arg(&manifest_path)
+            .env("GPU_DRY", "1")
+            .env("FLY_DATA_DIR", &data_dir)
+            .status()
+            .map_err(|e| format!("launch CPU preflight: {e}"))?;
+        if !status.success() {
+            return fail(format!("CPU preflight failed with {status}"));
+        }
+        println!("FLY_SCREEN_PREFLIGHT_PASS=1");
+        println!("FLY_SCREEN_PREFLIGHT_CONDITIONS={}", conditions.len());
+        println!("FLY_SCREEN_PREFLIGHT_STEPS={steps}");
+        return Ok(());
+    }
+
+    let gpu_job = env::var("FLY_GPUJOB")
+        .unwrap_or_else(|_| "/home/<user>/Projects/gpu-media/Blender/kit/gpujob".into());
+    let worker_output_path = out_dir.join("worker.stdout");
+    let worker_command =
+        r#"env FLY_DATA_DIR="$4" "$1" "$2" >"$3" 2>&1; rc=$?; cat "$3"; exit "$rc""#;
+    let child = Command::new(gpu_job)
+        .arg(format!("fly-screen-{run_id}"))
+        .args(["--vram", "22", "--timeout", "180", "--"])
+        .arg("sh")
+        .arg("-c")
+        .arg(worker_command)
+        .arg("fly-screen-worker")
+        .arg(&engine)
+        .arg(&manifest_path)
+        .arg(&worker_output_path)
+        .arg(&data_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("launch GPU worker through kit/gpujob: {e}"))?;
+    let gpujob_started = Instant::now();
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("wait for GPU worker: {e}"))?;
+    let gpujob_wall_ms = gpujob_started.elapsed().as_secs_f64() * 1000.0;
+    if !output.status.success() {
+        return fail(format!(
+            "gpujob worker exited {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|e| format!("gpujob output was not UTF-8: {e}"))?;
+    let worker_stdout = fs::read_to_string(&worker_output_path)
+        .map_err(|e| format!("read worker output {}: {e}", worker_output_path.display()))?;
+    for expected in &input_hashes {
+        let observed = sha256_file(Path::new(&expected.path))
+            .map_err(|e| format!("re-hash {}: {e}", expected.path))?;
+        if observed.sha256 != expected.sha256 || observed.size_bytes != expected.size_bytes {
+            return fail(format!("input changed during run: {}", expected.path));
+        }
+    }
+    let (wall_ms, readback_bytes, rows) = parse_output(&worker_stdout, &conditions, steps)
+        .map_err(|e| format!("parse worker output: {e}; gpujob summary: {stdout}"))?;
+    let results_path = out_dir.join("results.parquet");
+    let results_tmp = out_dir.join("results.parquet.tmp");
+    write_parquet(&results_tmp, &rows)?;
+    fs::rename(&results_tmp, &results_path).map_err(|e| format!("publish Parquet results: {e}"))?;
+    let results_hash = sha256_file(&results_path)
+        .map_err(|e| format!("hash results: {e}"))?
+        .sha256;
+    let receipt = Receipt {
+        schema_version: 1,
+        run_id,
+        created_unix_seconds: now,
+        conditions: conditions.len(),
+        steps,
+        condition_manifest: conditions.clone(),
+        engine: engine.display().to_string(),
+        engine_sha256: engine_hash,
+        driver_sha256: driver_hash,
+        engine_reported_wall_ms: wall_ms,
+        gpujob_wall_ms,
+        host_wall_ms: host_started.elapsed().as_secs_f64() * 1000.0,
+        peak_rss_bytes: peak_rss_bytes(),
+        compact_readback_bytes: readback_bytes,
+        input_hashes,
+        manifest_sha256: manifest_hash,
+        results_sha256: results_hash,
+        worker_stdout_sha256: sha256_file(&worker_output_path)
+            .map_err(|e| format!("hash worker output: {e}"))?
+            .sha256,
+        results: rows,
+    };
+    let receipt_path = out_dir.join("receipt.json");
+    let receipt_bytes =
+        serde_json::to_vec_pretty(&receipt).map_err(|e| format!("serialize receipt: {e}"))?;
+    let receipt_tmp = out_dir.join("receipt.json.tmp");
+    fs::write(&receipt_tmp, receipt_bytes).map_err(|e| format!("write receipt: {e}"))?;
+    fs::rename(&receipt_tmp, &receipt_path).map_err(|e| format!("publish receipt: {e}"))?;
+    println!("FLY_SCREEN_RUN={}", receipt_path.display());
+    println!("FLY_SCREEN_RESULTS={}", results_path.display());
+    println!("FLY_SCREEN_CONDITIONS={}", conditions.len());
+    println!("FLY_SCREEN_STEPS={steps}");
+    println!("FLY_SCREEN_GPU_BATCH_MS={wall_ms:.3}");
+    println!("FLY_SCREEN_READBACK_BYTES={readback_bytes}");
+    Ok(())
+}
+
+fn main() {
+    if let Err(error) = run() {
+        eprintln!("fly-screen: {error}");
+        std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn target_resolution_matches_oracle_channel_order() {
+        assert_eq!(resolve_channel("Drosophila nAChR alpha"), Some(0));
+        assert_eq!(resolve_channel("GABA-A chloride channel"), Some(2));
+        assert_eq!(resolve_channel("octbeta receptor"), Some(5));
+        assert_eq!(resolve_channel("unmapped receptor"), None);
+    }
+
+    #[test]
+    fn hill_modes_match_oracle_values() {
+        assert!((gain_for("antagonist", 20.0, 100.0) - (1.0 / 1.2)).abs() < 1e-12);
+        assert_eq!(gain_for("agonist", 100.0, 100.0), 2.0);
+        assert_eq!(gain_for("enzyme inhibitor", 100.0, 100.0), 2.0);
+        assert_eq!(gain_for("PAM", 100.0, 100.0), 1.8);
+        assert_eq!(gain_for("unknown", 100.0, 100.0), 1.0);
+        assert_eq!(gain_for("agonist", 0.0, 100.0), 1.0);
+    }
+
+    #[test]
+    fn binary_manifest_has_versioned_little_endian_header() {
+        let path = env::temp_dir().join(format!("flybat-test-{}.bin", std::process::id()));
+        let condition = Condition {
+            condition_id: "test".into(),
+            compound_id: "test".into(),
+            name: "test".into(),
+            dose_level: "control".into(),
+            dose_nm: 0.0,
+            gains: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0],
+        };
+        write_binary_manifest(&path, &[condition], 7).unwrap();
+        let bytes = fs::read(&path).unwrap();
+        assert_eq!(&bytes[..8], b"FLYBAT01");
+        assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 1);
+        assert_eq!(u32::from_le_bytes(bytes[12..16].try_into().unwrap()), 7);
+        assert_eq!(u32::from_le_bytes(bytes[16..20].try_into().unwrap()), 8);
+        assert_eq!(bytes.len(), 20 + 8 * 4);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn parser_rejects_missing_rows_and_accepts_complete_batch() {
+        let condition = Condition {
+            condition_id: "c0".into(),
+            compound_id: "cmp".into(),
+            name: "sample".into(),
+            dose_level: "control".into(),
+            dose_nm: 0.0,
+            gains: [1.0; 8],
+        };
+        let output = "FLY_BATCH_RESULT_VERSION=1\nFLY_BATCH_RESULT_CONDITIONS= 1\nFLY_BATCH_RESULT_STEPS= 1\nFLY_BATCH_RESULT_WALL_MS= 2.5\nFLY_BATCH_RESULT_STEP_COUNT_READBACK_BYTES= 8\nFLY_CONDITION_BEGIN= 0\nPHARMA_RESULT_MEAN_ACTIVE= 2\nPHARMA_RESULT_ACTIVE_PCT= 0.1\nPHARMA_RESULT_MEAN_DN= 1\nPHARMA_RESULT_DN_PCT= 0.2\nPHARMA_RESULT_SYNCHRONY= 0.3\nFLY_CONDITION_END= 0\nFLY_BATCH_COMPLETE=1\n";
+        let parsed = parse_output(output, &[condition.clone()], 1).unwrap();
+        assert_eq!(parsed.0, 2.5);
+        assert_eq!(parsed.1, 8);
+        assert_eq!(parsed.2[0].mean_active, 2.0);
+        assert!(parse_output("", &[condition], 1).is_err());
+    }
+}
