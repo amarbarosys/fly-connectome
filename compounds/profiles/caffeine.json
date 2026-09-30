@@ -1,0 +1,21 @@
+{
+  "compound_id": "CMP-0014",
+  "slug": "caffeine",
+  "name": "Caffeine",
+  "category": "CNS Stimulant",
+  "cas_number": "58-08-2",
+  "formula": "C8H10N4O2",
+  "mw_g_mol": 194.194,
+  "canonical_smiles": "Cn1c(=O)c2c(ncn2C)n(C)c1=O",
+  "inchikey": "RYYVLZVUVIJVGH-UHFFFAOYSA-N",
+  "primary_target": "Adenosine Receptors / RyR",
+  "action_mode": "Antagonist / Arousal Enhancer",
+  "gains": {
+    "ach": 1.2,
+    "glu": 0.9,
+    "gaba": -0.9,
+    "dop": 0.5,
+    "ser": 0.2,
+    "oct": 1.2
+  }
+}

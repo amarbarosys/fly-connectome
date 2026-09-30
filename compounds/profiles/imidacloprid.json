@@ -1,0 +1,21 @@
+{
+  "compound_id": "CMP-0016",
+  "slug": "imidacloprid",
+  "name": "Imidacloprid",
+  "category": "Neonicotinoid Insecticide",
+  "cas_number": "138261-41-3",
+  "formula": "C9H10ClN5O2",
+  "mw_g_mol": 255.66499999999996,
+  "canonical_smiles": "O=[N+]([O-])N=C1NCCN1Cc1cccnc1Cl",
+  "inchikey": "JBDGDNPVKIDGBW-UHFFFAOYSA-N",
+  "primary_target": "Insect nAChR Subunits",
+  "action_mode": "Irreversible Super-Agonist",
+  "gains": {
+    "ach": 3.0,
+    "glu": 0.8,
+    "gaba": -1.0,
+    "dop": 0.2,
+    "ser": 0.1,
+    "oct": 0.3
+  }
+}

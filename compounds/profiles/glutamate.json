@@ -1,0 +1,21 @@
+{
+  "compound_id": "CMP-0003",
+  "slug": "glutamate",
+  "name": "L-Glutamic Acid",
+  "category": "Endogenous Neurotransmitter",
+  "cas_number": "56-86-0",
+  "formula": "C5H9NO4",
+  "mw_g_mol": 147.13,
+  "canonical_smiles": "NC(CCC(=O)O)C(=O)O",
+  "inchikey": "WHUUTDBJXJRKMK-UHFFFAOYSA-N",
+  "primary_target": "iGluR / GluClalpha",
+  "action_mode": "Endogenous Agonist",
+  "gains": {
+    "ach": 1.0,
+    "glu": 1.2,
+    "gaba": -1.0,
+    "dop": 0.2,
+    "ser": 0.1,
+    "oct": 0.3
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "compound_id": "CMP-0006",
+  "slug": "octopamine",
+  "name": "Octopamine",
+  "category": "Endogenous Neuromodulator",
+  "cas_number": "104-14-3",
+  "formula": "C8H11NO2",
+  "mw_g_mol": 153.181,
+  "canonical_smiles": "NCC(O)c1ccc(O)cc1",
+  "inchikey": "QHGUCRYDKWKLMG-UHFFFAOYSA-N",
+  "primary_target": "Oamb / Octbeta1R / Octbeta2R",
+  "action_mode": "Endogenous Agonist (Fight-or-Flight)",
+  "gains": {
+    "ach": 1.2,
+    "glu": 0.8,
+    "gaba": -0.8,
+    "dop": 0.5,
+    "ser": 0.1,
+    "oct": 3.0
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "compound_id": "CMP-0020",
+  "slug": "malathion",
+  "name": "Malathion",
+  "category": "Organophosphate Insecticide",
+  "cas_number": "121-75-5",
+  "formula": "C10H19O6PS2",
+  "mw_g_mol": 330.36400000000003,
+  "canonical_smiles": "CCOC(=O)CC(SP(=S)(OC)OC)C(=O)OCC",
+  "inchikey": "JXSJBGJIGXNWCI-UHFFFAOYSA-N",
+  "primary_target": "AChE (via Malaoxon bioactivation)",
+  "action_mode": "Phosphorylation",
+  "gains": {
+    "ach": 4.5,
+    "glu": 0.9,
+    "gaba": -1.0,
+    "dop": 0.2,
+    "ser": 0.1,
+    "oct": 0.3
+  }
+}

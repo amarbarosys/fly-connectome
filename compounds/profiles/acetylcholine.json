@@ -1,0 +1,21 @@
+{
+  "compound_id": "CMP-0001",
+  "slug": "acetylcholine",
+  "name": "Acetylcholine",
+  "category": "Endogenous Neurotransmitter",
+  "cas_number": "51-84-3",
+  "formula": "C7H16NO2+",
+  "mw_g_mol": 146.21,
+  "canonical_smiles": "CC(=O)OCC[N+](C)(C)C",
+  "inchikey": "OIPILFWXSMYKGL-UHFFFAOYSA-N",
+  "primary_target": "nAChR / mAChR",
+  "action_mode": "Endogenous Agonist",
+  "gains": {
+    "ach": 1.0,
+    "glu": 0.8,
+    "gaba": -1.0,
+    "dop": 0.2,
+    "ser": 0.1,
+    "oct": 0.3
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "compound_id": "CMP-0013",
+  "slug": "nicotine",
+  "name": "Nicotine",
+  "category": "Natural Alkaloid / Stimulant",
+  "cas_number": "54-11-5",
+  "formula": "C10H14N2",
+  "mw_g_mol": 162.236,
+  "canonical_smiles": "CN1CCCC1c1cccnc1",
+  "inchikey": "SNICXCGAKADSCV-UHFFFAOYSA-N",
+  "primary_target": "Nicotinic AChR (nAChR)",
+  "action_mode": "Agonist (Desensitizing)",
+  "gains": {
+    "ach": 2.2,
+    "glu": 0.8,
+    "gaba": -1.0,
+    "dop": 0.8,
+    "ser": 0.1,
+    "oct": 0.5
+  }
+}

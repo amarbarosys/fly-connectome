@@ -1,0 +1,21 @@
+{
+  "compound_id": "CMP-0005",
+  "slug": "serotonin",
+  "name": "Serotonin (5-HT)",
+  "category": "Endogenous Neuromodulator",
+  "cas_number": "50-67-9",
+  "formula": "C10H12N2O",
+  "mw_g_mol": 176.21899999999994,
+  "canonical_smiles": "NCCc1c[nH]c2ccc(O)cc12",
+  "inchikey": "QZAYGJVTTNCVMB-UHFFFAOYSA-N",
+  "primary_target": "5-HT1A / 5-HT2A / 5-HT7",
+  "action_mode": "Endogenous Agonist (State Control)",
+  "gains": {
+    "ach": 1.0,
+    "glu": 0.8,
+    "gaba": -1.0,
+    "dop": 0.2,
+    "ser": 1.5,
+    "oct": 0.3
+  }
+}

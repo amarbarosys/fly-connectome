@@ -1,0 +1,21 @@
+{
+  "compound_id": "CMP-0012",
+  "slug": "bicuculline",
+  "name": "Bicuculline",
+  "category": "Convulsant Research Probe",
+  "cas_number": "485-49-4",
+  "formula": "C20H17NO6",
+  "mw_g_mol": 367.3570000000002,
+  "canonical_smiles": "CN1CCc2cc3c(cc2C1C1OC(=O)c2cc4c(cc21)OCO4)OCO3",
+  "inchikey": "GDFCROCCWCFYQI-UHFFFAOYSA-N",
+  "primary_target": "GABA-A Receptor",
+  "action_mode": "Competitive Antagonist",
+  "gains": {
+    "ach": 1.0,
+    "glu": 0.8,
+    "gaba": -0.1,
+    "dop": 0.2,
+    "ser": 0.1,
+    "oct": 0.3
+  }
+}

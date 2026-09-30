@@ -1,0 +1,21 @@
+{
+  "compound_id": "CMP-0011",
+  "slug": "picrotoxinin",
+  "name": "Picrotoxinin (PTX)",
+  "category": "Convulsant Research Probe",
+  "cas_number": "17617-45-7",
+  "formula": "C16H16O6",
+  "mw_g_mol": 304.29800000000006,
+  "canonical_smiles": "C=C(C)C1C2CC34OC5OC(=O)C6(C3C2OC(=O)C6(C)O)C514",
+  "inchikey": "JGASXAYVCDMHFM-UHFFFAOYSA-N",
+  "primary_target": "GABA-A (Rdl) Chloride Channel",
+  "action_mode": "Non-Competitive Channel Blocker",
+  "gains": {
+    "ach": 1.0,
+    "glu": 0.8,
+    "gaba": 0.0,
+    "dop": 0.2,
+    "ser": 0.1,
+    "oct": 0.3
+  }
+}

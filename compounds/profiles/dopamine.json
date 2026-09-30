@@ -1,0 +1,21 @@
+{
+  "compound_id": "CMP-0004",
+  "slug": "dopamine",
+  "name": "Dopamine",
+  "category": "Endogenous Neuromodulator",
+  "cas_number": "51-61-6",
+  "formula": "C8H11NO2",
+  "mw_g_mol": 153.181,
+  "canonical_smiles": "NCCc1ccc(O)c(O)c1",
+  "inchikey": "VYFYYTLLBUKUHU-UHFFFAOYSA-N",
+  "primary_target": "Dop1R1 / Dop1R2 / Dop2R",
+  "action_mode": "Endogenous Agonist (Arousal)",
+  "gains": {
+    "ach": 1.0,
+    "glu": 0.8,
+    "gaba": -1.0,
+    "dop": 1.5,
+    "ser": 0.1,
+    "oct": 0.3
+  }
+}

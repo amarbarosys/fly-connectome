@@ -1,0 +1,21 @@
+{
+  "compound_id": "CMP-0008",
+  "slug": "pralidoxime",
+  "name": "Pralidoxime (2-PAM)",
+  "category": "Medical Countermeasure",
+  "cas_number": "94-63-3",
+  "formula": "C7H9N2O+",
+  "mw_g_mol": 137.162,
+  "canonical_smiles": "C[n+]1ccccc1C=NO",
+  "inchikey": "JBKPUQTUERUYQE-UHFFFAOYSA-O",
+  "primary_target": "Acetylcholinesterase (AChE)",
+  "action_mode": "Enzymatic Oxime Reactivator",
+  "gains": {
+    "ach": 0.5,
+    "glu": 0.8,
+    "gaba": -1.0,
+    "dop": 0.2,
+    "ser": 0.1,
+    "oct": 0.3
+  }
+}

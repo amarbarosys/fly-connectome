@@ -1,0 +1,21 @@
+{
+  "compound_id": "CMP-0002",
+  "slug": "gaba",
+  "name": "Gamma-Aminobutyric Acid (GABA)",
+  "category": "Endogenous Neurotransmitter",
+  "cas_number": "56-12-2",
+  "formula": "C4H9NO2",
+  "mw_g_mol": 103.12100000000001,
+  "canonical_smiles": "NCCCC(=O)O",
+  "inchikey": "BTCSSZJGUNDROE-UHFFFAOYSA-N",
+  "primary_target": "GABA-A (Rdl) / GABA-B",
+  "action_mode": "Endogenous Agonist (Inhibitory)",
+  "gains": {
+    "ach": 1.0,
+    "glu": 0.8,
+    "gaba": -1.5,
+    "dop": 0.2,
+    "ser": 0.1,
+    "oct": 0.3
+  }
+}

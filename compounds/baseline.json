@@ -1,8 +1,8 @@
 {
-  "name": "Physiological Baseline",
+  "name": "Neutral Signed-Connectome Control",
   "cas_number": "N/A",
-  "class": "Control / Unperturbed",
-  "description": "Natural resting physiological state with intact excitation-inhibition balance.",
+  "class": "Model Control / Unperturbed",
+  "description": "Unit transmitter gains on signed CSR weights; modeled initial stimulus, not an experimentally calibrated resting physiology.",
   "gains": {
     "ach": 1.0,
     "glu": 1.0,

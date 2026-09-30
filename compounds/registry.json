@@ -1,0 +1,422 @@
+[
+  {
+    "compound_id": "CMP-0001",
+    "slug": "acetylcholine",
+    "name": "Acetylcholine",
+    "category": "Endogenous Neurotransmitter",
+    "cas_number": "51-84-3",
+    "formula": "C7H16NO2+",
+    "mw_g_mol": 146.2100067138672,
+    "canonical_smiles": "CC(=O)OCC[N+](C)(C)C",
+    "inchikey": "OIPILFWXSMYKGL-UHFFFAOYSA-N",
+    "primary_target": "nAChR / mAChR",
+    "action_mode": "Endogenous Agonist",
+    "gains": {
+      "ach": 1.0,
+      "glu": 0.800000011920929,
+      "gaba": -1.0,
+      "dop": 0.20000000298023224,
+      "ser": 0.10000000149011612,
+      "oct": 0.30000001192092896
+    }
+  },
+  {
+    "compound_id": "CMP-0002",
+    "slug": "gaba",
+    "name": "Gamma-Aminobutyric Acid (GABA)",
+    "category": "Endogenous Neurotransmitter",
+    "cas_number": "56-12-2",
+    "formula": "C4H9NO2",
+    "mw_g_mol": 103.12100219726562,
+    "canonical_smiles": "NCCCC(=O)O",
+    "inchikey": "BTCSSZJGUNDROE-UHFFFAOYSA-N",
+    "primary_target": "GABA-A (Rdl) / GABA-B",
+    "action_mode": "Endogenous Agonist (Inhibitory)",
+    "gains": {
+      "ach": 1.0,
+      "glu": 0.800000011920929,
+      "gaba": -1.5,
+      "dop": 0.20000000298023224,
+      "ser": 0.10000000149011612,
+      "oct": 0.30000001192092896
+    }
+  },
+  {
+    "compound_id": "CMP-0003",
+    "slug": "glutamate",
+    "name": "L-Glutamic Acid",
+    "category": "Endogenous Neurotransmitter",
+    "cas_number": "56-86-0",
+    "formula": "C5H9NO4",
+    "mw_g_mol": 147.1300048828125,
+    "canonical_smiles": "NC(CCC(=O)O)C(=O)O",
+    "inchikey": "WHUUTDBJXJRKMK-UHFFFAOYSA-N",
+    "primary_target": "iGluR / GluClalpha",
+    "action_mode": "Endogenous Agonist",
+    "gains": {
+      "ach": 1.0,
+      "glu": 1.2000000476837158,
+      "gaba": -1.0,
+      "dop": 0.20000000298023224,
+      "ser": 0.10000000149011612,
+      "oct": 0.30000001192092896
+    }
+  },
+  {
+    "compound_id": "CMP-0004",
+    "slug": "dopamine",
+    "name": "Dopamine",
+    "category": "Endogenous Neuromodulator",
+    "cas_number": "51-61-6",
+    "formula": "C8H11NO2",
+    "mw_g_mol": 153.18099975585938,
+    "canonical_smiles": "NCCc1ccc(O)c(O)c1",
+    "inchikey": "VYFYYTLLBUKUHU-UHFFFAOYSA-N",
+    "primary_target": "Dop1R1 / Dop1R2 / Dop2R",
+    "action_mode": "Endogenous Agonist (Arousal)",
+    "gains": {
+      "ach": 1.0,
+      "glu": 0.800000011920929,
+      "gaba": -1.0,
+      "dop": 1.5,
+      "ser": 0.10000000149011612,
+      "oct": 0.30000001192092896
+    }
+  },
+  {
+    "compound_id": "CMP-0005",
+    "slug": "serotonin",
+    "name": "Serotonin (5-HT)",
+    "category": "Endogenous Neuromodulator",
+    "cas_number": "50-67-9",
+    "formula": "C10H12N2O",
+    "mw_g_mol": 176.218994140625,
+    "canonical_smiles": "NCCc1c[nH]c2ccc(O)cc12",
+    "inchikey": "QZAYGJVTTNCVMB-UHFFFAOYSA-N",
+    "primary_target": "5-HT1A / 5-HT2A / 5-HT7",
+    "action_mode": "Endogenous Agonist (State Control)",
+    "gains": {
+      "ach": 1.0,
+      "glu": 0.800000011920929,
+      "gaba": -1.0,
+      "dop": 0.20000000298023224,
+      "ser": 1.5,
+      "oct": 0.30000001192092896
+    }
+  },
+  {
+    "compound_id": "CMP-0006",
+    "slug": "octopamine",
+    "name": "Octopamine",
+    "category": "Endogenous Neuromodulator",
+    "cas_number": "104-14-3",
+    "formula": "C8H11NO2",
+    "mw_g_mol": 153.18099975585938,
+    "canonical_smiles": "NCC(O)c1ccc(O)cc1",
+    "inchikey": "QHGUCRYDKWKLMG-UHFFFAOYSA-N",
+    "primary_target": "Oamb / Octbeta1R / Octbeta2R",
+    "action_mode": "Endogenous Agonist (Fight-or-Flight)",
+    "gains": {
+      "ach": 1.2000000476837158,
+      "glu": 0.800000011920929,
+      "gaba": -0.800000011920929,
+      "dop": 0.5,
+      "ser": 0.10000000149011612,
+      "oct": 3.0
+    }
+  },
+  {
+    "compound_id": "CMP-0007",
+    "slug": "atropine",
+    "name": "Atropine",
+    "category": "Medical Countermeasure",
+    "cas_number": "51-55-8",
+    "formula": "C17H23NO3",
+    "mw_g_mol": 289.375,
+    "canonical_smiles": "CN1C2CCC1CC(OC(=O)C(CO)c1ccccc1)C2",
+    "inchikey": "RKUNBYITZUJHSG-UHFFFAOYSA-N",
+    "primary_target": "Muscarinic / Cholinergic Receptors",
+    "action_mode": "Competitive Antagonist",
+    "gains": {
+      "ach": 0.30000001192092896,
+      "glu": 0.800000011920929,
+      "gaba": -1.0,
+      "dop": 0.20000000298023224,
+      "ser": 0.10000000149011612,
+      "oct": 0.30000001192092896
+    }
+  },
+  {
+    "compound_id": "CMP-0008",
+    "slug": "pralidoxime",
+    "name": "Pralidoxime (2-PAM)",
+    "category": "Medical Countermeasure",
+    "cas_number": "94-63-3",
+    "formula": "C7H9N2O+",
+    "mw_g_mol": 137.16200256347656,
+    "canonical_smiles": "C[n+]1ccccc1C=NO",
+    "inchikey": "JBKPUQTUERUYQE-UHFFFAOYSA-O",
+    "primary_target": "Acetylcholinesterase (AChE)",
+    "action_mode": "Enzymatic Oxime Reactivator",
+    "gains": {
+      "ach": 0.5,
+      "glu": 0.800000011920929,
+      "gaba": -1.0,
+      "dop": 0.20000000298023224,
+      "ser": 0.10000000149011612,
+      "oct": 0.30000001192092896
+    }
+  },
+  {
+    "compound_id": "CMP-0009",
+    "slug": "diazepam",
+    "name": "Diazepam",
+    "category": "Anticonvulsant / Sedative",
+    "cas_number": "439-14-5",
+    "formula": "C16H13ClN2O",
+    "mw_g_mol": 284.7460021972656,
+    "canonical_smiles": "CN1C(=O)CN=C(c2ccccc2)c2cc(Cl)ccc21",
+    "inchikey": "AAOVKJBEBIDNHE-UHFFFAOYSA-N",
+    "primary_target": "GABA-A Receptor Complex",
+    "action_mode": "Positive Allosteric Modulator (PAM)",
+    "gains": {
+      "ach": 0.800000011920929,
+      "glu": 0.699999988079071,
+      "gaba": -2.5,
+      "dop": 0.10000000149011612,
+      "ser": 0.20000000298023224,
+      "oct": 0.10000000149011612
+    }
+  },
+  {
+    "compound_id": "CMP-0010",
+    "slug": "midazolam",
+    "name": "Midazolam",
+    "category": "Anticonvulsant / Sedative",
+    "cas_number": "59467-70-8",
+    "formula": "C18H13ClFN3",
+    "mw_g_mol": 325.77398681640625,
+    "canonical_smiles": "Cc1ncc2n1-c1ccc(Cl)cc1C(=Nc1ccccc1F)C2",
+    "inchikey": "YFFVIKYBXUOIGK-UHFFFAOYSA-N",
+    "primary_target": "GABA-A Receptor Complex",
+    "action_mode": "High-Affinity GABA-A PAM",
+    "gains": {
+      "ach": 0.800000011920929,
+      "glu": 0.6000000238418579,
+      "gaba": -3.0,
+      "dop": 0.10000000149011612,
+      "ser": 0.20000000298023224,
+      "oct": 0.10000000149011612
+    }
+  },
+  {
+    "compound_id": "CMP-0011",
+    "slug": "picrotoxinin",
+    "name": "Picrotoxinin (PTX)",
+    "category": "Convulsant Research Probe",
+    "cas_number": "17617-45-7",
+    "formula": "C16H16O6",
+    "mw_g_mol": 304.2980041503906,
+    "canonical_smiles": "C=C(C)C1C2CC34OC5OC(=O)C6(C3C2OC(=O)C6(C)O)C514",
+    "inchikey": "JGASXAYVCDMHFM-UHFFFAOYSA-N",
+    "primary_target": "GABA-A (Rdl) Chloride Channel",
+    "action_mode": "Non-Competitive Channel Blocker",
+    "gains": {
+      "ach": 1.0,
+      "glu": 0.800000011920929,
+      "gaba": 0.0,
+      "dop": 0.20000000298023224,
+      "ser": 0.10000000149011612,
+      "oct": 0.30000001192092896
+    }
+  },
+  {
+    "compound_id": "CMP-0012",
+    "slug": "bicuculline",
+    "name": "Bicuculline",
+    "category": "Convulsant Research Probe",
+    "cas_number": "485-49-4",
+    "formula": "C20H17NO6",
+    "mw_g_mol": 367.35699462890625,
+    "canonical_smiles": "CN1CCc2cc3c(cc2C1C1OC(=O)c2cc4c(cc21)OCO4)OCO3",
+    "inchikey": "GDFCROCCWCFYQI-UHFFFAOYSA-N",
+    "primary_target": "GABA-A Receptor",
+    "action_mode": "Competitive Antagonist",
+    "gains": {
+      "ach": 1.0,
+      "glu": 0.800000011920929,
+      "gaba": -0.10000000149011612,
+      "dop": 0.20000000298023224,
+      "ser": 0.10000000149011612,
+      "oct": 0.30000001192092896
+    }
+  },
+  {
+    "compound_id": "CMP-0013",
+    "slug": "nicotine",
+    "name": "Nicotine",
+    "category": "Natural Alkaloid / Stimulant",
+    "cas_number": "54-11-5",
+    "formula": "C10H14N2",
+    "mw_g_mol": 162.23599243164062,
+    "canonical_smiles": "CN1CCCC1c1cccnc1",
+    "inchikey": "SNICXCGAKADSCV-UHFFFAOYSA-N",
+    "primary_target": "Nicotinic AChR (nAChR)",
+    "action_mode": "Agonist (Desensitizing)",
+    "gains": {
+      "ach": 2.200000047683716,
+      "glu": 0.800000011920929,
+      "gaba": -1.0,
+      "dop": 0.800000011920929,
+      "ser": 0.10000000149011612,
+      "oct": 0.5
+    }
+  },
+  {
+    "compound_id": "CMP-0014",
+    "slug": "caffeine",
+    "name": "Caffeine",
+    "category": "CNS Stimulant",
+    "cas_number": "58-08-2",
+    "formula": "C8H10N4O2",
+    "mw_g_mol": 194.19400024414062,
+    "canonical_smiles": "Cn1c(=O)c2c(ncn2C)n(C)c1=O",
+    "inchikey": "RYYVLZVUVIJVGH-UHFFFAOYSA-N",
+    "primary_target": "Adenosine Receptors / RyR",
+    "action_mode": "Antagonist / Arousal Enhancer",
+    "gains": {
+      "ach": 1.2000000476837158,
+      "glu": 0.8999999761581421,
+      "gaba": -0.8999999761581421,
+      "dop": 0.5,
+      "ser": 0.20000000298023224,
+      "oct": 1.2000000476837158
+    }
+  },
+  {
+    "compound_id": "CMP-0015",
+    "slug": "ivermectin",
+    "name": "Ivermectin (B1a)",
+    "category": "Antiparasitic / Insecticide",
+    "cas_number": "70288-86-7",
+    "formula": "C48H74O14",
+    "mw_g_mol": 875.1060180664062,
+    "canonical_smiles": "CCC(C)C1CC(C)CC2(CC3CC(CC=C(C)C(OC4CC(OC)C(OC5CC(OC)C(O)C(C)O5)C(C)O4)C(C)C=CC=C4COC5C(O)C(C)=CC(C(=O)O3)C45O)O2)O1",
+    "inchikey": "DVJNPTCJUKBSDN-UHFFFAOYSA-N",
+    "primary_target": "GluClalpha (Chloride Channel)",
+    "action_mode": "Allosteric Irreversible Activator",
+    "gains": {
+      "ach": 0.30000001192092896,
+      "glu": -3.0,
+      "gaba": -1.0,
+      "dop": 0.20000000298023224,
+      "ser": 0.10000000149011612,
+      "oct": 0.10000000149011612
+    }
+  },
+  {
+    "compound_id": "CMP-0016",
+    "slug": "imidacloprid",
+    "name": "Imidacloprid",
+    "category": "Neonicotinoid Insecticide",
+    "cas_number": "138261-41-3",
+    "formula": "C9H10ClN5O2",
+    "mw_g_mol": 255.6649932861328,
+    "canonical_smiles": "O=[N+]([O-])N=C1NCCN1Cc1cccnc1Cl",
+    "inchikey": "JBDGDNPVKIDGBW-UHFFFAOYSA-N",
+    "primary_target": "Insect nAChR Subunits",
+    "action_mode": "Irreversible Super-Agonist",
+    "gains": {
+      "ach": 3.0,
+      "glu": 0.800000011920929,
+      "gaba": -1.0,
+      "dop": 0.20000000298023224,
+      "ser": 0.10000000149011612,
+      "oct": 0.30000001192092896
+    }
+  },
+  {
+    "compound_id": "CMP-0017",
+    "slug": "amitraz",
+    "name": "Amitraz",
+    "category": "Formamidine Acaricide",
+    "cas_number": "33089-61-1",
+    "formula": "C19H23N3",
+    "mw_g_mol": 293.41400146484375,
+    "canonical_smiles": "Cc1ccc(N=CN(C)C=Nc2ccc(C)c(C)c2)c(C)c1",
+    "inchikey": "NGONOHBYRKINSO-UHFFFAOYSA-N",
+    "primary_target": "Octopaminergic Oamb Receptor",
+    "action_mode": "Agonist (Tremor Inducer)",
+    "gains": {
+      "ach": 1.2000000476837158,
+      "glu": 0.800000011920929,
+      "gaba": -0.800000011920929,
+      "dop": 0.5,
+      "ser": 0.10000000149011612,
+      "oct": 4.5
+    }
+  },
+  {
+    "compound_id": "CMP-0018",
+    "slug": "paraoxon",
+    "name": "Paraoxon-Ethyl",
+    "category": "Organophosphate Probe",
+    "cas_number": "311-45-5",
+    "formula": "C10H14NO6P",
+    "mw_g_mol": 275.1969909667969,
+    "canonical_smiles": "CCOP(=O)(OCC)Oc1ccc([N+](=O)[O-])cc1",
+    "inchikey": "WYMSBXTXOHUIGT-UHFFFAOYSA-N",
+    "primary_target": "Acetylcholinesterase (AChE)",
+    "action_mode": "Irreversible Phosphorylation",
+    "gains": {
+      "ach": 6.0,
+      "glu": 1.0,
+      "gaba": -1.0,
+      "dop": 0.20000000298023224,
+      "ser": 0.10000000149011612,
+      "oct": 0.30000001192092896
+    }
+  },
+  {
+    "compound_id": "CMP-0019",
+    "slug": "dfp",
+    "name": "Diisopropyl Fluorophosphate (DFP)",
+    "category": "Organophosphate Reference",
+    "cas_number": "55-91-4",
+    "formula": "C6H14FO3P",
+    "mw_g_mol": 184.14700317382812,
+    "canonical_smiles": "CC(C)OP(=O)(F)OC(C)C",
+    "inchikey": "MUCZHBLJLSDCSD-UHFFFAOYSA-N",
+    "primary_target": "Serine Hydrolases / AChE",
+    "action_mode": "Irreversible Phosphorylation",
+    "gains": {
+      "ach": 5.5,
+      "glu": 1.0,
+      "gaba": -1.0,
+      "dop": 0.20000000298023224,
+      "ser": 0.10000000149011612,
+      "oct": 0.30000001192092896
+    }
+  },
+  {
+    "compound_id": "CMP-0020",
+    "slug": "malathion",
+    "name": "Malathion",
+    "category": "Organophosphate Insecticide",
+    "cas_number": "121-75-5",
+    "formula": "C10H19O6PS2",
+    "mw_g_mol": 330.364013671875,
+    "canonical_smiles": "CCOC(=O)CC(SP(=S)(OC)OC)C(=O)OCC",
+    "inchikey": "JXSJBGJIGXNWCI-UHFFFAOYSA-N",
+    "primary_target": "AChE (via Malaoxon bioactivation)",
+    "action_mode": "Phosphorylation",
+    "gains": {
+      "ach": 4.5,
+      "glu": 0.8999999761581421,
+      "gaba": -1.0,
+      "dop": 0.20000000298023224,
+      "ser": 0.10000000149011612,
+      "oct": 0.30000001192092896
+    }
+  }
+]

@@ -1,0 +1,21 @@
+{
+  "compound_id": "CMP-0018",
+  "slug": "paraoxon",
+  "name": "Paraoxon-Ethyl",
+  "category": "Organophosphate Probe",
+  "cas_number": "311-45-5",
+  "formula": "C10H14NO6P",
+  "mw_g_mol": 275.19700000000006,
+  "canonical_smiles": "CCOP(=O)(OCC)Oc1ccc([N+](=O)[O-])cc1",
+  "inchikey": "WYMSBXTXOHUIGT-UHFFFAOYSA-N",
+  "primary_target": "Acetylcholinesterase (AChE)",
+  "action_mode": "Irreversible Phosphorylation",
+  "gains": {
+    "ach": 6.0,
+    "glu": 1.0,
+    "gaba": -1.0,
+    "dop": 0.2,
+    "ser": 0.1,
+    "oct": 0.3
+  }
+}

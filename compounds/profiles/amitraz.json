@@ -1,0 +1,21 @@
+{
+  "compound_id": "CMP-0017",
+  "slug": "amitraz",
+  "name": "Amitraz",
+  "category": "Formamidine Acaricide",
+  "cas_number": "33089-61-1",
+  "formula": "C19H23N3",
+  "mw_g_mol": 293.41400000000004,
+  "canonical_smiles": "Cc1ccc(N=CN(C)C=Nc2ccc(C)c(C)c2)c(C)c1",
+  "inchikey": "NGONOHBYRKINSO-UHFFFAOYSA-N",
+  "primary_target": "Octopaminergic Oamb Receptor",
+  "action_mode": "Agonist (Tremor Inducer)",
+  "gains": {
+    "ach": 1.2,
+    "glu": 0.8,
+    "gaba": -0.8,
+    "dop": 0.5,
+    "ser": 0.1,
+    "oct": 4.5
+  }
+}
