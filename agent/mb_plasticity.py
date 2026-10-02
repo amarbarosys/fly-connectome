@@ -22,7 +22,7 @@ from pathlib import Path
 
 import numpy as np
 
-from agent.neural_connectome import ANNOTATIONS, N, ROOT
+from agent.neural_connectome import ANNOTATIONS, N, ROOT, CPUBrain
 
 
 @dataclass
@@ -130,3 +130,30 @@ class MBPlasticity:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({'events': self.log, 'summary': self.summary()}, indent=2) + '\n')
+
+
+def odor_drive(glomeruli, annotations=ANNOTATIONS):
+    """An odour identity as drive on the ORNs of the named glomeruli (both sides), shape (N, 1)."""
+    roots = np.load(ROOT / 'data/proofread_root_ids_783.npy')
+    index = {int(root): i for i, root in enumerate(roots)}
+    wanted = {f'ORN_{g}' for g in glomeruli}
+    drive = np.zeros((N, 1), np.float32)
+    for row in csv.DictReader(Path(annotations).open(), delimiter='\t'):
+        node = index.get(int(row['root_id']))
+        if node is not None and row['cell_class'] == 'olfactory' and row['cell_type'] in wanted:
+            drive[node, 0] = 1
+    if not drive.any():
+        raise ValueError(f'no ORNs for glomeruli {sorted(glomeruli)}')
+    return drive
+
+
+def sparsen(brain, cells, fraction=0.05):
+    """Cap Kenyon-cell spiking at `fraction` of KCs per tick (engineered APL stand-in)."""
+    if not isinstance(brain, CPUBrain):
+        raise TypeError('sparsen requires CPUBrain; the GPU Worker does not implement sparse KC gating')
+    nodes = np.asarray(cells['KC'], dtype=np.int64)
+    if len(nodes) == 0:
+        raise ValueError('cannot sparsify an empty KC population')
+    k = min(len(nodes) - 1, max(1, int(round(fraction * len(nodes)))))
+    brain.sparse = (nodes, k)
+    return k

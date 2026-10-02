@@ -115,6 +115,7 @@ class CPUBrain:
         if disconnected:
             weights[:] = 0
         self.graph = csr_matrix((weights, col, row), shape=(N, N))
+        self.sparse = None  # optional (nodes, k): at most k of those nodes spike per tick
         self.reset()
 
     def reset(self):
@@ -123,7 +124,7 @@ class CPUBrain:
         self.trace = np.zeros_like(self.v)
         self.ever = np.zeros((N, self.flies), bool)
 
-    def step(self, inputs, ticks=4, direct=(), after=0, visual=None):
+    def step(self, inputs, ticks=4, direct=(), after=0, visual=None, extra_drive=None):
         inputs = np.asarray(inputs, np.float32).reshape(self.flies, 8)
         if not np.isfinite(inputs).all() or np.any((inputs < 0) | (inputs > 1)):
             raise ValueError('invalid sensory input')
@@ -136,9 +137,21 @@ class CPUBrain:
         direct=np.asarray(direct,dtype=np.int64)
         if len(direct)>256 or np.any((direct<0)|(direct>=N)):raise ValueError('invalid direct targets')
         if len(direct):drive[direct[~self.ever[direct,0]],0]+=np.float32(.65)
+        if extra_drive is not None:
+            extra_drive=np.asarray(extra_drive,np.float32).reshape(N,self.flies)
+            if not np.isfinite(extra_drive).all() or np.any((extra_drive<0)|(extra_drive>1)):raise ValueError('invalid extra drive')
+            drive=drive+np.float32(.65)*extra_drive
         for _ in range(ticks):
             v = np.float32(.85)*self.v + np.float32(.08)*(self.graph @ self.spikes) + drive
             self.spikes = (v >= 1).astype(np.float32)
+            if self.sparse is not None:
+                nodes, k = self.sparse
+                # engineered stand-in for APL feedback inhibition: keep the k most depolarised
+                sub = np.where(self.spikes[nodes] != 0, v[nodes], -np.inf)
+                cut = np.argpartition(-sub, k, axis=0)[k:]
+                block = self.spikes[nodes]
+                np.put_along_axis(block, cut, 0, axis=0)
+                self.spikes[nodes] = block
             self.v = np.where(self.spikes != 0, 0, np.maximum(v, -5)).astype(np.float32)
             self.trace = np.float32(.85)*self.trace + np.float32(.15)*self.spikes
             self.ever |= self.spikes != 0
