@@ -48,14 +48,14 @@ def graph_arrays(directory=ROOT / 'data'):
     return row, col, weights
 
 
-def normalize_weights_inplace(indptr, weights):
-    """Normalize CSR weights by absolute postsynaptic row sum without edge-sized scratch arrays."""
+def normalize_weights_inplace(indptr, weights, power=1.0):
+    """Divide each postsynaptic CSR row by (sum |w|)**power, without edge-sized scratch arrays."""
     for row in range(len(indptr) - 1):
         start, end = int(indptr[row]), int(indptr[row + 1])
         if end > start:
             total = np.float32(np.abs(weights[start:end]).sum(dtype=np.float64))
             if total:
-                weights[start:end] /= total
+                weights[start:end] /= total if power == 1 else total ** np.float32(power)
 
 
 def prepare():
@@ -115,7 +115,7 @@ def prepare():
 class CPUBrain:
     """Independent two-fly reference; whole graph remains present."""
     def __init__(self, *, disconnected=False, flies=2, adaptation_da=0.95, adaptation_ka=0.0,
-                 gain_mode='raw', gain=1.0):
+                 gain_mode='raw', gain=1.0, norm_power=1.0):
         if type(flies) is not int or not 1 <= flies <= 64:
             raise ValueError('flies must be an integer in [1,64]')
         if not 0 <= adaptation_da <= 1 or adaptation_ka < 0:
@@ -135,7 +135,7 @@ class CPUBrain:
         self.raw_weights = None if gain_mode == 'normalized' else self.graph.data
         self.normalized_weights = None
         if gain_mode == 'normalized':
-            normalize_weights_inplace(self.graph.indptr, self.graph.data)
+            normalize_weights_inplace(self.graph.indptr, self.graph.data, norm_power)
             self.normalized_weights = self.graph.data
         self.sparse = None  # optional (nodes, k): at most k of those nodes spike per tick
         self.reset()
@@ -178,12 +178,9 @@ class CPUBrain:
             drive=drive+np.float32(.65)*extra_drive
         tick_activity = []
         for _ in range(ticks):
-            if self.gain_mode == 'normalized':
-                recurrent = self.gain * (self.graph @ self.spikes)
-            elif self.gain_mode == 'global':
-                recurrent = self.gain * (self.graph @ self.spikes)
-            else:
-                recurrent = self.graph @ self.spikes
+            recurrent = self.graph @ self.spikes
+            if self.gain_mode != 'raw':
+                recurrent *= self.gain
             v = np.float32(.85)*self.v + np.float32(.08)*recurrent + drive
             self.spikes = (v - self.a >= 1).astype(np.float32)
             if self.sparse is not None:

@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 
 from agent.neural_connectome import ANNOTATIONS, N, ROOT, CPUBrain, normalize_weights_inplace
-from agent.mb_plasticity import mushroom_body_cells
+from agent.mb_plasticity import mushroom_body_cells, odor_drive, sparsen
 
 OUT = ROOT / '.work/agent/brain-bench'
 ODORS = (('DA1', 'VA1d', 'DL3'), ('VM2', 'DM1', 'VA2'))
@@ -169,6 +169,60 @@ def sweep_gain():
     return summary
 
 
+def sweep_power(powers=(.5, .6, .7, .8, .9, 1.), base_gains=(25., 30., 35., 40., 50.), caps=(None,), name='p1c'):
+    """P1c: rows divided by (sum |w|)**p; gain scaled so the median row matches p = 1.
+
+    `caps` optionally limits KC spiking per tick to that fraction (`sparsen`, APL stand-in)."""
+    from agent.verify_sparse_learning import ODORS
+    OUT.mkdir(parents=True, exist_ok=True)
+    cells, drive = mushroom_body_cells(), odor_drive(*ODORS)
+    kc, mbon = cells['KC'], cells['MBON']
+    brain = CPUBrain(flies=len(ODORS), gain_mode='global')
+    raw, indptr = brain.graph.data.copy(), brain.graph.indptr
+    totals = np.add.reduceat(np.abs(raw), indptr[:-1])[np.diff(indptr) > 0]
+    median = float(np.median(totals[totals > 0]))
+    zeros, rows, sets = np.zeros((len(ODORS), 8), np.float32), [], []
+    pairs = ((0, 1), (0, 2), (1, 2))
+    for power, cap in ((p, c) for p in powers for c in caps):
+        np.copyto(brain.graph.data, raw)
+        normalize_weights_inplace(indptr, brain.graph.data, power)
+        brain.sparse = None
+        if cap is not None:
+            sparsen(brain, cells, cap)
+        for base in base_gains:
+            brain.gain = np.float32(base * median ** (power - 1))
+            brain.reset()
+            started = time.perf_counter()
+            for _ in range(10):
+                brain.step(zeros, ticks=4, extra_drive=drive)
+            ks, ms, ds = brain.ever[kc], brain.ever[mbon], brain.ever[brain.descending]
+            kc_active, kj = ks.mean(axis=0), [_jaccard(ks[:, i], ks[:, j]) for i, j in pairs]
+            mj = [_jaccard(ms[:, i], ms[:, j]) for i, j in pairs]
+            brain_ever = brain.ever.mean(axis=0)
+            row = {'power': power, 'kc_cap': cap, 'base_gain': base, 'gain': float(brain.gain),
+                   'brain_ever': brain_ever.tolist(), 'kc_ever': kc_active.tolist(), 'kc_jaccard': kj,
+                   'mbon_count': ms.sum(axis=0).tolist(), 'mbon_jaccard': mj,
+                   'dn_count': ds.sum(axis=0).tolist(), 'seconds': time.perf_counter() - started}
+            row['pass'] = bool(np.all((kc_active > .01) & (kc_active < .10)) and max(kj) < .3
+                               and np.all(ms.any(axis=0)) and max(mj) < .8
+                               and ds.any() and brain_ever.max() < .05)
+            rows.append(row); sets.append(np.concatenate([ks, ms, ds]))
+            print(f"p={power:g} cap={cap} g0={base:g} KC={np.round(kc_active, 3).tolist()} "
+                  f"MBON={row['mbon_count']} DN={row['dn_count']} pass={row['pass']}", flush=True)
+    np.savez_compressed(OUT / f'sweep-{name}.npz', sets=np.packbits(np.asarray(sets), axis=1),
+                        power=np.asarray([r['power'] for r in rows], np.float32),
+                        gain=np.asarray([r['gain'] for r in rows], np.float32))
+    summary = {'status': 'PASS' if any(r['pass'] for r in rows) else 'NO_CONFIG_PASSED',
+               'odors': [list(o) for o in ODORS], 'exchanges': 10, 'median_row_abs_total': median,
+               'rows': rows, 'peak_rss_kib': resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}
+    (OUT / f'sweep-{name}.json').write_text(json.dumps(summary, indent=2) + '\n')
+    return summary
+
+
 if __name__ == '__main__':
-    result = sweep_gain()
+    import sys
+    if '--p1c-cap' in sys.argv:
+        result = sweep_power((1.,), (45., 50., 55., 60., 65., 70.), (.005, .01, .015, .02), 'p1c-cap')
+    else:
+        result = sweep_power() if '--p1c' in sys.argv else sweep_gain()
     print(json.dumps({'status': result['status'], 'peak_rss_kib': result['peak_rss_kib']}))
