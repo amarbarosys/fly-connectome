@@ -4,6 +4,7 @@ from __future__ import annotations
 import csv
 import json
 import resource
+import sys
 import time
 from pathlib import Path
 
@@ -219,9 +220,63 @@ def sweep_power(powers=(.5, .6, .7, .8, .9, 1.), base_gains=(25., 30., 35., 40.,
     return summary
 
 
+ODORS6 = (('DA1', 'VA1d', 'DL3'), ('VM2', 'DM1', 'VA2'), ('DM2', 'VC1', 'DA2'),
+          ('DM3', 'DM4', 'VA6'), ('DL5', 'DC1', 'VA7l'), ('VM7d', 'VC3', 'DL1'))
+APL = (31044,)  # FlyWire APL with KC edges; its partner row 31045 has none
+
+
+def sweep_class_gain(seeds=3, keep=.8):
+    """P1d: per-class gains folded into weights at the sparse point (normalized gain 35).
+
+    Grid ranges come from agent.operating_point (APL ~7x, MBON 5-11x, DN 23-83x short of
+    threshold). Each odour runs as `seeds` columns, each driving a random `keep` subset of its
+    ORNs, so every criterion is checked across odours and input jitter, not one deterministic run.
+    """
+    sys.path.insert(0, str(Path.home() / 'iTools/science/regime-sweep'))
+    from regime_sweep import sweep
+    cells = mushroom_body_cells()
+    kc, mbon = cells['KC'], cells['MBON']
+    rng = np.random.default_rng(20261002)
+    base = odor_drive(*ODORS6)
+    drive = np.repeat(base, seeds, axis=1) * (rng.random((N, base.shape[1] * seeds)) < keep)
+    brain = CPUBrain(flies=drive.shape[1], gain_mode='normalized', gain=35)
+    normalized, zeros = brain.graph.data.copy(), np.zeros((drive.shape[1], 8), np.float32)
+    odour = np.repeat(np.arange(len(ODORS6)), seeds)
+    across = [(i, j) for i in range(len(odour)) for j in range(i) if odour[i] != odour[j] and i % seeds == j % seeds]
+    within = [(i, j) for i in range(len(odour)) for j in range(i) if odour[i] == odour[j]]
+
+    def run(gain, apl_in, apl_out, mbon_gain, dn_gain):
+        np.copyto(brain.graph.data, normalized)
+        brain.scale_edges(apl_in, post=APL)
+        brain.scale_edges(apl_out, pre=APL)
+        brain.scale_edges(mbon_gain, post=mbon)
+        brain.scale_edges(dn_gain, post=brain.descending)
+        brain.gain = np.float32(gain)
+        brain.reset()
+        for _ in range(10):
+            brain.step(zeros, ticks=4, extra_drive=drive)
+        ks, ms, ds = brain.ever[kc], brain.ever[mbon], brain.ever[brain.descending]
+        return ({'kc_active': ks.mean(axis=0).tolist(),
+                 'kc_jaccard_across_odours': max(_jaccard(ks[:, i], ks[:, j]) for i, j in across),
+                 'kc_jaccard_same_odour_min': min(_jaccard(ks[:, i], ks[:, j]) for i, j in within),
+                 'mbon_count': ms.sum(axis=0).tolist(), 'dn_count_max': int(ds.sum(axis=0).max()),
+                 'apl_fired': bool(brain.ever[list(APL)].any()), 'brain_active': brain.ever.mean(axis=0).tolist()},
+                {'sets': np.packbits(np.concatenate([ks, ms, ds]), axis=0)})
+
+    grid = {'gain': [35., 50., 80.], 'apl_in': [1., 8.], 'apl_out': [1., 8., 32.],
+            'mbon_gain': [1., 5., 11.], 'dn_gain': [1., 25., 80.]}
+    criteria = {'kc_floor': ('kc_active', '>', .01), 'kc_ceiling': ('kc_active', '<', .10),
+                'kc_distinct': ('kc_jaccard_across_odours', '<', .3),
+                'mbon_responds_every_odour': ('mbon_count', '>=', 1),
+                'dn_fires': ('dn_count_max', '>=', 1), 'brain_bounded': ('brain_active', '<', .05)}
+    return sweep(grid, run, criteria, OUT / 'sweep-p1d')
+
+
 if __name__ == '__main__':
-    import sys
-    if '--p1c-cap' in sys.argv:
+    if '--p1d' in sys.argv:
+        result = sweep_class_gain()
+        result['peak_rss_kib'] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    elif '--p1c-cap' in sys.argv:
         result = sweep_power((1.,), (45., 50., 55., 60., 65., 70.), (.005, .01, .015, .02), 'p1c-cap')
     else:
         result = sweep_power() if '--p1c' in sys.argv else sweep_gain()

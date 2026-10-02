@@ -19,7 +19,7 @@ def jaccard(a, b):
 def run_gain(brain, drive, cells, gain):
     brain.gain = np.float32(gain)
     kc, mbon = cells['KC'], cells['MBON']
-    plastic = MBPlasticity(brain, fly=0)
+    plastic = MBPlasticity(brain, fly=0, eligibility='kc')
     zeros = np.zeros((3, 8), np.float32)
 
     # Establish all three cumulative KC sets and the pre-reward MBON responses.
@@ -41,8 +41,8 @@ def run_gain(brain, drive, cells, gain):
         plastic.observe()
     learning_sets = brain.ever[kc].copy()
     active_kc_edges = np.isin(plastic.pre, kc[learning_sets[:, 0]])
-    plastic.dopamine(+1, 'reward after A exposure')
-    ratio_change = brain.graph.data[plastic.pos] / plastic.w0 - 1
+    plastic.dopamine(-1, 'reward after A exposure: KC to MBON depression')
+    ratio_change = np.abs(brain.graph.data[plastic.pos] / plastic.w0 - 1)
     mean_change = []
     for odor_index in (0, 1):
         edge_mask = np.isin(plastic.pre, kc[learning_sets[:, odor_index]])
@@ -64,8 +64,8 @@ def run_gain(brain, drive, cells, gain):
         'kc_active_fraction': active_fraction.tolist(),
         'kc_pairwise_jaccard': pair_jaccards,
         'sparse_code_pass': sparse_pass,
-        'mean_ratio_change_on_A_active_KC_edges': mean_change[0],
-        'mean_ratio_change_on_B_active_KC_edges': mean_change[1],
+        'mean_abs_ratio_change_on_A_active_KC_edges': mean_change[0],
+        'mean_abs_ratio_change_on_B_active_KC_edges': mean_change[1],
         'A_over_B_learning_ratio': learning_ratio,
         'learning_pass': bool(learning_ratio > 2),
         'mbon_pre_reward_response': pre_response.tolist(),
