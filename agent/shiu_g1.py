@@ -38,21 +38,31 @@ def flywire():
     return pre, post, w, names, None
 
 
-def cached_arm(dataset, family, seed, row, post, klass, key):
-    """The arm's post column, built once on the CPU and kept in .work so a GPU job only simulates."""
+def cached_arm(dataset, family, seed, pre, row, post, klass, key):
+    """The arm's post column and its checks, built and checked once on the CPU and kept in .work,
+    so a GPU job only simulates (rechecking 10 cached arms cost 77 s)."""
     code = hashlib.sha256((ROOT / 'agent/baseline_graphs.py').read_bytes()).hexdigest()[:10]  # a new repair rule never reads an old arm
-    path = ROOT / f'.work/agent/shiu/arms/{dataset}-{len(post)}-{family}-s{seed}-{code}.npz'
+    path = ROOT / f'.work/agent/shiu/arms/{dataset}-{len(post)}-{family}-s{seed}-{code}-checked.npz'
     if not path.is_file():
+        n = len(row) - 1
         generator = np.random.default_rng(seed)
         if family == 'shuffled':
             col, passes = repair_edges(row, generator.permutation(post), generator, unique=True)
         else:
             col, passes = repair_edges(row, block_shuffle(row, post, klass, generator), generator,
                                        key=key, original=post, unique=True)
+        checks = {'out_degree_preserved': True,  # rows (presynaptic slots) are untouched
+                  'in_degree_preserved': bool(np.array_equal(np.bincount(col, minlength=n), np.bincount(post, minlength=n))),
+                  'self_loops': int((pre == col).sum()), 'repair_passes': int(passes),
+                  'edges_unchanged': int((col == post).sum()),
+                  'repeated_pairs': int(len(col) - np.unique(pre * n + col).size)}
+        if family == 'block':
+            checks['class_blocks_preserved'] = bool(np.array_equal(np.sort(block_keys(row, col, klass)), np.sort(key)))
+        assert checks['in_degree_preserved'] and checks['self_loops'] == 0 and checks['repeated_pairs'] == 0, checks
         path.parent.mkdir(parents=True, exist_ok=True)
-        np.savez(path, col=col.astype(np.int32), passes=passes)
+        np.savez(path, col=col.astype(np.int32), checks=json.dumps(checks))
     z = np.load(path)
-    return z['col'].astype(np.int64), int(z['passes'])
+    return z['col'].astype(np.int64), json.loads(str(z['checks']))
 
 
 def arms(data, dataset='flywire'):
@@ -64,19 +74,10 @@ def arms(data, dataset='flywire'):
     np.cumsum(np.bincount(pre, minlength=n), out=row[1:])
     klass = np.unique(names, return_inverse=True)[1].astype(np.int64)
     key = block_keys(row, post, klass)
-    out_degree, in_degree = np.diff(row), np.bincount(post, minlength=n)
     yield 'real', (pre, post, w), {}
     for seed in SEEDS:
         for family in ('shuffled', 'block'):
-            col, passes = cached_arm(dataset, family, seed, row, post, klass, key)
-            checks = {'out_degree_preserved': True,  # rows (presynaptic slots) are untouched
-                      'in_degree_preserved': bool(np.array_equal(np.bincount(col, minlength=n), in_degree)),
-                      'self_loops': int((pre == col).sum()), 'repair_passes': int(passes),
-                      'edges_unchanged': int((col == post).sum()),
-                      'repeated_pairs': int(len(col) - np.unique(pre * n + col).size)}
-            if family == 'block':
-                checks['class_blocks_preserved'] = bool(np.array_equal(np.sort(block_keys(row, col, klass)), np.sort(key)))
-            assert checks['in_degree_preserved'] and checks['self_loops'] == 0 and checks['repeated_pairs'] == 0 and len(out_degree) == n, checks
+            col, checks = cached_arm(dataset, family, seed, pre, row, post, klass, key)
             yield f'{family}-s{seed}', (pre, col, w), checks
 
 
