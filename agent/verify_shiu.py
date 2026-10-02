@@ -112,25 +112,28 @@ def mushroom_body_probe(rates=(5., 20., 100.), seconds=.2):
     return out
 
 
-def flood_code_probe(seeds=3, keep=.8, rate=100., seconds=.2, windows_ms=(10, 15, 20, 30, 50), engine=ShiuBrain, arm=None, odours=None):
+def flood_code_probe(seeds=3, keep=.8, rate=100., seconds=.2, windows_ms=(10, 15, 20, 30, 50), engine=ShiuBrain, arm=None, odours=None, cells=None):
     """Not a gate: does odour identity survive the flood, (1) in the first ms after onset,
     (2) in KC firing rates during the flood? 3 odours x `seeds` ORN-jitter columns."""
     from agent.neural_connectome import ANNOTATIONS
     from agent.verify_sparse_learning import ODORS
     odours = odours or ODORS
-    pre, post, w, index = _reference_graph()
+    if cells is None:  # the authors' FlyWire 783 graph; another dataset passes arm, n and cells
+        pre, post, w, index = _reference_graph()
+        n, kc, orn = len(index), [], {}
+        for row in csv.DictReader(open(ANNOTATIONS), delimiter='\t'):
+            i = index.get(int(row['root_id']))
+            if i is not None and row['cell_class'] == 'Kenyon_Cell':
+                kc.append(i)
+            if i is not None and row['cell_class'] == 'olfactory' and row['cell_type'].startswith('ORN_'):
+                orn.setdefault(row['cell_type'][4:], []).append(i)
+    else:
+        n, kc, orn = cells
     if arm is not None:
         pre, post, w = arm
-    kc, orn = [], {}
-    for row in csv.DictReader(open(ANNOTATIONS), delimiter='\t'):
-        i = index.get(int(row['root_id']))
-        if i is not None and row['cell_class'] == 'Kenyon_Cell':
-            kc.append(i)
-        if i is not None and row['cell_class'] == 'olfactory' and row['cell_type'].startswith('ORN_'):
-            orn.setdefault(row['cell_type'][4:], []).append(i)
     rng = np.random.default_rng(20261002)
     odour = np.repeat(np.arange(len(odours)), seeds)
-    brain = engine(pre, post, w, n=len(index), flies=len(odour), seed=11)
+    brain = engine(pre, post, w, n=n, flies=len(odour), seed=11)
     for column, o in enumerate(odour):
         cells = np.asarray(sum((orn[g] for g in odours[o]), []))
         brain.stimulate(cells[rng.random(len(cells)) < keep], rate, fly=column)

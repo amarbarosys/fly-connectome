@@ -16,6 +16,7 @@ import numpy as np
 
 from agent.baseline_graphs import block_keys, block_shuffle, repair_self_loops
 from agent.brain_bench import ODORS6
+from agent import mcns
 from agent.neural_connectome import ANNOTATIONS, ROOT
 from agent.paired_significance import _exact_sign_flip
 from agent.shiu import ShiuGPU
@@ -25,18 +26,24 @@ SEEDS = (20261002, 7, 1009, 424242, 31337)
 METRICS = ('onset_20ms', 'onset_30ms', 'onset_50ms', 'flood_rate')
 
 
-def arms():
+def flywire():
+    """The authors' 783 graph, classes as cell_class (super_class when empty); cells None = probe default."""
     pre, post, w, index = _reference_graph()
-    order = np.argsort(pre, kind='stable')
-    pre, post, w = pre[order], post[order].astype(np.int64), w[order]
-    n = len(index)
-    row = np.zeros(n + 1, np.int64)
-    np.cumsum(np.bincount(pre, minlength=n), out=row[1:])
-    names = np.full(n, 'unannotated', dtype=object)
+    names = np.full(len(index), 'unannotated', dtype=object)
     for r in csv.DictReader(open(ANNOTATIONS), delimiter='\t'):
         i = index.get(int(r['root_id']))
         if i is not None:
             names[i] = r['cell_class'] or r['super_class'] or 'unannotated'
+    return pre, post, w, names, None
+
+
+def arms(data):
+    pre, post, w, names, _ = data
+    order = np.argsort(pre, kind='stable')
+    pre, post, w = pre[order], post[order].astype(np.int64), w[order]
+    n = len(names)
+    row = np.zeros(n + 1, np.int64)
+    np.cumsum(np.bincount(pre, minlength=n), out=row[1:])
     klass = np.unique(names, return_inverse=True)[1].astype(np.int64)
     key = block_keys(row, post, klass)
     out_degree, in_degree = np.diff(row), np.bincount(post, minlength=n)
@@ -59,11 +66,12 @@ def arms():
             yield f'{family}-s{seed}', (pre, col, w), checks
 
 
-def run():
+def run(dataset='flywire'):
+    data = {'flywire': flywire, 'mcns': mcns.graph}[dataset]()
     started, results, checks = time.perf_counter(), {}, {}
-    for name, graph, arm_checks in arms():
+    for name, graph, arm_checks in arms(data):
         t = time.perf_counter()
-        probe = flood_code_probe(engine=ShiuGPU, arm=graph, odours=ODORS6)
+        probe = flood_code_probe(engine=ShiuGPU, arm=graph, odours=ODORS6, cells=data[4])
         results[name] = {'per_column': probe['per_column'], 'flood_decode': probe['flood']['decode_accuracy'],
                          'onset': [{k: r[k] for k in ('ms', 'kc_active', 'decode_accuracy')} for r in probe['onset']],
                          'kc_active_flood': probe['flood']['kc_active'], 'seconds': time.perf_counter() - t}
@@ -81,10 +89,10 @@ def run():
                                            'difference': float((real - control).mean()),
                                            'columns_real_higher': int((real > control).sum()),
                                            'exact_two_sided_sign_flip_p': p, 'nonzero_columns': nonzero}
-    out = {'model': 'Shiu 2024 LIF, authors 783 graph', 'odours': [list(o) for o in ODORS6], 'columns': 18,
+    out = {'model': 'Shiu 2024 LIF', 'dataset': {'flywire': 'FlyWire 783 (authors graph)', 'mcns': mcns.RELEASE}[dataset], 'odours': [list(o) for o in ODORS6], 'columns': 18,
            'seeds': SEEDS, 'arms': results, 'arm_checks': checks, 'tests': tests,
            'wall_s': time.perf_counter() - started}
-    path = ROOT / '.work/agent/shiu/g1.json'
+    path = ROOT / ('.work/agent/shiu/g1.json' if dataset == 'flywire' else f'.work/agent/shiu/g1-{dataset}.json')
     path.write_text(json.dumps(out, indent=2) + '\n')
     for name, test in tests.items():
         print(f"{name:22s} real {test['real_mean']:.4f} control {test['control_mean']:.4f} "
@@ -93,4 +101,5 @@ def run():
 
 
 if __name__ == '__main__':
-    run()
+    import sys
+    run(*sys.argv[1:2])
