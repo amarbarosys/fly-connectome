@@ -28,6 +28,21 @@ Normal runs queue one batch job with a 22 GB reservation and 180 second timeout.
 target/release/fly-screen
 ```
 
+## Condition sets
+
+`FLY_CONDITION_SET` picks what the conditions are:
+
+| Value | Conditions | Needs |
+| --- | --- | --- |
+| `compound` (default) | dose ladders from a compound registry | `compounds/registry.parquet`, which now lives in the separate `fly-pharma` repository, so this set fails here by design |
+| `lesion` | 3 controls, 6 single-slot silencings, 15 slot pairs, 24 total | nothing beyond the connectome |
+| `sweep` | 3 controls plus each of 6 gain slots at 0.00x, 0.25x, 0.50x, 2.00x, 4.00x, 33 total | nothing beyond the connectome |
+
+`lesion` and `sweep` perturb the same eight-gain vector the GPU worker already consumes, so the
+binary manifest format and the worker contract are unchanged. Slots are named by index: the
+index-to-receptor mapping lives in `resolve_channel` and these two sets make no biological claim
+about it. Unity is omitted from the sweep because a single slot at 1.0 is bit-identical to a control.
+
 Defaults request a maximum of 50 deterministic conditions and 100 steps. The
 condition cap is filled only with complete three-dose ladders; current catalog
 ordering therefore produces 48 rows (three controls plus 15 complete ladders).

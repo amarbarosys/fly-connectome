@@ -371,6 +371,116 @@ fn round_gain_like_python(value: f64) -> f64 {
         .expect("formatting a finite gain always produces a float")
 }
 
+/// Perturbable gain slots. `resolve_channel` returns 0..=5 and writes `gains[channel + 1]`, so
+/// slot 0 is never perturbed and slot 7 is the reserved flag every real condition sets to 0.
+const PERTURBABLE_SLOTS: [usize; 6] = [1, 2, 3, 4, 5, 6];
+/// Neutral baseline: every slot passthrough, reserved flag cleared, as the controls use.
+const NEUTRAL_GAINS: [f32; GAINS_PER_CONDITION] = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0];
+
+/// The three no-op conditions every set carries, so a run always contains its own reference.
+fn push_controls(conditions: &mut Vec<Condition>, target_count: usize) {
+    for (i, name) in ["Water", "Saline", "D-Glucose"].iter().enumerate() {
+        if conditions.len() >= target_count {
+            return;
+        }
+        conditions.push(Condition {
+            condition_id: format!("control-{i:02}"),
+            compound_id: (*name).into(),
+            name: format!("{name} (Control)"),
+            dose_level: "Control (0 nM)".into(),
+            dose_nm: 0.0,
+            gains: NEUTRAL_GAINS,
+        });
+    }
+}
+
+/// Silence one gain slot, then each pair of slots. Six singles plus fifteen pairs plus three
+/// controls is 24 conditions. Slots are named by index, not by receptor: the index-to-receptor
+/// mapping lives in `resolve_channel` and this generator makes no biological claim about it.
+fn build_lesion_conditions(target_count: usize) -> Vec<Condition> {
+    let mut conditions = Vec::with_capacity(target_count);
+    push_controls(&mut conditions, target_count);
+    for slot in PERTURBABLE_SLOTS {
+        if conditions.len() >= target_count {
+            return conditions;
+        }
+        let mut gains = NEUTRAL_GAINS;
+        gains[slot] = 0.0;
+        conditions.push(Condition {
+            condition_id: format!("lesion-s{slot}"),
+            compound_id: format!("slot-{slot}"),
+            name: format!("Silence gain slot {slot}"),
+            dose_level: "Lesion (gain 0.0)".into(),
+            dose_nm: 0.0,
+            gains,
+        });
+    }
+    for (index, &first) in PERTURBABLE_SLOTS.iter().enumerate() {
+        for &second in &PERTURBABLE_SLOTS[index + 1..] {
+            if conditions.len() >= target_count {
+                return conditions;
+            }
+            let mut gains = NEUTRAL_GAINS;
+            gains[first] = 0.0;
+            gains[second] = 0.0;
+            conditions.push(Condition {
+                condition_id: format!("lesion-s{first}-s{second}"),
+                compound_id: format!("slot-{first}+{second}"),
+                name: format!("Silence gain slots {first} and {second}"),
+                dose_level: "Lesion pair (gain 0.0)".into(),
+                dose_nm: 0.0,
+                gains,
+            });
+        }
+    }
+    conditions
+}
+
+/// Gain-response curve per slot. Pure multipliers, no affinity and no dose: 1.0 is omitted because
+/// a single slot at 1.0 is bit-identical to a control and would waste a condition slot.
+fn build_sweep_conditions(target_count: usize) -> Vec<Condition> {
+    const LEVELS: [(f32, &str); 5] = [
+        (0.0, "0.00x"),
+        (0.25, "0.25x"),
+        (0.5, "0.50x"),
+        (2.0, "2.00x"),
+        (4.0, "4.00x"),
+    ];
+    let mut conditions = Vec::with_capacity(target_count);
+    push_controls(&mut conditions, target_count);
+    for slot in PERTURBABLE_SLOTS {
+        for (level, label) in LEVELS {
+            if conditions.len() >= target_count {
+                return conditions;
+            }
+            let mut gains = NEUTRAL_GAINS;
+            gains[slot] = level;
+            conditions.push(Condition {
+                condition_id: format!("sweep-s{slot}-{label}"),
+                compound_id: format!("slot-{slot}"),
+                name: format!("Gain slot {slot} at {label}"),
+                dose_level: format!("Sweep {label}"),
+                dose_nm: 0.0,
+                gains,
+            });
+        }
+    }
+    conditions
+}
+
+/// Pick the condition generator. `compound` needs `compounds/registry.parquet`, which moved to the
+/// fly-pharma repository, so it fails here by design rather than silently producing nothing.
+fn build_condition_set(set: &str, registry: &Path, target_count: usize) -> Result<Vec<Condition>, String> {
+    match set {
+        "compound" => build_conditions(registry, target_count),
+        "lesion" => Ok(build_lesion_conditions(target_count)),
+        "sweep" => Ok(build_sweep_conditions(target_count)),
+        other => fail(format!(
+            "FLY_CONDITION_SET must be compound, lesion or sweep, got {other}"
+        )),
+    }
+}
+
 fn build_conditions(registry: &Path, target_count: usize) -> Result<Vec<Condition>, String> {
     let connection = Connection::open_in_memory().map_err(|e| format!("open DuckDB: {e}"))?;
     let path = registry.to_string_lossy().replace('\'', "''");
@@ -708,7 +818,11 @@ fn run() -> Result<(), String> {
     let out_dir = project.join(".work/runs").join(&run_id);
     fs::create_dir_all(&out_dir).map_err(|e| format!("create run directory: {e}"))?;
     let manifest_path = out_dir.join("manifest.bin");
-    let conditions = build_conditions(&registry, target_count)?;
+    let condition_set = env::var("FLY_CONDITION_SET").unwrap_or_else(|_| "compound".into());
+    let conditions = build_condition_set(&condition_set, &registry, target_count)?;
+    if conditions.is_empty() {
+        return fail(format!("condition set {condition_set} produced no conditions"));
+    }
     let manifest_tmp = out_dir.join("manifest.bin.tmp");
     write_binary_manifest(&manifest_tmp, &conditions, steps)
         .map_err(|e| format!("write batch manifest: {e}"))?;
@@ -920,6 +1034,59 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lesion_set_silences_every_slot_singly_and_in_pairs() {
+        let conditions = build_lesion_conditions(50);
+        assert_eq!(conditions.len(), 3 + 6 + 15, "3 controls, 6 singles, 15 pairs");
+        let controls = &conditions[..3];
+        assert!(controls.iter().all(|c| c.gains == NEUTRAL_GAINS));
+        for condition in &conditions[3..] {
+            // slot 0 is never perturbed and slot 7 is the reserved flag
+            assert_eq!(condition.gains[0], 1.0, "{}", condition.condition_id);
+            assert_eq!(condition.gains[7], 0.0, "{}", condition.condition_id);
+            let silenced = PERTURBABLE_SLOTS
+                .iter()
+                .filter(|&&slot| condition.gains[slot] == 0.0)
+                .count();
+            assert!(matches!(silenced, 1 | 2), "{} silenced {}", condition.condition_id, silenced);
+            assert_eq!(condition.dose_nm, 0.0, "a lesion carries no dose");
+        }
+        let ids: std::collections::HashSet<_> = conditions.iter().map(|c| &c.condition_id).collect();
+        assert_eq!(ids.len(), conditions.len(), "condition ids must be unique");
+    }
+
+    #[test]
+    fn lesion_set_respects_the_condition_cap() {
+        for cap in [1, 4, 10, 24] {
+            assert_eq!(build_lesion_conditions(cap).len(), cap, "cap {cap}");
+        }
+    }
+
+    #[test]
+    fn sweep_set_perturbs_one_slot_per_condition_and_omits_unity() {
+        let conditions = build_sweep_conditions(50);
+        assert_eq!(conditions.len(), 3 + 6 * 5, "3 controls, 6 slots, 5 levels");
+        for condition in &conditions[3..] {
+            let changed: Vec<_> = PERTURBABLE_SLOTS
+                .iter()
+                .filter(|&&slot| condition.gains[slot] != 1.0)
+                .collect();
+            assert_eq!(changed.len(), 1, "{} changed {:?}", condition.condition_id, changed);
+            let level = condition.gains[*changed[0]];
+            assert_ne!(level, 1.0, "unity would duplicate a control");
+            assert!(level >= 0.0 && level <= 4.0, "{level} out of swept range");
+            assert_eq!(condition.gains[7], 0.0);
+        }
+    }
+
+    #[test]
+    fn unknown_condition_set_is_rejected_by_name() {
+        let error = build_condition_set("doses", Path::new("/nonexistent"), 10)
+            .expect_err("an unknown set must not silently fall back");
+        assert!(error.contains("doses"), "{error}");
+        assert!(error.contains("lesion"), "the error must name the valid sets: {error}");
+    }
 
     #[test]
     fn target_resolution_matches_oracle_channel_order() {
