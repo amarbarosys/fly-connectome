@@ -5,10 +5,13 @@ Whole-brain connectome pipeline and embodied neural fly agents for adult
 neurons, 10.5M synapses) with MuJoCo biomechanics (NeuroMechFly) and a GPU
 perturbation kernel on AMD RX 7900 XTX.
 
-Current connectome result: across 64 shared odor-steering layouts, the real graph did not
-outperform degree-preserving shuffles (pooled p=0.699); the corrected comparison instead points
-to degree structure over exact wiring. The real arm scored 56/64 and missed its frozen gate.
+Current connectome result: across 32 independent seed clusters (64 mirrored odor-steering layouts),
+the real graph did not outperform degree-preserving shuffles (pooled p=0.7551); it outperformed
+the in-degree-only random family (pooled p=0.001472). The real arm scored 56/64 and missed its
+frozen gate.
 See [the matched comparison](docs/plans/CONNECTOME_BENEFIT.md) and the [capability map](docs/CAPABILITIES.md).
+
+Correction 2026-10-02: p-values recomputed with seed clusters (mirrored layouts are not independent); old pooled values 0.6990 (shuffles) and 0.000489 (random) are now 0.7551 and 0.001472; conclusions unchanged: no measured advantage over degree-preserving shuffles, and the real graph remains ahead of the random-column family.
 
 Key areas: five multi-omics data layers, embodied agent system
 with checkpoint/restore, and a Rust/Mojo screening rebuild. The compound

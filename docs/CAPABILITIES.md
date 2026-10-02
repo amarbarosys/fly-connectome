@@ -22,8 +22,10 @@ Status describes the cited implementation and gate only. It does not imply biolo
 | Capability | Status | Number | Receipt | Entrypoint |
 |---|---|---:|---|---|
 | Odor steering with fixed real connectome and trained readout | FAIL (gate) | 56/64 trained, but only 20.3 points over 43/64 shuffled reward against the frozen 25-point gate; odor-absent and straight controls 0/16 on the sanity subset | `.work/agent/matched-baseline/scale-comparison-corrected.json`; `docs/plans/CONNECTOME_BENEFIT.md` | `./.venv/bin/python -m agent.baseline_scale` (experiment runner; existing results are the cited evidence) |
-| Specific wiring advantage over degree-preserving shuffles, on odor steering | FAIL | Real trails 4/5 shuffles; pooled difference -1.875 points, p=0.699 | `.work/agent/paired-significance/significance-scale-corrected.json`; `docs/plans/CONNECTOME_BENEFIT.md` | `./.venv/bin/python -m agent.verify_parallel_learning_trial` is a separate learning verifier |
-| Degree structure versus in-degree-only random graphs | PASS | Real advantage +18.75 points, pooled p=0.000489 | `.work/agent/paired-significance/significance-scale-corrected.json`; `docs/plans/CONNECTOME_BENEFIT.md` | See cited comparison receipt; no standalone verifier |
+| Specific wiring advantage over degree-preserving shuffles, on odor steering | FAIL | Real trails 4/5 shuffles; seed-cluster pooled difference -1.875 percentage points, p=0.7551 | `.work/agent/paired-significance/significance-corrected-seedcluster.json`; `docs/plans/CONNECTOME_BENEFIT.md` | `./.venv/bin/python -m agent.verify_parallel_learning_trial` is a separate learning verifier |
+| Degree structure versus in-degree-only random graphs | PASS | Real advantage +18.75 percentage points, seed-cluster pooled p=0.001472 | `.work/agent/paired-significance/significance-corrected-seedcluster.json`; `docs/plans/CONNECTOME_BENEFIT.md` | See cited comparison receipt; no standalone verifier |
+
+Correction 2026-10-02: p-values recomputed with seed clusters (mirrored layouts are not independent); old pooled values 0.6990 (shuffles) and 0.000489 (random) are now 0.7551 and 0.001472; conclusions unchanged: specific wiring does not beat degree-preserving shuffles, while the real graph remains ahead of the random-column family.
 
 ## MEMORY
 
