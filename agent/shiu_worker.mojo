@@ -29,6 +29,8 @@ comptime S = N * C
 comptime SLOTS = 19
 comptime CAP = 1 << 16
 comptime BLOCK = 256
+comptime LANES = 32  # gfx1100 wave32
+comptime DGRID = 1024
 comptime LS = row_major[S]()
 comptime LR = row_major[N + 1]()
 comptime LE = row_major[E]()
@@ -81,17 +83,20 @@ def deliver(
     fill: TileTensor[DType.int32, type_of(LSLOT), MutAnyOrigin],
     t: Int32, slot: Int32,
 ):
+    # LANES threads per spike stride over its out-edges; groups stride over the spikes. One thread
+    # per spike serialised hub neurons' thousands of edges: deliver was 96% of a sniff.
     var k = block_idx.x * block_dim.x + thread_idx.x
-    if k >= min(Int(fill[Int(slot)]), CAP):
-        return
-    var i = Int(ring[Int(slot) * CAP + k])
-    var base = (i // N) * N
-    var pre = i - base
-    for e in range(Int(rows[pre]), Int(rows[pre + 1])):
-        var j = base + Int(cols[e])
-        var lj = last[j]
-        if t - lj >= rfc[j] and lj != t:
-            _ = Atomic.fetch_add(g.ptr.unsafe_offset(j), weights[e])
+    var lane = k % LANES
+    var spikes = min(Int(fill[Int(slot)]), CAP)
+    for s in range(k // LANES, spikes, DGRID * BLOCK // LANES):
+        var i = Int(ring[Int(slot) * CAP + s])
+        var base = (i // N) * N
+        var pre = i - base
+        for e in range(Int(rows[pre]) + lane, Int(rows[pre + 1]), LANES):
+            var j = base + Int(cols[e])
+            var lj = last[j]
+            if t - lj >= rfc[j] and lj != t:
+                _ = Atomic.fetch_add(g.ptr.unsafe_offset(j), weights[e])
 
 
 def uniform(seed: UInt32, t: UInt32, entry: UInt32) -> Float32:
@@ -251,7 +256,7 @@ def main() raises:
                 ctx.enqueue_function(step_integrate, u_t, g_t, last_t, rfc_t, counts_t, ring_t, fill_t,
                     k.unsafe_offset(0)[], k.unsafe_offset(1)[], k.unsafe_offset(2)[], k.unsafe_offset(3)[], Int32(t), slot, grid_dim=(S + BLOCK - 1) // BLOCK, block_dim=BLOCK)
                 ctx.enqueue_function(step_deliver, rows_t, cols_t, w_t, g_t, last_t, rfc_t, ring_t, fill_t,
-                    Int32(t), due, grid_dim=CAP // BLOCK, block_dim=BLOCK)
+                    Int32(t), due, grid_dim=DGRID, block_dim=BLOCK)
                 ctx.enqueue_function(step_kick, stim_t, p_t, u_t, last_t, fill_t, Int32(stim_count), seed + UInt32(sniff), Int32(t),
                     due, k.unsafe_offset(4)[], grid_dim=kick_grid, block_dim=BLOCK)
                 t += 1
