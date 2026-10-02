@@ -4,7 +4,8 @@ tests/test_biophysical_kinetics.py
 Unit tests for biophysical Hill-Langmuir dose-response kinetics.
 """
 
-import unittest
+import os, sys, unittest
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from biophysical_kinetics import compute_hill_gain, compute_compound_gains
 
 class TestBiophysicalKinetics(unittest.TestCase):

@@ -5,7 +5,6 @@ Stages fly connectome CSR binary streams and receptor weights into POSIX shared 
 Eliminates disk I/O during high-throughput GPU simulation loops.
 """
 
-import os
 import sys
 import shutil
 import hashlib
@@ -24,16 +23,11 @@ REQUIRED_FILES = [
 ]
 
 def hash_file(path: Path) -> str:
-    """Computes fast SHA256 of first 1MB and last 1MB for verification."""
+    """Compute SHA-256 over the complete file with bounded memory use."""
     h = hashlib.sha256()
-    size = path.stat().st_size
     with open(path, "rb") as f:
-        if size <= 2 * 1024 * 1024:
-            h.update(f.read())
-        else:
-            h.update(f.read(1024 * 1024))
-            f.seek(size - 1024 * 1024)
-            h.update(f.read(1024 * 1024))
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
     return h.hexdigest()
 
 def stage_to_ram(verbose: bool = True) -> Path:

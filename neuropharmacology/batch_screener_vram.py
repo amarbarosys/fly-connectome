@@ -45,10 +45,15 @@ def run_simulation(name: str, gains: Dict[str, float], steps: int = 100) -> Dict
     env["PHARMA_STEPS"] = str(steps)
     env["FLY_DATA_DIR"] = "/dev/shm/fly-connectome/data/"
 
-    cmd = [
-        "gpu-wait", "run", "--vram", "4", "--timeout", "60", "--",
-        str(PHARMA_BIN)
-    ]
+    # gpu-wait jobs run in the daemon environment. Caller environment changes
+    # are not inherited, so pass the experiment inputs explicitly in the job spec.
+    cmd = ["gpu-wait", "run", "--vram", "22", "--timeout", "60"]
+    for key in (
+        "PHARMA_COMPOUND", "PHARMA_G_ACH", "PHARMA_G_GLU", "PHARMA_G_GABA",
+        "PHARMA_G_DOP", "PHARMA_G_SER", "PHARMA_G_OCT", "PHARMA_STEPS", "FLY_DATA_DIR",
+    ):
+        cmd.extend(["--env", f"{key}={env[key]}"])
+    cmd.extend(["--", str(PHARMA_BIN)])
     
     t0 = time.time()
     res = subprocess.run(
