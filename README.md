@@ -5,10 +5,16 @@ Whole-brain connectome pipeline and embodied neural fly agents for adult
 neurons, 10.5M synapses) with MuJoCo biomechanics (NeuroMechFly) and a GPU
 perturbation kernel on AMD RX 7900 XTX.
 
+Current connectome result: across 64 shared odor-steering layouts, the real graph did not
+outperform degree-preserving shuffles (pooled p=0.699); the corrected comparison instead points
+to degree structure over exact wiring. The real arm scored 56/64 and missed its frozen gate.
+See [the matched comparison](docs/plans/CONNECTOME_BENEFIT.md) and the [capability map](docs/CAPABILITIES.md).
+
 Key areas: five multi-omics data layers, embodied agent system
 with checkpoint/restore, and a Rust/Mojo screening rebuild. The compound
 screening engine and chemoinformatics database now live in the separate
-`fly-pharma` repository. See
+`fly-pharma` repository. GPU physics on RX 7900 XTX remains unverified: the supplied body is blocked
+at conversion and the diagnostic model develops NaNs by 1,000 steps. See [GPU body port status](docs/plans/GPU_BODY_PORT.md) and the
 [master plan](docs/plans/FLY_WORLD_MASTER_PLAN.md) for the full program.
 
 ## Screening build (Rust/Mojo)
