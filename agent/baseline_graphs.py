@@ -46,7 +46,7 @@ def cell_classes():
 
 
 def block_keys(row, col, klass):
-    rows = np.repeat(np.arange(N, dtype=np.int64), np.diff(row))
+    rows = np.repeat(np.arange(len(row) - 1, dtype=np.int64), np.diff(row))
     return klass[rows]*(klass.max()+1) + klass[col]
 
 
@@ -56,7 +56,7 @@ def block_shuffle(row, col, klass, generator):
     order = np.argsort(key, kind='stable')
     starts = np.flatnonzero(np.r_[True, key[order][1:] != key[order][:-1]])
     out = col.copy()
-    for start, end in zip(starts, np.r_[starts[1:], E]):
+    for start, end in zip(starts, np.r_[starts[1:], len(col)]):
         positions = order[start:end]
         out[positions] = col[positions][generator.permutation(end-start)]
     return out
@@ -66,13 +66,13 @@ def repair_self_loops(row, col, generator, key=None, original=None):
     """Swap self-loops against random other edges. The source graph has none and a permutation
     creates some, so without this the control would differ from the real graph in a way that is
     not about wiring."""
-    rows = np.repeat(np.arange(N, dtype=np.int64), np.diff(row))
+    rows = np.repeat(np.arange(len(row) - 1, dtype=np.int64), np.diff(row))
     for _ in range(64):
         loops = np.flatnonzero(rows == col)
         if loops.size == 0:
             return col, int(_)
         if key is None:
-            partners = generator.integers(0, E, size=loops.size)
+            partners = generator.integers(0, len(col), size=loops.size)
         else:  # swap only inside the loop's own block, so block counts stay exact
             order = np.argsort(key, kind='stable')
             sorted_key = key[order]
