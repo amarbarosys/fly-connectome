@@ -21,6 +21,15 @@ from fly_arena.behavior import BehaviorDecision
 
 ABSENT = SimpleNamespace(body_contact=False, detected=False, bearing=0., distance_mm=None)
 GAITS = {'left': [.2, .65], 'right': [.65, .2], 'straight': [.425, .425]}
+TRAINING_SEED_START = 8000
+TRAINING_SEED_COUNT = 20
+FROZEN_EVALUATION_SEEDS = set(range(100, 108))
+
+
+def training_scenes():
+    seeds = set(range(TRAINING_SEED_START, TRAINING_SEED_START + TRAINING_SEED_COUNT))
+    assert seeds.isdisjoint(FROZEN_EVALUATION_SEEDS), 'food training seeds overlap food evaluation'
+    return scenes(sorted(seeds))
 
 
 def scenes(seeds):
@@ -44,7 +53,7 @@ def freeze(output, evaluation_seeds=8):
     protocol = {
         'schema': 'fly-world.odor-memory-pilot.v1', 'mode': 'engineering_agent',
         'task': 'one odor-guided turn followed by existing physical feeding gesture',
-        'training': scenes(range(4)), 'evaluation': scenes(range(100, 100+evaluation_seeds)),
+        'training': training_scenes(), 'evaluation': scenes(range(100, 100+evaluation_seeds)),
         'neural': 'CPU fixed connectome; eight natural sensory exchanges; no vision or injected pulses',
         'physics_dt_s': .0001, 'exchange_dt_s': .01,
         'turn_steps': 50, 'feed_steps': 80,

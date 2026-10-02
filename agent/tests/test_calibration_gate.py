@@ -21,7 +21,7 @@ def _run_freeze(tmp_path, calibration):
     food.mkdir()
     (food / 'metrics.json').write_text(json.dumps({'status': 'PASS'}))
     (food / 'trained.npz').write_bytes(b'synthetic-model')
-    (food / 'protocol.json').write_text('{}\n')
+    (food / 'protocol.json').write_text(json.dumps({'training': [{'seed': 8000}], 'evaluation': [{'seed': 100}]}) + '\n')
 
     env = os.environ.copy()
     env['PYTHONPATH'] = str(ROOT)
