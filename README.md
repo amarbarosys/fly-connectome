@@ -1,13 +1,14 @@
 # Fly connectome project
 
-Whole-brain connectome pipeline, embodied neural fly agents and neuropharmacology
-screening for adult *Drosophila melanogaster*, built on FlyWire v783 (139,255
+Whole-brain connectome pipeline and embodied neural fly agents for adult
+*Drosophila melanogaster*, built on FlyWire v783 (139,255
 neurons, 10.5M synapses) with MuJoCo biomechanics (NeuroMechFly) and a GPU
 perturbation kernel on AMD RX 7900 XTX.
 
-Key areas: five multi-omics data layers, in-silico neuropharmacology engine,
-chemoinformatics database (ChEMBL 37 + PubChem 118M), embodied agent system
-with checkpoint/restore, and a Rust/Mojo screening rebuild. See
+Key areas: five multi-omics data layers, embodied agent system
+with checkpoint/restore, and a Rust/Mojo screening rebuild. The compound
+screening engine and chemoinformatics database now live in the separate
+`fly-pharma` repository. See
 [master plan](docs/plans/FLY_WORLD_MASTER_PLAN.md) for the full program.
 
 ## Screening build (Rust/Mojo)
