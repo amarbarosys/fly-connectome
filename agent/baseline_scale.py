@@ -23,6 +23,9 @@ import numpy as np
 from agent import neural_connectome
 from agent import odor_memory_gate
 
+sys.path.insert(0, str(Path.home() / "iTools/science/arm-guard"))
+import arm_guard  # noqa: E402  (~/iTools/science/arm-guard)
+
 
 ROOT = neural_connectome.ROOT
 BASE = ROOT / ".work/agent/matched-baseline"
@@ -386,24 +389,19 @@ def execute(evaluation_seeds: int, workers: int) -> dict:
 
     # A missing graph patch produces identical readouts even though every trial
     # receipt looks internally consistent. Refuse to evaluate such a run.
-    training_hashes = {}
-    graph_hashes = {}
+    # arm-guard hashes the model files on disk, not the hashes training.json claims.
+    guarded, graph_hashes, training_hashes = {}, {}, {}
     for arm in ARMS:
         training = json.loads((output_directory(arm) / "training.json").read_text())
-        graph_hashes[arm] = _assert_loaded_graph_for_arm(arm)
-        assert training.get("graph_col_idx_sha256") == graph_hashes[arm], (
-            f"training graph hash mismatch for {arm}"
-        )
-        training_hashes[arm] = {
-            name: training["models"][name]["sha256"]
-            for name in ("trained", "shuffled_reward")
-        }
-    for model_name in ("trained", "shuffled_reward"):
-        by_hash = {}
-        for arm, hashes in training_hashes.items():
-            by_hash.setdefault(hashes[model_name], []).append(arm)
-        duplicates = {sha: names for sha, names in by_hash.items() if len(names) > 1}
-        assert not duplicates, f"{model_name} fitted model hashes must be pairwise distinct: {duplicates}"
+        loaded = graph_hashes[arm] = _assert_loaded_graph_for_arm(arm)
+        training_hashes[arm] = {name: training["models"][name]["sha256"] for name in ("trained", "shuffled_reward")}
+        assert training.get("graph_col_idx_sha256") == loaded, f"training graph hash mismatch for {arm}"
+        guarded[arm] = {"graph_hash": loaded,
+                        "expected_graph_hash": neural_connectome.digest(graph_directory(arm) / "col_idx.bin"),
+                        "model_paths": [str(output_directory(arm) / f"{name}.npz")
+                                        for name in ("trained", "shuffled_reward")]}
+    guard = arm_guard.assert_arms(guarded)
+    assert guard["status"] == "PASS", f"arm-guard: {guard['problems']}"
 
     tasks_by_arm = {}
     subset_by_arm = {}
