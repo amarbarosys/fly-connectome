@@ -17,6 +17,8 @@ from layout import TileTensor, row_major
 comptime N = 139255
 comptime E = 10572269
 comptime C = get_defined_int["FLY_NEURAL_FLIES", 2]()
+# One spike bit per fly per neuron; the narrow word keeps <= 16 flies byte-identical to before.
+comptime W = DType.uint16 if C <= 16 else DType.uint64
 comptime D = 1303
 comptime F = D * 2
 comptime BLOCK = 128
@@ -39,11 +41,11 @@ def update(
     ports: TileTensor[DType.uint8, type_of(LP), MutAnyOrigin],
     inputs: TileTensor[DType.float32, type_of(LI), MutAnyOrigin],
     direct: TileTensor[DType.float32, type_of(LS), MutAnyOrigin],
-    spikes: TileTensor[DType.uint16, type_of(LN), MutAnyOrigin],
-    next_spikes: TileTensor[DType.uint16, type_of(LN), MutAnyOrigin],
+    spikes: TileTensor[W, type_of(LN), MutAnyOrigin],
+    next_spikes: TileTensor[W, type_of(LN), MutAnyOrigin],
     voltage: TileTensor[DType.float32, type_of(LS), MutAnyOrigin],
     trace: TileTensor[DType.float32, type_of(LS), MutAnyOrigin],
-    ever: TileTensor[DType.uint16, type_of(LN), MutAnyOrigin],
+    ever: TileTensor[W, type_of(LN), MutAnyOrigin],
 ):
     """One thread per neuron advances every fly; bit `fly` of a spike word is that fly's spike."""
     var neuron = block_idx.x * block_dim.x + thread_idx.x
@@ -87,13 +89,13 @@ def update(
         trace[fly * N + neuron] = fma(Float32(0.85), faded[fly], 0.15 * spike)
         if spike > 0.0:
             fired |= 1 << fly
-    next_spikes[neuron] = UInt16(fired)
-    ever[neuron] = UInt16(seen | fired)
+    next_spikes[neuron] = Scalar[W](fired)
+    ever[neuron] = Scalar[W](seen | fired)
 
 
 def expand(
-    spikes: TileTensor[DType.uint16, type_of(LN), MutAnyOrigin],
-    ever: TileTensor[DType.uint16, type_of(LN), MutAnyOrigin],
+    spikes: TileTensor[W, type_of(LN), MutAnyOrigin],
+    ever: TileTensor[W, type_of(LN), MutAnyOrigin],
     spike_values: TileTensor[DType.float32, type_of(LS), MutAnyOrigin],
     ever_values: TileTensor[DType.float32, type_of(LS), MutAnyOrigin],
 ):
@@ -111,8 +113,8 @@ def expand(
 def pack(
     spike_values: TileTensor[DType.float32, type_of(LS), MutAnyOrigin],
     ever_values: TileTensor[DType.float32, type_of(LS), MutAnyOrigin],
-    spikes: TileTensor[DType.uint16, type_of(LN), MutAnyOrigin],
-    ever: TileTensor[DType.uint16, type_of(LN), MutAnyOrigin],
+    spikes: TileTensor[W, type_of(LN), MutAnyOrigin],
+    ever: TileTensor[W, type_of(LN), MutAnyOrigin],
 ):
     """Inverse of expand, for imported state."""
     var neuron = block_idx.x * block_dim.x + thread_idx.x
@@ -125,8 +127,8 @@ def pack(
             fired |= 1 << fly
         if ever_values[fly * N + neuron] > 0:
             seen |= 1 << fly
-    spikes[neuron] = UInt16(fired)
-    ever[neuron] = UInt16(seen)
+    spikes[neuron] = Scalar[W](fired)
+    ever[neuron] = Scalar[W](seen)
 
 
 def gather(
@@ -144,12 +146,12 @@ def gather(
 
 
 def main() raises:
-    comptime assert 1 <= C <= 10, "neural worker supports one through ten independent flies"
+    comptime assert 1 <= C <= 64, "neural worker supports one through 64 independent flies"
     Python.add_to_path(getenv("FLY_PROJECT_ROOT", "/home/<user>/Projects/science/fly-connectome"))
     var bridge = Python.import_module("agent.neural_io")
     var arrays = Python.import_module("agent.neural_connectome")
     var assets = getenv("FLY_NEURAL_ASSETS", "/home/<user>/Projects/science/fly-connectome/.work/neural-flies/assets")
-    var data_dir = "/home/<user>/Projects/science/fly-connectome/data/"
+    var data_dir = getenv("FLY_DATA_DIR", "/home/<user>/Projects/science/fly-connectome/data") + "/"
     # CPU validation uses the same roster-bound loader as the independent oracle.
     _ = arrays.graph_arrays()
     var row_data = open(data_dir + "row_ptr.bin", "r").read_bytes()
@@ -175,9 +177,9 @@ def main() raises:
     var input_buffer = ctx.enqueue_create_buffer[DType.float32](C * 8)
     var direct_buffer = ctx.enqueue_create_buffer[DType.float32](C * N)
     # Spikes and recruitment live as one bit per fly; the float copies exist only for host transfer.
-    var x_buffer = ctx.enqueue_create_buffer[DType.uint16](N)
-    var y_buffer = ctx.enqueue_create_buffer[DType.uint16](N)
-    var ever_buffer = ctx.enqueue_create_buffer[DType.uint16](N)
+    var x_buffer = ctx.enqueue_create_buffer[W](N)
+    var y_buffer = ctx.enqueue_create_buffer[W](N)
+    var ever_buffer = ctx.enqueue_create_buffer[W](N)
     var x_float_buffer = ctx.enqueue_create_buffer[DType.float32](C * N)
     var ever_float_buffer = ctx.enqueue_create_buffer[DType.float32](C * N)
     var v_buffer = ctx.enqueue_create_buffer[DType.float32](C * N)

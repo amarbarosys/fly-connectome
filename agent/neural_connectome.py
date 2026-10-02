@@ -216,8 +216,8 @@ class CPUBrain:
 class Worker:
     """Resident neural process with bounded request waits and explicit failure."""
     def __init__(self, binary=None, *, disconnected=False, flies=2):
-        if type(flies) is not int or not 1 <= flies <= 10:
-            raise ValueError('flies must be an integer in [1,10]')
+        if type(flies) is not int or not 1 <= flies <= 64:
+            raise ValueError('flies must be an integer in [1,64]')
         self.flies = flies
         binary = binary or os.environ.get('FLY_NEURAL_WORKER_BINARY') or ROOT/'.work/neural-flies/neural_worker'
         self.disconnected = disconnected
