@@ -16,7 +16,10 @@ def jaccard(a, b):
     return float(np.count_nonzero(a & b) / union) if union else 0.0
 
 
-def run_gain(brain, drive, cells, gain):
+def run_gain(brain, drive, cells, gain, mbon_gain=1., dn_gain=1.):
+    np.copyto(brain.graph.data, brain.normalized_base)
+    brain.scale_edges(mbon_gain, post=cells['MBON'])
+    brain.scale_edges(dn_gain, post=brain.descending)
     brain.gain = np.float32(gain)
     kc, mbon = cells['KC'], cells['MBON']
     plastic = MBPlasticity(brain, fly=0, eligibility='kc')
@@ -60,7 +63,7 @@ def run_gain(brain, drive, cells, gain):
     response_delta = np.abs(post_response - pre_response)
     plastic.detach()
     return {
-        'gain': gain,
+        'gain': gain, 'mbon_gain': mbon_gain, 'dn_gain': dn_gain,
         'kc_active_fraction': active_fraction.tolist(),
         'kc_pairwise_jaccard': pair_jaccards,
         'sparse_code_pass': sparse_pass,
@@ -87,8 +90,11 @@ def run_gain(brain, drive, cells, gain):
 def verify():
     brain = CPUBrain(flies=3, gain_mode='normalized', gain=30)
     drive, cells = odor_drive(*ODORS), mushroom_body_cells()
-    rows = [run_gain(brain, drive, cells, gain) for gain in (30., 35.)]
-    result = {'status': 'PASS' if all(row['pass'] for row in rows) else 'FAIL',
+    brain.normalized_base = brain.graph.data.copy()
+    # gain 30/35 are the P2 reference rows; the last row is the P1d operating point
+    # (MBON x5, DN x80, sweep-p1d.json), and it alone sets the status.
+    rows = [run_gain(brain, drive, cells, *point) for point in ((30., 1., 1.), (35., 1., 1.), (35., 5., 80.))]
+    result = {'status': 'PASS' if rows[-1]['pass'] else 'FAIL',
               'odors': [list(odor) for odor in ODORS], 'exchanges': EXCHANGES, 'rows': rows}
     out = ROOT / '.work/agent/sparse-learning/result.json'
     out.parent.mkdir(parents=True, exist_ok=True)

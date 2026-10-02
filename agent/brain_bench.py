@@ -225,7 +225,7 @@ ODORS6 = (('DA1', 'VA1d', 'DL3'), ('VM2', 'DM1', 'VA2'), ('DM2', 'VC1', 'DA2'),
 APL = (31044,)  # FlyWire APL with KC edges; its partner row 31045 has none
 
 
-def sweep_class_gain(seeds=3, keep=.8):
+def sweep_class_gain(seeds=3, keep=.8, control=False, grid=None):
     """P1d: per-class gains folded into weights at the sparse point (normalized gain 35).
 
     Grid ranges come from agent.operating_point (APL ~7x, MBON 5-11x, DN 23-83x short of
@@ -263,17 +263,23 @@ def sweep_class_gain(seeds=3, keep=.8):
                  'apl_fired': bool(brain.ever[list(APL)].any()), 'brain_active': brain.ever.mean(axis=0).tolist()},
                 {'sets': np.packbits(np.concatenate([ks, ms, ds]), axis=0)})
 
-    grid = {'gain': [35., 50., 80.], 'apl_in': [1., 8.], 'apl_out': [1., 8., 32.],
-            'mbon_gain': [1., 5., 11.], 'dn_gain': [1., 25., 80.]}
+    if control:
+        drive[:] = 0  # odour-absent control: same weights and run length, no ORN drive
+    grid = grid or {'gain': [35., 50., 80.], 'apl_in': [1., 8.], 'apl_out': [1., 8., 32.],
+                    'mbon_gain': [1., 5., 11.], 'dn_gain': [1., 25., 80.]}
     criteria = {'kc_floor': ('kc_active', '>', .01), 'kc_ceiling': ('kc_active', '<', .10),
                 'kc_distinct': ('kc_jaccard_across_odours', '<', .3),
                 'mbon_responds_every_odour': ('mbon_count', '>=', 1),
                 'dn_fires': ('dn_count_max', '>=', 1), 'brain_bounded': ('brain_active', '<', .05)}
-    return sweep(grid, run, criteria, OUT / 'sweep-p1d')
+    return sweep(grid, run, criteria, OUT / ('sweep-p1d-control' if control else 'sweep-p1d'))
 
 
 if __name__ == '__main__':
-    if '--p1d' in sys.argv:
+    if '--p1d-control' in sys.argv:
+        result = sweep_class_gain(control=True, grid={'gain': [35.], 'apl_in': [1.], 'apl_out': [1., 8., 32.],
+                                                      'mbon_gain': [5., 11.], 'dn_gain': [25., 80.]})
+        result['peak_rss_kib'] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    elif '--p1d' in sys.argv:
         result = sweep_class_gain()
         result['peak_rss_kib'] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     elif '--p1c-cap' in sys.argv:
