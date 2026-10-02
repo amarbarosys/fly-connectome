@@ -112,11 +112,12 @@ def mushroom_body_probe(rates=(5., 20., 100.), seconds=.2):
     return out
 
 
-def flood_code_probe(seeds=3, keep=.8, rate=100., seconds=.2, windows_ms=(10, 15, 20, 30, 50), engine=ShiuBrain, arm=None):
+def flood_code_probe(seeds=3, keep=.8, rate=100., seconds=.2, windows_ms=(10, 15, 20, 30, 50), engine=ShiuBrain, arm=None, odours=None):
     """Not a gate: does odour identity survive the flood, (1) in the first ms after onset,
     (2) in KC firing rates during the flood? 3 odours x `seeds` ORN-jitter columns."""
     from agent.neural_connectome import ANNOTATIONS
     from agent.verify_sparse_learning import ODORS
+    odours = odours or ODORS
     pre, post, w, index = _reference_graph()
     if arm is not None:
         pre, post, w = arm
@@ -128,10 +129,10 @@ def flood_code_probe(seeds=3, keep=.8, rate=100., seconds=.2, windows_ms=(10, 15
         if i is not None and row['cell_class'] == 'olfactory' and row['cell_type'].startswith('ORN_'):
             orn.setdefault(row['cell_type'][4:], []).append(i)
     rng = np.random.default_rng(20261002)
-    odour = np.repeat(np.arange(len(ODORS)), seeds)
+    odour = np.repeat(np.arange(len(odours)), seeds)
     brain = engine(pre, post, w, n=len(index), flies=len(odour), seed=11)
     for column, o in enumerate(odour):
-        cells = np.asarray(sum((orn[g] for g in ODORS[o]), []))
+        cells = np.asarray(sum((orn[g] for g in odours[o]), []))
         brain.stimulate(cells[rng.random(len(cells)) < keep], rate, fly=column)
     same = [(i, j) for i in range(len(odour)) for j in range(i) if odour[i] == odour[j]]
     diff = [(i, j) for i in range(len(odour)) for j in range(i) if odour[i] != odour[j]]
@@ -149,7 +150,7 @@ def flood_code_probe(seeds=3, keep=.8, rate=100., seconds=.2, windows_ms=(10, 15
         hits = 0
         for i in range(len(odour)):
             others = [j for j in range(len(odour)) if j != i]
-            centroids = [x[:, [j for j in others if odour[j] == o]].mean(axis=1) for o in range(len(ODORS))]
+            centroids = [x[:, [j for j in others if odour[j] == o]].mean(axis=1) for o in range(len(odours))]
             with np.errstate(invalid='ignore', divide='ignore'):
                 scores = np.nan_to_num([np.corrcoef(x[:, i], c)[0, 1] for c in centroids], nan=-1.0)
             hits += int(np.argmax(scores) == odour[i] and scores.max() > -1)  # silent column = miss
@@ -167,12 +168,30 @@ def flood_code_probe(seeds=3, keep=.8, rate=100., seconds=.2, windows_ms=(10, 15
     flood = counts_at[-1] - counts_at[-2]
     cs, cd = correlation(flood)
     js, jd = jaccard(counts_at[-1] > 0)
-    out = {'engine': engine.__name__, 'odours': [list(o) for o in ODORS], 'columns': len(odour), 'orn_hz': rate, 'chance': 1 / len(ODORS),
+    out = {'engine': engine.__name__, 'odours': [list(o) for o in odours], 'columns': len(odour), 'orn_hz': rate, 'chance': 1 / len(odours),
            'onset': onset,
            'flood': {'window_ms': [windows_ms[-1], seconds * 1e3], 'kc_active': float((counts_at[-1] > 0).mean()),
                      'ever_jaccard_same': js, 'ever_jaccard_diff': jd,
                      'rate_corr_same_odour': cs, 'rate_corr_diff_odour': cd, 'decode_accuracy': decode(flood),
                      'kc_mean_hz': float(flood.mean() / (seconds - windows_ms[-1] * 1e-3))}}
+    def distinct(similarity):
+        """Per column: mean similarity to same-odour columns minus to other-odour columns."""
+        same_mask = odour[:, None] == odour[None, :]
+        np.fill_diagonal(same_mask, False)
+        return [float(similarity[i][same_mask[i]].mean() - similarity[i][odour != odour[i]].mean())
+                for i in range(len(odour))]
+
+    def jaccard_matrix(sets):
+        sets = sets.astype(np.float64)
+        inter = sets.T @ sets
+        size = sets.sum(axis=0)
+        return inter / np.maximum(size[:, None] + size[None, :] - inter, 1)
+
+    with np.errstate(invalid='ignore', divide='ignore'):
+        out['per_column'] = {**{f'onset_{ms}ms': distinct(jaccard_matrix(c > 0)) for ms, c in zip(windows_ms, counts_at)},
+                             'flood_rate': distinct(np.nan_to_num(np.corrcoef(flood.T)))}
+    if arm is not None:
+        return out
     path = ROOT / f'.work/agent/shiu/flood-code-probe-{engine.__name__}.json'
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(out, indent=2) + '\n')
