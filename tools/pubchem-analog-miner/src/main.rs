@@ -43,6 +43,33 @@ const PRESETS: &[ScaffoldFilter] = &[
         required_substrings: &["=NO", "C=CC=C"],
         excluded_substrings: &["[Si]"],
     },
+    ScaffoldFilter {
+        name: "neonicotinoid",
+        target_role: "Neonicotinoid nAChR Agonist / Insect Stressor",
+        min_len: 12,
+        max_len: 80,
+        // Nitroimine / nitroguanidine motif (imidacloprid, clothianidin, dinotefuran)
+        required_substrings: &["C(=N[N+](=O)[O-])"],
+        excluded_substrings: &["[Si]", "[Sn]"],
+    },
+    ScaffoldFilter {
+        name: "quinuclidinyl",
+        target_role: "High-Potency DM1 Muscarinic Blocker (QNB Analogs)",
+        min_len: 20,
+        max_len: 85,
+        // Quinuclidine ester motif
+        required_substrings: &["C1CN2CCC1CC2", "OC(=O)"],
+        excluded_substrings: &["[Si]", "[Sn]"],
+    },
+    ScaffoldFilter {
+        name: "octopamine",
+        target_role: "Octopaminergic Fight/Flight Arousal Agonist",
+        min_len: 10,
+        max_len: 65,
+        // Phenylethanolamine core motif (aromatic + C(CN)O)
+        required_substrings: &["C(CN)O", "C1=CC="],
+        excluded_substrings: &["[Si]", "[Sn]"],
+    },
 ];
 
 
