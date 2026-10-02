@@ -18,6 +18,7 @@ from __future__ import annotations
 import csv
 import json
 from dataclasses import asdict, dataclass
+from functools import cache
 from pathlib import Path
 
 import numpy as np
@@ -137,18 +138,28 @@ class MBPlasticity:
         path.write_text(json.dumps({'events': self.log, 'summary': self.summary()}, indent=2) + '\n')
 
 
-def odor_drive(glomeruli, annotations=ANNOTATIONS):
-    """An odour identity as drive on the ORNs of the named glomeruli (both sides), shape (N, 1)."""
+@cache
+def orn_nodes(annotations=ANNOTATIONS):
+    """Node indices (int32) of the ORNs of each glomerulus, both sides; one TSV read per process."""
     roots = np.load(ROOT / 'data/proofread_root_ids_783.npy')
     index = {int(root): i for i, root in enumerate(roots)}
-    wanted = {f'ORN_{g}' for g in glomeruli}
-    drive = np.zeros((N, 1), np.float32)
+    nodes = {}
     for row in csv.DictReader(Path(annotations).open(), delimiter='\t'):
         node = index.get(int(row['root_id']))
-        if node is not None and row['cell_class'] == 'olfactory' and row['cell_type'] in wanted:
-            drive[node, 0] = 1
-    if not drive.any():
-        raise ValueError(f'no ORNs for glomeruli {sorted(glomeruli)}')
+        if node is not None and row['cell_class'] == 'olfactory' and row['cell_type'].startswith('ORN_'):
+            nodes.setdefault(row['cell_type'][4:], []).append(node)
+    return {g: np.asarray(v, np.int32) for g, v in nodes.items()}
+
+
+def odor_drive(*odors, annotations=ANNOTATIONS):
+    """Each odour (a list of glomeruli) as one drive column on its ORNs, shape (N, len(odors))."""
+    nodes = orn_nodes(annotations)
+    drive = np.zeros((N, len(odors)), np.float32)
+    for column, glomeruli in enumerate(odors):
+        found = [nodes[g] for g in glomeruli if g in nodes]
+        if not found:
+            raise ValueError(f'no ORNs for glomeruli {sorted(glomeruli)}')
+        drive[np.concatenate(found), column] = 1
     return drive
 
 

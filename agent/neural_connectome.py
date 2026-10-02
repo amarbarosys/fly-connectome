@@ -140,6 +140,17 @@ class CPUBrain:
         self.sparse = None  # optional (nodes, k): at most k of those nodes spike per tick
         self.reset()
 
+    def load_columns(self, directory):
+        """Swap in another arm's column indices in place; row pointers and weights are shared."""
+        col = self.graph.indices
+        assert col.dtype == np.int32 and col.flags.c_contiguous
+        with open(Path(directory) / 'col_idx.bin', 'rb') as stream:
+            if stream.readinto(memoryview(col).cast('B')) != col.nbytes or stream.read(1):
+                raise ValueError(f'{directory}: col_idx.bin size mismatch')
+        if col.min() < 0 or col.max() >= N:
+            raise ValueError(f'{directory}: column index out of range')
+        self.graph.has_sorted_indices = False
+
     def reset(self):
         self.v = np.zeros((N, self.flies), np.float32)
         self.spikes = np.zeros_like(self.v)
