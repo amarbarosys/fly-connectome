@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 
 from agent.neural_connectome import ROOT
-from agent.shiu import T_DLY, T_MBR, TAU, W_SYN, ShiuBrain
+from agent.shiu import T_DLY, T_MBR, TAU, W_SYN, ShiuBrain, ShiuGPU
 
 REF = Path.home() / 'Projects/imports/FlyAssets/eonsystemspbc_fly-brain'
 
@@ -17,11 +17,11 @@ REF = Path.home() / 'Projects/imports/FlyAssets/eonsystemspbc_fly-brain'
 def epsp_check():
     """One presynaptic spike of 10 synapses: post u(t) = A k (e^-t/tau - e^-t/t_mbr) after the delay."""
     brain = ShiuBrain([0], [1], [10], n=2)
-    brain.u[0, 0] = 100.0  # cell 0 crosses threshold on step 0 (it is not refractory yet)
+    brain.u[0] = 100.0  # cell 0 crosses threshold on step 0 (it is not refractory yet)
     trace = []
     for _ in range(300):
         brain.step(1)
-        trace.append(float(brain.u[1, 0]))
+        trace.append(float(brain.u[1]))
     # spike on step 0 is delivered on step 18 and integrates from step 19
     t = (np.arange(300) - round(T_DLY / 1e-4)) * 1e-4
     a, k = 10 * W_SYN, TAU / (TAU - T_MBR)
@@ -43,20 +43,20 @@ def within(value, reference):
     return bool(min(reference) - 3 * np.std(reference) <= value <= max(reference) + 3 * np.std(reference))
 
 
-def sugar_check(seconds=1.0, trials=5):
+def sugar_check(seconds=1.0, trials=5, engine=ShiuBrain):
     con = pd.read_parquet(REF / 'data/2025_Connectivity_783.parquet')
     ids = pd.read_csv(REF / 'data/2025_Completeness_783.csv', index_col=0).index.to_numpy(np.int64)
     source = (REF / 'code/benchmark.py').read_text()
     sugar = [int(x) for x in re.findall(r'7205\d{14}', source[source.index("'sugar'"):source.index("'p9'")])]
     index = {int(root): i for i, root in enumerate(ids)}
-    brain = ShiuBrain(con['Presynaptic_Index'].to_numpy(), con['Postsynaptic_Index'].to_numpy(),
-                      con['Excitatory x Connectivity'].to_numpy(), n=len(ids), flies=trials, seed=20261002)
+    brain = engine(con['Presynaptic_Index'].to_numpy(), con['Postsynaptic_Index'].to_numpy(),
+                   con['Excitatory x Connectivity'].to_numpy(), n=len(ids), flies=trials, seed=20261002)
     brain.stimulate([index[s] for s in sugar], 200.0)
     started = time.perf_counter()
-    brain.step(round(seconds / brain.dt))
-    spikes, active = brain.spikes.sum(axis=0), brain.ever.sum(axis=0)
+    counts = brain.run([round(seconds / brain.dt)])[0]
+    spikes, active = counts.sum(axis=0), (counts > 0).sum(axis=0)
     ref_spikes, ref_active = brian2_reference(seconds)
-    return {'sugar_cells': len(sugar), 'seconds': seconds, 'trials': trials,
+    return {'engine': engine.__name__, 'sugar_cells': len(sugar), 'seconds': seconds, 'trials': trials,
             'spikes': spikes.tolist(), 'active_neurons': active.tolist(),
             'brian2_spikes': ref_spikes, 'brian2_active_neurons': ref_active,
             'wall_s': time.perf_counter() - started,
@@ -112,12 +112,14 @@ def mushroom_body_probe(rates=(5., 20., 100.), seconds=.2):
     return out
 
 
-def flood_code_probe(seeds=3, keep=.8, rate=100., seconds=.2, windows_ms=(10, 15, 20, 30, 50)):
+def flood_code_probe(seeds=3, keep=.8, rate=100., seconds=.2, windows_ms=(10, 15, 20, 30, 50), engine=ShiuBrain, arm=None):
     """Not a gate: does odour identity survive the flood, (1) in the first ms after onset,
     (2) in KC firing rates during the flood? 3 odours x `seeds` ORN-jitter columns."""
     from agent.neural_connectome import ANNOTATIONS
     from agent.verify_sparse_learning import ODORS
     pre, post, w, index = _reference_graph()
+    if arm is not None:
+        pre, post, w = arm
     kc, orn = [], {}
     for row in csv.DictReader(open(ANNOTATIONS), delimiter='\t'):
         i = index.get(int(row['root_id']))
@@ -127,7 +129,7 @@ def flood_code_probe(seeds=3, keep=.8, rate=100., seconds=.2, windows_ms=(10, 15
             orn.setdefault(row['cell_type'][4:], []).append(i)
     rng = np.random.default_rng(20261002)
     odour = np.repeat(np.arange(len(ODORS)), seeds)
-    brain = ShiuBrain(pre, post, w, n=len(index), flies=len(odour), seed=11)
+    brain = engine(pre, post, w, n=len(index), flies=len(odour), seed=11)
     for column, o in enumerate(odour):
         cells = np.asarray(sum((orn[g] for g in ODORS[o]), []))
         brain.stimulate(cells[rng.random(len(cells)) < keep], rate, fly=column)
@@ -153,29 +155,63 @@ def flood_code_probe(seeds=3, keep=.8, rate=100., seconds=.2, windows_ms=(10, 15
             hits += int(np.argmax(scores) == odour[i] and scores.max() > -1)  # silent column = miss
         return hits / len(odour)
 
-    onset, elapsed, snapshots = [], 0, {}
-    for ms in windows_ms:
-        brain.step(round(ms * 1e-3 / brain.dt) - elapsed)
-        elapsed = round(ms * 1e-3 / brain.dt)
-        sets, counts = brain.ever[kc].copy(), brain.spikes[kc].astype(np.float64)
-        snapshots[ms] = counts.copy()
+    steps = [round(ms * 1e-3 / brain.dt) for ms in windows_ms] + [round(seconds / brain.dt)]
+    counts_at = [c[kc].astype(np.float64) for c in brain.run(steps)]
+    onset = []
+    for ms, counts in zip(windows_ms, counts_at):
+        sets = counts > 0
         js, jd = jaccard(sets)
-        onset.append({'ms': ms, 'kc_active': float(sets.mean()), 'kc_cells_per_column': sets.sum(axis=0).tolist(), 'jaccard_same_odour': js, 'jaccard_diff_odour': jd,
+        onset.append({'ms': ms, 'kc_active': float(sets.mean()), 'kc_cells_per_column': sets.sum(axis=0).tolist(),
+                      'jaccard_same_odour': js, 'jaccard_diff_odour': jd,
                       'decode_accuracy': decode(counts) if counts.any() else None})
-    brain.step(round(seconds / brain.dt) - elapsed)
-    flood = brain.spikes[kc].astype(np.float64) - snapshots[windows_ms[-1]]
+    flood = counts_at[-1] - counts_at[-2]
     cs, cd = correlation(flood)
-    js, jd = jaccard(brain.ever[kc])
-    out = {'odours': [list(o) for o in ODORS], 'columns': len(odour), 'orn_hz': rate, 'chance': 1 / len(ODORS),
+    js, jd = jaccard(counts_at[-1] > 0)
+    out = {'engine': engine.__name__, 'odours': [list(o) for o in ODORS], 'columns': len(odour), 'orn_hz': rate, 'chance': 1 / len(ODORS),
            'onset': onset,
-           'flood': {'window_ms': [windows_ms[-1], seconds * 1e3], 'kc_active': float(brain.ever[kc].mean()),
+           'flood': {'window_ms': [windows_ms[-1], seconds * 1e3], 'kc_active': float((counts_at[-1] > 0).mean()),
                      'ever_jaccard_same': js, 'ever_jaccard_diff': jd,
                      'rate_corr_same_odour': cs, 'rate_corr_diff_odour': cd, 'decode_accuracy': decode(flood),
                      'kc_mean_hz': float(flood.mean() / (seconds - windows_ms[-1] * 1e-3))}}
-    path = ROOT / '.work/agent/shiu/flood-code-probe.json'
+    path = ROOT / f'.work/agent/shiu/flood-code-probe-{engine.__name__}.json'
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(out, indent=2) + '\n')
     return out
+
+
+def exact_check(steps=(50, 100, 200), columns=2):
+    """GPU spike counts per cell against the oracle with identical Poisson draws, sugar input."""
+    pre, post, w, index = _reference_graph()
+    source = (REF / 'code/benchmark.py').read_text()
+    sugar = [index[int(x)] for x in re.findall(r'7205\d{14}', source[source.index("'sugar'"):source.index("'p9'")])]
+    runs = {}
+    for engine in (ShiuBrain, ShiuGPU):
+        brain = engine(pre, post, w, n=len(index), flies=columns, seed=7)
+        brain.stimulate(sugar, 200.0)
+        started = time.perf_counter()
+        runs[engine.__name__] = (brain.run(list(steps)), time.perf_counter() - started)
+    rows = [{'steps': s, 'cells_differing': int((a != b).any(axis=1).sum()), 'spikes_cpu': int(a.sum()), 'spikes_gpu': int(b.sum())}
+            for s, a, b in zip(steps, runs['ShiuBrain'][0], runs['ShiuGPU'][0])]
+    return {'rows': rows, 'cpu_s': runs['ShiuBrain'][1], 'gpu_s': runs['ShiuGPU'][1],
+            'first_divergent_steps': next((r['steps'] for r in rows if r['cells_differing']), None),
+            'pass': rows[0]['cells_differing'] == 0}
+
+
+def verify_gpu():
+    started = time.perf_counter()
+    result = {'exact': exact_check(), 'sugar': sugar_check(engine=ShiuGPU)}
+    cpu = json.loads((ROOT / '.work/agent/shiu/flood-code-probe-ShiuBrain.json').read_text())
+    gpu = flood_code_probe(engine=ShiuGPU)
+    result['flood'] = {'cpu': cpu['flood'], 'gpu': gpu['flood'],
+                       'onset_cpu': cpu['onset'], 'onset_gpu': gpu['onset'],
+                       'pass': gpu['flood']['decode_accuracy'] == cpu['flood']['decode_accuracy']
+                       and abs(gpu['flood']['kc_active'] - cpu['flood']['kc_active']) < .02}
+    result['wall_s'] = time.perf_counter() - started
+    result['pass'] = result['exact']['pass'] and result['sugar']['pass'] and result['flood']['pass']
+    (ROOT / '.work/agent/shiu/verification-gpu.json').write_text(json.dumps(result, indent=2) + '\n')
+    print(json.dumps({k: result[k] for k in ('exact', 'wall_s', 'pass')}))
+    print(json.dumps({'sugar': {k: result['sugar'][k] for k in ('spikes', 'active_neurons', 'brian2_spikes', 'brian2_active_neurons', 'wall_s', 'pass')}}))
+    return result
 
 
 def verify():
@@ -190,6 +226,8 @@ def verify():
 
 if __name__ == '__main__':
     import sys
+    if '--gpu' in sys.argv:
+        raise SystemExit(0 if verify_gpu()['pass'] else 1)
     if '--flood' in sys.argv:
         print(json.dumps(flood_code_probe()))
     elif '--mb' in sys.argv:
