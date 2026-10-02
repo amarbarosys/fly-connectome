@@ -30,11 +30,16 @@ import numpy as np
 V_TH, T_MBR, TAU, T_RFC, T_DLY, W_SYN, F_POI = 7.0, 20e-3, 5e-3, 2.2e-3, 1.8e-3, 0.275, 250
 ROOT = Path(__file__).resolve().parents[1]
 GRAPHS = ROOT / '.work/agent/shiu/graphs'
-# The MAX device context pre-reserves a memory pool, by default most of the card: 22.6 GiB VRAM
-# for a 4 GB job, so a second worker ran out of memory. 5% reserves 1.2 GiB and allocates the
-# rest on demand: 4.8 GiB peak, sniff time unchanged (1,774 vs 1,776 ms).
-WORKER_ENV = {**os.environ, 'MODULAR_DEVICE_CONTEXT_MEMORY_MANAGER_SIZE_PERCENT':
-              os.environ.get('MODULAR_DEVICE_CONTEXT_MEMORY_MANAGER_SIZE_PERCENT', '5')}
+KEY = 'MODULAR_DEVICE_CONTEXT_MEMORY_MANAGER_SIZE_PERCENT'
+
+
+def worker_env(n, edges, flies):
+    """The MAX device context pre-reserves a pool, by default most of the card (22.6 GiB for a
+    4 GB job, so a second worker ran out of memory). Reserve this worker's own footprint
+    instead: graph, nine N x C state buffers and the spike ring, + 10%; an outer setting wins."""
+    need = (n + 1) * 4 + edges * 8 + n * flies * 9 * 4 + 19 * (1 << 16) * 4
+    total = max(int(p.read_text()) for p in Path('/sys/class/drm').glob('card*/device/mem_info_vram_total'))
+    return {**os.environ, KEY: os.environ.get(KEY, str(max(1, -(-need * 110 // total))))}
 
 
 def uniform(seed, t, entry):
@@ -162,7 +167,7 @@ class ShiuGPU(ShiuBrain):
         np.asarray(windows, np.int32).tofile(work / 'windows.bin')
         np.asarray([self.em, self.eg, self.c, V_TH, W_SYN * F_POI], np.float32).tofile(work / 'consts.bin')
         subprocess.run([str(worker_binary(self.n, len(self.col), self.flies)), str(self.graph) + '/', str(work) + '/',
-                        str(self.seed), str(self.delay), str(self.refractory)], check=True, env=WORKER_ENV)
+                        str(self.seed), str(self.delay), str(self.refractory)], check=True, env=worker_env(self.n, len(self.col), self.flies))
         counts = np.fromfile(work / 'counts.bin', np.int32).reshape(len(windows), self.flies, self.n)
         self.t, self.counts = int(windows[-1]), counts[-1].reshape(-1).copy()
         return [c.T.copy() for c in counts]
@@ -195,7 +200,7 @@ class ShiuLive(ShiuGPU):
         np.asarray([self.em, self.eg, self.c, V_TH, W_SYN * F_POI], np.float32).tofile(self.work / 'consts.bin')
         self.proc = subprocess.Popen([str(worker_binary(self.n, len(self.col), self.flies)), str(self.graph) + '/',
                                       str(self.work) + '/', str(self.seed), str(self.delay), str(self.refractory), 'resident'],
-                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1, env=WORKER_ENV)
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1, env=worker_env(self.n, len(self.col), self.flies))
         return self
 
     def sniff(self, p):
