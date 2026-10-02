@@ -54,7 +54,8 @@ def run_arms(graphs, n, orn, dn, world):
                                           else np.tile(x, (arms,) + (1,) * (x.ndim - 1)) for x in world)
     cols, flat = len(world[0]), len(pair)
     arm = np.repeat(np.arange(arms), cols)
-    combined = [np.concatenate([g[i] + (a * n if i < 2 else 0) for a, g in enumerate(graphs)]) for i in range(3)]
+    combined = [np.concatenate([np.asarray(g[i], np.int32) + np.int32(a * n if i < 2 else 0) for a, g in enumerate(graphs)])
+                for i in range(3)]  # int32: indices < 2**31, a third of the int64 bytes
     brain = ShiuLive(*combined, n=arms * n, flies=cols, seed=31)
     which = []  # per stim entry: (flat column, 0 food / 1 decoy)
     for c in range(cols):

@@ -62,7 +62,7 @@ def cached_arm(dataset, family, seed, pre, row, post, klass, key):
         path.parent.mkdir(parents=True, exist_ok=True)
         np.savez(path, col=col.astype(np.int32), checks=json.dumps(checks))
     z = np.load(path)
-    return z['col'].astype(np.int64), json.loads(str(z['checks']))
+    return z['col'], json.loads(str(z['checks']))  # int32 as stored: 60 MB per arm, not 120
 
 
 def arms(data, dataset='flywire'):

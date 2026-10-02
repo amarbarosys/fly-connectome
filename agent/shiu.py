@@ -55,18 +55,23 @@ def constants(dt=1e-4):
 
 
 def graph_dir(pre, post, synapses, n):
-    """Out-edge (pre-major) CSR in mV, written once per content hash; graph-null arms are dirs."""
-    pre, post = np.asarray(pre, np.int64), np.asarray(post, np.int32)
-    order = np.argsort(pre, kind='stable')
-    weights = (np.asarray(synapses, np.float32) * np.float32(W_SYN))[order]
+    """Out-edge (pre-major) CSR in mV, written once per content hash; graph-null arms are dirs.
+    int32 indices, no sort when pre is already sorted, arrays hashed in place: the 11-arm
+    combined graph (166M edges) peaked at 13 GiB host RSS with int64, argsort and a byte copy."""
+    pre, post = np.asarray(pre, np.int32), np.asarray(post, np.int32)
+    weights = np.asarray(synapses, np.float32) * np.float32(W_SYN)
+    if (np.diff(pre) < 0).any():
+        order = np.argsort(pre, kind='stable')
+        pre, post, weights = pre[order], post[order], weights[order]
     row = np.zeros(n + 1, np.int32)
     np.cumsum(np.bincount(pre, minlength=n), out=row[1:])
-    col = post[order]
-    key = hashlib.sha256(row.tobytes() + col.tobytes() + weights.tobytes()).hexdigest()[:16]
-    path = GRAPHS / f'{n}-{len(col)}-{key}'
+    digest = hashlib.sha256()
+    for array in (row, post, weights):
+        digest.update(memoryview(np.ascontiguousarray(array)).cast('B'))
+    path = GRAPHS / f'{n}-{len(post)}-{digest.hexdigest()[:16]}'
     if not (path / 'weights.bin').is_file():
         path.mkdir(parents=True, exist_ok=True)
-        for name, array in (('row_ptr', row), ('col_idx', col), ('weights', weights)):
+        for name, array in (('row_ptr', row), ('col_idx', post), ('weights', weights)):
             array.tofile(path / f'{name}.bin')
     return path
 
