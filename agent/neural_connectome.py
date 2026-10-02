@@ -151,6 +151,15 @@ class CPUBrain:
             raise ValueError(f'{directory}: column index out of range')
         self.graph.has_sorted_indices = False
 
+    def scale_edges(self, factor, post=None, pre=None):
+        """Multiply in place the weights onto `post` rows and/or out of `pre` columns (class gain)."""
+        g = self.graph
+        if post is not None:
+            for node in np.asarray(post, np.int64):
+                g.data[g.indptr[node]:g.indptr[node + 1]] *= np.float32(factor)
+        if pre is not None:
+            g.data[np.isin(g.indices, np.asarray(pre, np.int32))] *= np.float32(factor)
+
     def reset(self):
         self.v = np.zeros((N, self.flies), np.float32)
         self.spikes = np.zeros_like(self.v)

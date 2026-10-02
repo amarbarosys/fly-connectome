@@ -5,6 +5,8 @@ CPUBrain here: the graph is stored row=postsynaptic, column=presynaptic, and eli
 accumulated once per body exchange from the brain's spike traces rather than per LIF tick.
 
     e      <- e * exp(-dt/elig_tau) + trace[KC] * trace[MBON]       (per KC->MBON edge)
+    eligibility='kc' drops the MBON term: presynaptic KC activity plus dopamine is enough for
+    KC->MBON depression in the fly (eNeuro 2023, doi 10.1523/eneuro.0275-23.2023).
     reward (sign>0) or punishment (sign<0):
     w      <- clip(w + eta * sign * e * |w0|, w_min_ratio*|w0|, w_max_ratio*|w0|)
 
@@ -58,10 +60,13 @@ def mushroom_body_cells(annotations=ANNOTATIONS):
 
 class MBPlasticity:
     def __init__(self, brain, params: PlasticityParams | None = None, fly: int = 0,
-                 onset_window: bool = False, onset_window_exchanges: int = 4):
+                 onset_window: bool = False, onset_window_exchanges: int = 4, eligibility: str = 'kc_mbon'):
         self.p = params or PlasticityParams()
         self.brain, self.fly = brain, fly
         self.onset_window, self.onset_window_exchanges = onset_window, onset_window_exchanges
+        if eligibility not in ('kc_mbon', 'kc'):
+            raise ValueError(f'unknown eligibility rule {eligibility!r}')
+        self.eligibility = eligibility
         self.cells = mushroom_body_cells()
         g = brain.graph
         is_kc = np.zeros(N, bool); is_kc[self.cells['KC']] = True
@@ -89,7 +94,7 @@ class MBPlasticity:
             return
         trace = self.brain.trace[:, self.fly]
         self.e *= self.decay
-        self.e += trace[self.pre] * trace[self.post]
+        self.e += trace[self.pre] if self.eligibility == 'kc' else trace[self.pre] * trace[self.post]
         self.exchanges += 1
 
     def dopamine(self, sign: float, note: str = ''):
@@ -129,7 +134,7 @@ class MBPlasticity:
                 'max_weight_ratio': float(ratio.max()),
                 'edges_at_floor': int((ratio <= self.p.w_min_ratio + 1e-6).sum()),
                 'edges_at_ceiling': int((ratio >= self.p.w_max_ratio - 1e-6).sum()),
-                'params': asdict(self.p)}
+                'eligibility': self.eligibility, 'params': asdict(self.p)}
 
     def write_log(self, path):
         """Weight-change log: one row per dopamine event plus the end-state summary."""

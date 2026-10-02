@@ -74,6 +74,24 @@ def verify():
         rejected = True
     checks['sparsen_rejects_non_cpu_brain'] = {'pass': rejected}
 
+    # The rule alone, no network dynamics: hand-set traces, one observe, one LTD event.
+    for rule in ('kc_mbon', 'kc'):
+        unit = MBPlasticity(brain, eligibility=rule)
+        kcs, mbon = unit.pre[:3], unit.post[0]
+        brain.trace[:] = 0
+        brain.trace[kcs, 0] = 1
+        brain.trace[mbon, 0] = 1
+        unit.observe()
+        unit.dopamine(-1, 'isolated LTD')
+        moved = brain.graph.data[unit.pos] != unit.w0
+        expected = np.isin(unit.pre, kcs) & ((unit.post == mbon) if rule == 'kc_mbon' else True)
+        checks[f'isolated_{rule}_rule_moves_only_eligible_edges'] = {
+            'pass': bool(expected.any() and np.array_equal(moved, expected)
+                         and np.all(brain.graph.data[unit.pos][moved] < unit.w0[moved])),
+            'edges_moved': int(moved.sum()), 'edges_expected': int(expected.sum())}
+        unit.detach()
+    brain.trace[:] = 0
+
     # Compare the default no-extra-drive/no-sparsity CPUBrain path against the
     # pre-change implementation loaded from the committed source snapshot.
     import importlib.util
