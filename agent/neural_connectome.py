@@ -48,6 +48,16 @@ def graph_arrays(directory=ROOT / 'data'):
     return row, col, weights
 
 
+def normalize_weights_inplace(indptr, weights):
+    """Normalize CSR weights by absolute postsynaptic row sum without edge-sized scratch arrays."""
+    for row in range(len(indptr) - 1):
+        start, end = int(indptr[row]), int(indptr[row + 1])
+        if end > start:
+            total = np.float32(np.abs(weights[start:end]).sum(dtype=np.float64))
+            if total:
+                weights[start:end] /= total
+
+
 def prepare():
     ASSETS.mkdir(parents=True, exist_ok=True)
     roots = np.load(ROOT / 'data/proofread_root_ids_783.npy')
@@ -104,9 +114,16 @@ def prepare():
 
 class CPUBrain:
     """Independent two-fly reference; whole graph remains present."""
-    def __init__(self, *, disconnected=False, flies=2):
-        if type(flies) is not int or not 1 <= flies <= 10:
-            raise ValueError('flies must be an integer in [1,10]')
+    def __init__(self, *, disconnected=False, flies=2, adaptation_da=0.95, adaptation_ka=0.0,
+                 gain_mode='raw', gain=1.0):
+        if type(flies) is not int or not 1 <= flies <= 64:
+            raise ValueError('flies must be an integer in [1,64]')
+        if not 0 <= adaptation_da <= 1 or adaptation_ka < 0:
+            raise ValueError('invalid spike-frequency adaptation parameters')
+        if gain_mode not in ('raw', 'global', 'normalized') or gain < 0:
+            raise ValueError('invalid recurrent gain')
+        self.gain_mode, self.gain = gain_mode, np.float32(gain)
+        self.adaptation_da, self.adaptation_ka = np.float32(adaptation_da), np.float32(adaptation_ka)
         self.flies = flies
         arrays = np.load(ASSETS/'ports.npz')
         self.ports = arrays['ports'].astype(np.float32)
@@ -115,6 +132,11 @@ class CPUBrain:
         if disconnected:
             weights[:] = 0
         self.graph = csr_matrix((weights, col, row), shape=(N, N))
+        self.raw_weights = None if gain_mode == 'normalized' else self.graph.data
+        self.normalized_weights = None
+        if gain_mode == 'normalized':
+            normalize_weights_inplace(self.graph.indptr, self.graph.data)
+            self.normalized_weights = self.graph.data
         self.sparse = None  # optional (nodes, k): at most k of those nodes spike per tick
         self.reset()
 
@@ -122,9 +144,11 @@ class CPUBrain:
         self.v = np.zeros((N, self.flies), np.float32)
         self.spikes = np.zeros_like(self.v)
         self.trace = np.zeros_like(self.v)
+        self.a = np.zeros_like(self.v)
         self.ever = np.zeros((N, self.flies), bool)
 
-    def step(self, inputs, ticks=4, direct=(), after=0, visual=None, extra_drive=None):
+    def step(self, inputs, ticks=4, direct=(), after=0, visual=None, extra_drive=None,
+             measure_activity=False):
         inputs = np.asarray(inputs, np.float32).reshape(self.flies, 8)
         if not np.isfinite(inputs).all() or np.any((inputs < 0) | (inputs > 1)):
             raise ValueError('invalid sensory input')
@@ -141,9 +165,16 @@ class CPUBrain:
             extra_drive=np.asarray(extra_drive,np.float32).reshape(N,self.flies)
             if not np.isfinite(extra_drive).all() or np.any((extra_drive<0)|(extra_drive>1)):raise ValueError('invalid extra drive')
             drive=drive+np.float32(.65)*extra_drive
+        tick_activity = []
         for _ in range(ticks):
-            v = np.float32(.85)*self.v + np.float32(.08)*(self.graph @ self.spikes) + drive
-            self.spikes = (v >= 1).astype(np.float32)
+            if self.gain_mode == 'normalized':
+                recurrent = self.gain * (self.graph @ self.spikes)
+            elif self.gain_mode == 'global':
+                recurrent = self.gain * (self.graph @ self.spikes)
+            else:
+                recurrent = self.graph @ self.spikes
+            v = np.float32(.85)*self.v + np.float32(.08)*recurrent + drive
+            self.spikes = (v - self.a >= 1).astype(np.float32)
             if self.sparse is not None:
                 nodes, k = self.sparse
                 # engineered stand-in for APL feedback inhibition: keep the k most depolarised
@@ -153,10 +184,16 @@ class CPUBrain:
                 np.put_along_axis(block, cut, 0, axis=0)
                 self.spikes[nodes] = block
             self.v = np.where(self.spikes != 0, 0, np.maximum(v, -5)).astype(np.float32)
+            self.a = self.adaptation_da*self.a + self.adaptation_ka*self.spikes
             self.trace = np.float32(.85)*self.trace + np.float32(.15)*self.spikes
             self.ever |= self.spikes != 0
+            if measure_activity:
+                tick_activity.append((self.spikes != 0).mean(axis=0))
         features = np.concatenate((self.v[self.descending].T, self.trace[self.descending].T), axis=1)
-        return {'features': features.tolist(), 'counts': np.column_stack((self.spikes.sum(axis=0), self.ever.sum(axis=0))).tolist(), 'inactive':(np.flatnonzero(~self.ever[after:,0])+after)[:256].tolist()}
+        result = {'features': features.tolist(), 'counts': np.column_stack((self.spikes.sum(axis=0), self.ever.sum(axis=0))).tolist(), 'inactive':(np.flatnonzero(~self.ever[after:,0])+after)[:256].tolist()}
+        if measure_activity:
+            result['tick_active_fraction'] = np.mean(tick_activity, axis=0).tolist()
+        return result
 
 
 class Worker:

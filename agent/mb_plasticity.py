@@ -56,9 +56,11 @@ def mushroom_body_cells(annotations=ANNOTATIONS):
 
 
 class MBPlasticity:
-    def __init__(self, brain, params: PlasticityParams | None = None, fly: int = 0):
+    def __init__(self, brain, params: PlasticityParams | None = None, fly: int = 0,
+                 onset_window: bool = False, onset_window_exchanges: int = 4):
         self.p = params or PlasticityParams()
         self.brain, self.fly = brain, fly
+        self.onset_window, self.onset_window_exchanges = onset_window, onset_window_exchanges
         self.cells = mushroom_body_cells()
         g = brain.graph
         is_kc = np.zeros(N, bool); is_kc[self.cells['KC']] = True
@@ -81,6 +83,9 @@ class MBPlasticity:
 
     def observe(self):
         """Call once after each brain.step: accumulate KC x MBON coactivity on each edge."""
+        if self.onset_window and self.exchanges >= self.onset_window_exchanges:
+            self.exchanges += 1
+            return
         trace = self.brain.trace[:, self.fly]
         self.e *= self.decay
         self.e += trace[self.pre] * trace[self.post]
