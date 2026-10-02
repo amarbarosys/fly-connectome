@@ -1,11 +1,11 @@
 """Degree-preserving shuffled connectome: the control for whether the wiring, rather than the
 degrees and signs, carries an effect.
 
-Port of shuffle_edges from Kisame76/drosophila-brain-mlx (src/lif/shuffle_pack.py, MIT), on
-edge lists instead of a pack. Every edge keeps its presynaptic cell and its signed synapse count,
+After shuffle_edges in Kisame76/drosophila-brain-mlx (src/lif/shuffle_pack.py, MIT); the
+generator is the G1 `shuffled` arm (baseline_graphs.repair_edges with unique). Every edge keeps its presynaptic cell and its signed synapse count,
 so each cell keeps its out-degree, its sign and its total output. Postsynaptic cells are
-permuted across all edges, so each cell keeps its in-degree. A (pre, post) pair that lands twice
-is swapped with a random edge's post until none repeats. Who reaches whom is random, and with it
+permuted across all edges, so each cell keeps its in-degree. A (pre, post) pair that lands twice,
+or a self-loop, is swapped with a random edge's post until none is left. Who reaches whom is random, and with it
 each cell's incoming weight and excitatory/inhibitory input mix.
 
     python -m agent.shiu_shuffle --prepare   # CPU: cache shuffles, build worker
@@ -25,7 +25,9 @@ MN9 = 720575940660219265  # proboscis motor neuron read out by the authors' exam
 
 
 def shuffle_edges(pre, post, seed, max_rounds=1000):
-    """New post for each edge (same order as the input) and stats: repair_rounds, edges_kept, self_loops."""
+    """New post for each edge (same order as the input) and stats: repair_rounds, edges_kept, self_loops.
+    The permutation and repair are the G1 `shuffled` arm (baseline_graphs.repair_edges, unique)."""
+    from agent.baseline_graphs import repair_edges
     pre, post = np.asarray(pre, np.int64), np.asarray(post, np.int64)
     e = post.size
     if pre.size != e:
@@ -34,26 +36,15 @@ def shuffle_edges(pre, post, seed, max_rounds=1000):
     real = pre * n + post
     if np.unique(real).size != e:
         raise ValueError('input repeats a (pre, post) pair; merge parallel edges first')
-    rng = np.random.default_rng(seed)
-    dst = post[rng.permutation(e)]
-    for rounds in range(max_rounds + 1):
-        flat = pre * n + dst
-        order = np.argsort(flat, kind='stable')
-        key = flat[order]
-        repeat = order[1:][key[1:] == key[:-1]]
-        if repeat.size == 0:
-            break
-        if rounds == max_rounds:
-            raise ValueError(f'{repeat.size} parallel edges left after {max_rounds} repair rounds')
-        # Swap each repeat's post with a random edge's; no edge takes part in two swaps, so
-        # together they permute the posts and in-degrees stay.
-        partner = rng.integers(0, e, repeat.size)
-        free = ~np.isin(partner, repeat)
-        partner, first = np.unique(partner[free], return_index=True)
-        repeat = repeat[free][first]
-        swap = np.arange(e)
-        swap[repeat], swap[partner] = partner, repeat
-        dst = dst[swap]
+    if (pre == post).any():
+        raise ValueError('input has self-loops')
+    order = np.argsort(pre, kind='stable')
+    row = np.zeros(n + 1, np.int64)
+    np.cumsum(np.bincount(pre, minlength=n), out=row[1:])
+    generator = np.random.default_rng(seed)
+    col, rounds = repair_edges(row, generator.permutation(post[order]), generator, unique=True, passes=max_rounds)
+    dst = np.empty(e, np.int64)
+    dst[order] = col
     stats = {'repair_rounds': rounds, 'edges_kept': int(np.isin(pre * n + dst, real).sum()),
              'self_loops': int((pre == dst).sum())}
     return dst, stats

@@ -62,38 +62,60 @@ def block_shuffle(row, col, klass, generator):
     return out
 
 
-def repair_self_loops(row, col, generator, key=None, original=None):
-    """Swap self-loops against random other edges. The source graph has none and a permutation
-    creates some, so without this the control would differ from the real graph in a way that is
-    not about wiring."""
+def repair_edges(row, col, generator, key=None, original=None, unique=False, passes=1000):
+    """Swap self-loops (and, with unique, repeated (pre, post) pairs) against random other edges.
+    The source graphs have no self-loops, and the Shiu graphs no repeated pairs, while a
+    permutation creates both, so without this the control would differ from the real graph in a
+    way that is not about wiring. Use unique only when the real graph has no repeats (the
+    neural CSR has 1.1M). Each swap exchanges two posts, so in-degrees stay; with key, partners
+    come from the defect's own block, so block counts stay too."""
     rows = np.repeat(np.arange(len(row) - 1, dtype=np.int64), np.diff(row))
-    for _ in range(64):
-        loops = np.flatnonzero(rows == col)
+    n = len(row) - 1
+    if key is not None:
+        order = np.argsort(key, kind='stable')
+        sorted_key = key[order]
+
+    def defects():
+        bad = rows == col
+        if unique:
+            flat = rows * n + col
+            by = np.argsort(flat, kind='stable')
+            bad[by[1:][flat[by][1:] == flat[by][:-1]]] = True
+        return np.flatnonzero(bad)
+
+    best, stale = None, 0
+    for done in range(passes):
+        loops = defects()
         if loops.size == 0:
-            return col, int(_)
+            return col, done
+        if unique:  # residual repeats in tiny blocks never clear; 20 passes without progress ends the search
+            best, stale = (loops.size, 0) if best is None or loops.size < best else (best, stale + 1)
+            if stale == 20 and key is not None:
+                break
         if key is None:
             partners = generator.integers(0, len(col), size=loops.size)
-        else:  # swap only inside the loop's own block, so block counts stay exact
-            order = np.argsort(key, kind='stable')
-            sorted_key = key[order]
+        else:
             lo = np.searchsorted(sorted_key, key[loops], 'left')
             hi = np.searchsorted(sorted_key, key[loops], 'right')
             partners = order[lo + (generator.random(loops.size)*(hi-lo)).astype(np.int64)]
         # a swap is only taken when it removes the loop without creating another
         keep = (col[partners] != rows[loops]) & (col[loops] != rows[partners])
-        if key is not None:  # small blocks reuse partners; the global path never did (receipts)
+        if key is not None or unique:  # no edge joins two swaps; the old global path did not check (receipts)
             keep &= ~np.isin(partners, loops)
-            unique = np.zeros(loops.size, bool)
-            unique[np.unique(partners, return_index=True)[1]] = True
-            keep &= unique
+            unique_partner = np.zeros(loops.size, bool)
+            unique_partner[np.unique(partners, return_index=True)[1]] = True
+            keep &= unique_partner
         take, give = loops[keep], partners[keep]
         col[take], col[give] = col[give].copy(), col[take].copy()
+        if key is not None and done == 63 and not unique:
+            break  # rigid blocks: fall through to the real layout below
     if key is not None:  # rigid blocks (e.g. two neurons wired to each other) admit only the real layout
-        rigid = np.isin(key, key[rows == col])
+        loops = defects()
+        rigid = np.isin(key, key[loops])
         col[rigid] = original[rigid]
-        if not (rows == col).any():
+        if defects().size == 0:
             return col, -int(np.unique(key[rigid]).size)
-    raise RuntimeError('FAIL repair: self-loops remain after 64 passes')
+    raise RuntimeError(f'FAIL repair: {defects().size} defects remain after {passes} passes')
 
 
 def build(seed=20261002):
@@ -110,13 +132,13 @@ def build(seed=20261002):
             passes = 0
         elif arm == 'shuffled':
             arm_col = generator.permutation(col)
-            arm_col, passes = repair_self_loops(row, arm_col, generator)
+            arm_col, passes = repair_edges(row, arm_col, generator)
         elif arm == 'block':
             arm_col = block_shuffle(row, col, klass, generator)
-            arm_col, passes = repair_self_loops(row, arm_col, generator, key=real_key, original=col)
+            arm_col, passes = repair_edges(row, arm_col, generator, key=real_key, original=col)
         else:
             arm_col = generator.integers(0, N, size=E, dtype=np.int32)
-            arm_col, passes = repair_self_loops(row, arm_col, generator)
+            arm_col, passes = repair_edges(row, arm_col, generator)
         in_arm, out_arm = degrees(row, arm_col)
         rows = np.repeat(np.arange(N, dtype=np.int64), np.diff(row))
         pairs = rows*N+arm_col.astype(np.int64)

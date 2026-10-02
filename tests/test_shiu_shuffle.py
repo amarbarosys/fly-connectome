@@ -14,6 +14,8 @@ def graph(seed=0, edges=900):
     rng = np.random.default_rng(seed)
     pre = np.minimum(rng.geometric(.02, edges * 3) - 1, N - 1)
     post = rng.integers(0, N, pre.size)
+    keep = pre != post
+    pre, post = pre[keep], post[keep]
     _, first = np.unique(pre * N + post, return_index=True)
     first = np.sort(first)[:edges]
     return pre[first], post[first], rng.choice([-3, -1, 1, 2, 5], first.size)
@@ -47,7 +49,7 @@ class TestShuffleEdges(unittest.TestCase):
         self.assertFalse(np.array_equal(a, shuffle_edges(pre, post, seed=1)[0]))
         self.assertEqual(stats['edges_kept'], np.intersect1d(pre * N + a, pre * N + post).size)
         self.assertLess(stats['edges_kept'], post.size)
-        self.assertEqual(stats['self_loops'], int((pre == a).sum()))
+        self.assertEqual(stats['self_loops'], 0)
 
     def test_repeats_left_after_the_last_round_are_refused(self):
         pre, post, _ = graph()
@@ -55,7 +57,7 @@ class TestShuffleEdges(unittest.TestCase):
         for seed in range(5):
             try:
                 shuffle_edges(pre, post, seed=seed, max_rounds=0)
-            except ValueError:
+            except RuntimeError:
                 refused += 1
         self.assertEqual(refused, 5)
 

@@ -9,12 +9,13 @@ columns of real minus the mean of the 5 arms of a family (columns share one grap
 input-jitter samples, not independent animals).
 """
 import csv
+import hashlib
 import json
 import time
 
 import numpy as np
 
-from agent.baseline_graphs import block_keys, block_shuffle, repair_self_loops
+from agent.baseline_graphs import block_keys, block_shuffle, repair_edges
 from agent.brain_bench import ODORS6
 from agent import mcns
 from agent.neural_connectome import ANNOTATIONS, ROOT
@@ -37,7 +38,24 @@ def flywire():
     return pre, post, w, names, None
 
 
-def arms(data):
+def cached_arm(dataset, family, seed, row, post, klass, key):
+    """The arm's post column, built once on the CPU and kept in .work so a GPU job only simulates."""
+    code = hashlib.sha256((ROOT / 'agent/baseline_graphs.py').read_bytes()).hexdigest()[:10]  # a new repair rule never reads an old arm
+    path = ROOT / f'.work/agent/shiu/arms/{dataset}-{len(post)}-{family}-s{seed}-{code}.npz'
+    if not path.is_file():
+        generator = np.random.default_rng(seed)
+        if family == 'shuffled':
+            col, passes = repair_edges(row, generator.permutation(post), generator, unique=True)
+        else:
+            col, passes = repair_edges(row, block_shuffle(row, post, klass, generator), generator,
+                                       key=key, original=post, unique=True)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez(path, col=col.astype(np.int32), passes=passes)
+    z = np.load(path)
+    return z['col'].astype(np.int64), int(z['passes'])
+
+
+def arms(data, dataset='flywire'):
     pre, post, w, names, _ = data
     order = np.argsort(pre, kind='stable')
     pre, post, w = pre[order], post[order].astype(np.int64), w[order]
@@ -50,26 +68,22 @@ def arms(data):
     yield 'real', (pre, post, w), {}
     for seed in SEEDS:
         for family in ('shuffled', 'block'):
-            generator = np.random.default_rng(seed)
-            if family == 'shuffled':
-                col, passes = repair_self_loops(row, generator.permutation(post), generator)
-            else:
-                col, passes = repair_self_loops(row, block_shuffle(row, post, klass, generator), generator,
-                                                key=key, original=post)
+            col, passes = cached_arm(dataset, family, seed, row, post, klass, key)
             checks = {'out_degree_preserved': True,  # rows (presynaptic slots) are untouched
                       'in_degree_preserved': bool(np.array_equal(np.bincount(col, minlength=n), in_degree)),
                       'self_loops': int((pre == col).sum()), 'repair_passes': int(passes),
-                      'edges_unchanged': int((col == post).sum())}
+                      'edges_unchanged': int((col == post).sum()),
+                      'repeated_pairs': int(len(col) - np.unique(pre * n + col).size)}
             if family == 'block':
                 checks['class_blocks_preserved'] = bool(np.array_equal(np.sort(block_keys(row, col, klass)), np.sort(key)))
-            assert checks['in_degree_preserved'] and checks['self_loops'] == 0 and len(out_degree) == n, checks
+            assert checks['in_degree_preserved'] and checks['self_loops'] == 0 and checks['repeated_pairs'] == 0 and len(out_degree) == n, checks
             yield f'{family}-s{seed}', (pre, col, w), checks
 
 
 def run(dataset='flywire'):
     data = {'flywire': flywire, 'mcns': mcns.graph}[dataset]()
     started, results, checks = time.perf_counter(), {}, {}
-    for name, graph, arm_checks in arms(data):
+    for name, graph, arm_checks in arms(data, dataset):
         t = time.perf_counter()
         probe = flood_code_probe(engine=ShiuGPU, arm=graph, odours=ODORS6, cells=data[4])
         results[name] = {'per_column': probe['per_column'], 'flood_decode': probe['flood']['decode_accuracy'],
@@ -100,6 +114,14 @@ def run(dataset='flywire'):
     return out
 
 
+def prepare(dataset='flywire'):
+    """CPU half of run: build and check every arm into the cache."""
+    data = {'flywire': flywire, 'mcns': mcns.graph}[dataset]()
+    for name, _, arm_checks in arms(data, dataset):
+        print(dataset, name, arm_checks, flush=True)
+
+
 if __name__ == '__main__':
     import sys
-    run(*sys.argv[1:2])
+    args = [a for a in sys.argv[1:] if a != '--prepare']
+    (prepare if '--prepare' in sys.argv else run)(*args[:1])
