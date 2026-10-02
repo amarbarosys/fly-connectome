@@ -5,7 +5,12 @@ import argparse
 import json
 import os
 from pathlib import Path
+import sys
 import time
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 import mujoco
 import numpy as np
@@ -13,6 +18,7 @@ from agent.neural_connectome import CPUBrain, Readout, digest
 from agent.odor_memory_gate import ABSENT, GAITS, sensory, execute
 from agent.neural_single import EthologyArena, Environment, Organism, encode, step_signed
 from agent.vision import EyeVision
+from agent.hazard_curriculum import layouts as curriculum_layouts
 from fly_arena.behavior import BehaviorDecision
 
 
@@ -29,17 +35,8 @@ class HazardArena(EthologyArena):
         self.world.ground_geoms.append(geom)
 
 
-def layouts(seeds):
-    rows = []
-    for seed in seeds:
-        rng = np.random.default_rng(seed)
-        jitter = rng.uniform(-.04, .04, 2)
-        for side in (-1, 1):
-            x, y = 3.1, side*1.65
-            rows.append({'id': f'{seed}-{side}', 'seed': seed, 'side': side,
-                'hazard': {'position': [float(x+jitter[0]), float(y+jitter[1]), 1.1],
-                           'size': [.35, .35, 1.1]}})
-    return rows
+def layouts(split, seeds):
+    return curriculum_layouts(split, seeds)
 
 
 def visual_sensory(arena, brain):
@@ -87,24 +84,180 @@ def choose(model, features):
     return GAITS['left'] if output[1] > output[0] else GAITS['right']
 
 
+def _validate_layout_splits(calibration, training, heldout):
+    split_rows = {'calibration': calibration, 'training': training, 'heldout': heldout}
+    ids = {name: {row['id'] for row in rows} for name, rows in split_rows.items()}
+    seeds = {name: {row['seed'] for row in rows} for name, rows in split_rows.items()}
+    for left, right in (('calibration', 'training'), ('calibration', 'heldout'), ('training', 'heldout')):
+        if ids[left] & ids[right] or seeds[left] & seeds[right]:
+            raise ValueError(f'curriculum {left}/{right} layouts or seeds overlap')
+
+
+def calibrate(output, seeds=8):
+    seed_values = list(range(1000, 1000 + seeds))
+    scenes = layouts('calibration', seed_values)
+    if not scenes:
+        raise ValueError('calibration curriculum returned no layouts')
+    arms = {'straight': {'success_count': 0, 'gait': list(GAITS['straight'])},
+            'shuffled': {'success_count': 0, 'gait': None}}
+    correct_turn = {'success_count': 0, 'left_target_count': 0, 'right_target_count': 0,
+                    'left_success_count': 0, 'right_success_count': 0}
+    upright = []
+    for scene in scenes:
+        arena = HazardArena(scene)
+        try:
+            initial = arena.get_state()
+            for arm, config in arms.items():
+                if arm == 'straight':
+                    gait = GAITS['straight']
+                else:
+                    # Deterministic shuffled-label control: assign either turn
+                    # direction from a seed-local permutation, with no scene input.
+                    choice = int(np.random.default_rng(scene['seed'] * 100 + (1 if scene['side'] == 1 else 0)).integers(0, 2))
+                    gait = GAITS[('left', 'right')[choice]]
+                    config['gait'] = list(gait)
+                result = avoid(arena, gait)
+                config['success_count'] += int(result['contact_exchanges'] <= 1)
+                upright.append(result['minimum_upright'])
+                print('calibrate', arm, scene['id'], 'gait', list(gait),
+                      'contact_exchanges', result['contact_exchanges'], flush=True)
+                arena.set_state(initial)
+            action = scene['correct_action']
+            direction = 'left' if action == 'turn_left' else 'right'
+            result = avoid(arena, GAITS[direction])
+            passed = result['contact_exchanges'] <= 1
+            correct_turn['success_count'] += int(passed)
+            target_key = f'{direction}_target_count'
+            success_key = f'{direction}_success_count'
+            correct_turn[target_key] += 1
+            correct_turn[success_key] += int(passed)
+            upright.append(result['minimum_upright'])
+            print('calibrate correct_turn_diagnostic', scene['id'], 'action', action,
+                  'gait', list(GAITS[direction]), 'contact_exchanges', result['contact_exchanges'], flush=True)
+            arena.set_state(initial)
+        finally:
+            arena.close()
+    total = len(scenes)
+    upright_minimum = min(upright)
+    if upright_minimum < .85:
+        print(f'FAIL calibrate: upright threshold broken, minimum={upright_minimum:.6f}, need 0.85', flush=True)
+        raise SystemExit(1)
+    arm_results = []
+    for arm, config in arms.items():
+        rate = config['success_count'] / total
+        arm_results.append({'arm': arm, 'success_count': config['success_count'], 'total': total,
+            'success_rate': rate, 'headroom_percentage_points': (1. - rate) * 100.,
+            'gait_parameters_observed': config['gait']})
+    report = {'schema': 'fly-world.sequential-memory-calibration.v1',
+        'arm_results': arm_results,
+        'arm_definitions': {'straight': {'gait': list(GAITS['straight'])},
+            'shuffled': {'assignment': 'seed-local deterministic uniform left/right choice',
+                'gaits': {'left': list(GAITS['left']), 'right': list(GAITS['right'])}}},
+        'correct_turn_diagnostic': {'success_count': correct_turn['success_count'],
+            'total': total, 'success_rate': correct_turn['success_count'] / total,
+            'left_target_count': correct_turn['left_target_count'],
+            'right_target_count': correct_turn['right_target_count'],
+            'left_success_count': correct_turn['left_success_count'],
+            'right_success_count': correct_turn['right_success_count']},
+        'upright_minimum': upright_minimum, 'success_definition': 'at most one exchange-sampled positive-force hazard contact',
+        'seed_values': seed_values, 'layout_ids': [scene['id'] for scene in scenes]}
+    output.mkdir(parents=True, exist_ok=True)
+    (output/'calibration.json').write_text(json.dumps(report, indent=2)+'\n')
+    print(json.dumps({'calibration': report['arm_results']}, indent=2), flush=True)
+
+
 def freeze(output, food):
+    calibration_path = output/'calibration.json'
+    if not calibration_path.is_file():
+        print('FAIL freeze: no calibration.json, run calibrate first', flush=True)
+        raise SystemExit(1)
+    calibration = json.loads(calibration_path.read_text())
+    if not isinstance(calibration.get('upright_minimum'), (int, float)) or calibration['upright_minimum'] < .85:
+        print(f"FAIL freeze: calibration upright threshold broken, minimum={calibration.get('upright_minimum')}, need 0.85", flush=True)
+        raise SystemExit(1)
+    by_arm = {row['arm']: row for row in calibration.get('arm_results', [])}
+    if not calibration.get('seed_values'):
+        print('FAIL freeze: calibration missing seed values', flush=True)
+        raise SystemExit(1)
+    training = layouts('training', range(2000, 2004))
+    evaluation = layouts('heldout', range(5000, 5008))
+    calibration_layouts = layouts('calibration', calibration.get('seed_values', []))
+    _validate_layout_splits(calibration_layouts, training, evaluation)
+    criteria = {'avoid_success_fraction': .75, 'maximum_contact_exchanges': 1,
+                'minimum_success_improvement': .25, 'minimum_upright': .85,
+                'maximum_food_success_regression': .125}
+    required = criteria['minimum_success_improvement'] * 100.
+    ceiling_result = calibration.get('correct_turn_diagnostic', {})
+    if (not isinstance(ceiling_result.get('success_rate'), (int, float)) or
+            not isinstance(ceiling_result.get('success_count'), int) or
+            not isinstance(ceiling_result.get('total'), int) or
+            ceiling_result['total'] <= 0 or
+            not 0 <= ceiling_result['success_count'] <= ceiling_result['total']):
+        print('FAIL freeze: calibration missing valid correct-turn ceiling', flush=True)
+        raise SystemExit(1)
+    ceiling = ceiling_result['success_count'] / ceiling_result['total']
+    if (not 0. <= float(ceiling_result['success_rate']) <= 1. or
+            abs(ceiling - float(ceiling_result['success_rate'])) > 1e-9):
+        print('FAIL freeze: calibration correct-turn ceiling count/rate mismatch', flush=True)
+        raise SystemExit(1)
+    for arm in ('straight', 'shuffled'):
+        entry = by_arm.get(arm)
+        if entry is None or not isinstance(entry.get('success_rate'), (int, float)):
+            print(f'FAIL freeze: calibration missing valid {arm} arm data', flush=True)
+            raise SystemExit(1)
+        if not 0. <= float(entry['success_rate']) <= 1.:
+            print(f'FAIL freeze: calibration has invalid {arm} success rate', flush=True)
+            raise SystemExit(1)
+        if not isinstance(entry.get('success_count'), int) or not isinstance(entry.get('total'), int) or entry['total'] <= 0 or not 0 <= entry['success_count'] <= entry['total']:
+            print(f'FAIL freeze: calibration has invalid {arm} counts', flush=True)
+            raise SystemExit(1)
+        rate = entry['success_count'] / entry['total']
+        if abs(rate-float(entry['success_rate'])) > 1e-9:
+            print(f'FAIL freeze: calibration {arm} count/rate mismatch', flush=True)
+            raise SystemExit(1)
+        headroom_fraction = ceiling - rate
+        headroom = headroom_fraction * 100.
+        if headroom_fraction + 1e-9 < criteria['minimum_success_improvement']:
+            rate_percent = float(entry['success_rate']) * 100.
+            print(f'FAIL freeze: criterion unreachable, {arm}={rate_percent:g}%, ceiling={ceiling*100.:g}% leaves {headroom:g}pp, need {required:g}pp', flush=True)
+            raise SystemExit(1)
+    expected_straight = list(GAITS['straight'])
+    observed_straight = by_arm['straight'].get('gait_parameters_observed')
+    definitions = calibration.get('arm_definitions', {})
+    observed_turns = definitions.get('shuffled', {}).get('gaits', {})
+    expected_turns = {'left': list(GAITS['left']), 'right': list(GAITS['right'])}
+    if observed_straight != expected_straight or observed_turns != expected_turns:
+        print(f'FAIL freeze: calibration arm parameters mismatch, straight={observed_straight}, expected={expected_straight}; shuffled={observed_turns}, expected={expected_turns}', flush=True)
+        raise SystemExit(1)
     assert json.loads((food/'metrics.json').read_text())['status'] == 'PASS'
-    output.mkdir(parents=True, exist_ok=False)
+    output.mkdir(parents=True, exist_ok=True)
+    if (output/'protocol.json').exists():
+        raise FileExistsError(output/'protocol.json')
     protocol = {'schema': 'fly-world.sequential-memory-pilot.v1',
         'mode': 'engineering_agent', 'food_gate': str(food.resolve()),
         'food_model_sha256': digest(food/'trained.npz'),
         'food_metrics_sha256': digest(food/'metrics.json'),
-        'training': layouts(range(200, 204)), 'evaluation': layouts(range(300, 308)),
+        'training': training, 'evaluation': evaluation,
+        'layout_seed_partition': {'calibration': '1000-1999', 'training': '2000-4999', 'heldout': '5000-7999'},
+        'calibration_feasibility': {'rule': 'for each learned-beats-arm criterion, require correct-turn diagnostic ceiling minus comparator success rate >= required percentage-point improvement',
+            'ceiling_success_rate': ceiling,
+            'ceiling_success_percentage': ceiling*100.,
+            'checked_against': {arm: {'success_rate': by_arm[arm]['success_rate'],
+                'success_percentage': by_arm[arm]['success_rate']*100.,
+                'headroom_percentage_points': (ceiling-by_arm[arm]['success_rate'])*100.,
+                'required_percentage_points': required} for arm in ('straight', 'shuffled')}},
+        'calibration_arm_parameters': {'straight': expected_straight,
+            'shuffled_gaits': expected_turns,
+            'shuffled_assignment': definitions['shuffled']['assignment']},
         'senses': 'eight rendered-eye exchanges through existing coarse visual encoder; no coordinate/task-id policy inputs',
         'reward': 'negative number of exchange-sampled positive-force hazard contacts during 0.5-second turn',
         'learning': 'ridge motor readout fit on rewarded avoidance examples plus eight previous food training examples',
         'rehearsal_budget_bytes': 1024*1024,
         'controls': ['trained', 'untrained_straight', 'shuffled_reward'],
-        'criteria': {'avoid_success_fraction': .75, 'maximum_contact_exchanges': 1,
-                     'minimum_success_improvement': .25, 'minimum_upright': .85,
-                     'maximum_food_success_regression': .125},
+        'criteria': criteria,
         'source_sha256': {str(path): digest(path) for path in [Path(__file__),
-            Path(__file__).with_name('odor_memory_gate.py'), Path(__file__).with_name('vision.py')]}}
+            Path(__file__).with_name('odor_memory_gate.py'), Path(__file__).with_name('vision.py'),
+            Path(__file__).with_name('hazard_curriculum.py')]}}
     (output/'protocol.json').write_text(json.dumps(protocol, indent=2)+'\n')
 
 
@@ -224,11 +377,14 @@ def evaluate(output, protocol):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('stage', choices=('freeze', 'train', 'evaluate'))
+    parser.add_argument('stage', choices=('calibrate', 'freeze', 'train', 'evaluate'))
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--food-gate', type=Path)
+    parser.add_argument('--seeds', type=int, default=8)
     args = parser.parse_args()
-    if args.stage == 'freeze':
+    if args.stage == 'calibrate':
+        calibrate(args.output, args.seeds)
+    elif args.stage == 'freeze':
         freeze(args.output, args.food_gate)
     else:
         protocol = json.loads((args.output/'protocol.json').read_text())
