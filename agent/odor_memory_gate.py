@@ -36,12 +36,15 @@ def scenes(seeds):
     return result
 
 
-def freeze(output):
+def freeze(output, evaluation_seeds=8):
+    """evaluation_seeds defaults to 8, the frozen original: 8 seeds x 2 sides = 16 layouts.
+    Raising it widens the held-out set for statistical power; training stays fixed so the
+    learning conditions are unchanged and arms remain comparable."""
     output.mkdir(parents=True, exist_ok=False)
     protocol = {
         'schema': 'fly-world.odor-memory-pilot.v1', 'mode': 'engineering_agent',
         'task': 'one odor-guided turn followed by existing physical feeding gesture',
-        'training': scenes(range(4)), 'evaluation': scenes(range(100, 108)),
+        'training': scenes(range(4)), 'evaluation': scenes(range(100, 100+evaluation_seeds)),
         'neural': 'CPU fixed connectome; eight natural sensory exchanges; no vision or injected pulses',
         'physics_dt_s': .0001, 'exchange_dt_s': .01,
         'turn_steps': 50, 'feed_steps': 80,
@@ -221,9 +224,11 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('stage', choices=('freeze', 'train', 'evaluate'))
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--evaluation-seeds', type=int, default=8,
+                        help='held-out seeds; each yields 2 layouts. 8 reproduces the frozen original.')
     args = parser.parse_args()
     if args.stage == 'freeze':
-        freeze(args.output)
+        freeze(args.output, args.evaluation_seeds)
     else:
         protocol = json.loads((args.output/'protocol.json').read_text())
         assert all(digest(Path(path)) == sha for path, sha in protocol['source_sha256'].items()), 'source differs from freeze'

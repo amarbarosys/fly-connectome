@@ -65,7 +65,9 @@ def build(seed=20261002):
         rows = np.repeat(np.arange(N, dtype=np.int64), np.diff(row))
         pairs = rows*N+arm_col.astype(np.int64)
         same = int((arm_col == col).sum())
-        directory = OUT/arm
+        # the real arm is seed-independent; each control gets a per-seed directory, because one
+        # realisation cannot separate "the anatomy helps" from "that particular rewiring was poor"
+        directory = OUT/arm if arm == 'real' else OUT/f'{arm}-s{seed}'
         directory.mkdir(parents=True, exist_ok=True)
         row.tofile(directory/'row_ptr.bin')
         arm_col.astype('<i4').tofile(directory/'col_idx.bin')
