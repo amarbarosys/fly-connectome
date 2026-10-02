@@ -21,7 +21,6 @@ comptime D = 1303
 comptime F = D * 2
 comptime BLOCK = 128
 comptime U = get_defined_int["FLY_NEURAL_UNROLL", 16]()
-comptime ORDERED = get_defined_int["FLY_NEURAL_ORDERED", 0]()
 comptime GRID = (N + BLOCK - 1) // BLOCK
 comptime LR = row_major[N + 1]()
 comptime LE = row_major[E]()
@@ -40,7 +39,6 @@ def update(
     ports: TileTensor[DType.uint8, type_of(LP), MutAnyOrigin],
     inputs: TileTensor[DType.float32, type_of(LI), MutAnyOrigin],
     direct: TileTensor[DType.float32, type_of(LS), MutAnyOrigin],
-    order: TileTensor[DType.int32, type_of(LN), MutAnyOrigin],
     spikes: TileTensor[DType.uint16, type_of(LN), MutAnyOrigin],
     next_spikes: TileTensor[DType.uint16, type_of(LN), MutAnyOrigin],
     voltage: TileTensor[DType.float32, type_of(LS), MutAnyOrigin],
@@ -48,10 +46,9 @@ def update(
     ever: TileTensor[DType.uint16, type_of(LN), MutAnyOrigin],
 ):
     """One thread per neuron advances every fly; bit `fly` of a spike word is that fly's spike."""
-    var slot = block_idx.x * block_dim.x + thread_idx.x
-    if slot >= N:
+    var neuron = block_idx.x * block_dim.x + thread_idx.x
+    if neuron >= N:
         return
-    var neuron = Int(order[slot])
     var total = InlineArray[Float32, C](fill=Float32(0.0))
     var edge = Int(rows[neuron])
     var end = Int(rows[neuron + 1])
@@ -165,28 +162,6 @@ def main() raises:
     if getenv("FLY_NEURAL_DRY") == "1":
         bridge.ready(F, C, True)
         return
-    # Stable counting sort of neurons by descending in-degree.
-    var row_ptr = row_data.unsafe_ptr().unsafe_bitcast[Int32]()
-    var max_degree = 0
-    for i in range(N):
-        max_degree = max(max_degree, Int(row_ptr[unsafe_offset=i + 1]) - Int(row_ptr[unsafe_offset=i]))
-    var bucket = List[Int](capacity=max_degree + 2)
-    for _ in range(max_degree + 2):
-        bucket.append(0)
-    for i in range(N):
-        bucket[max_degree - (Int(row_ptr[unsafe_offset=i + 1]) - Int(row_ptr[unsafe_offset=i])) + 1] += 1
-    for key in range(max_degree + 1):
-        bucket[key + 1] += bucket[key]
-    var host_order = List[Int32](capacity=N)
-    for _ in range(N):
-        host_order.append(0)
-    for i in range(N):
-        var key = max_degree - (Int(row_ptr[unsafe_offset=i + 1]) - Int(row_ptr[unsafe_offset=i]))
-        host_order[bucket[key]] = Int32(i)
-        bucket[key] += 1
-    if ORDERED == 0:
-        for i in range(N):
-            host_order[i] = Int32(i)
     var ctx = DeviceContext(0)
     var dynamics = ctx.compile_function[update]()
     var unpack = ctx.compile_function[expand]()
@@ -197,7 +172,6 @@ def main() raises:
     var weight_buffer = ctx.enqueue_create_buffer[DType.float32](E)
     var port_buffer = ctx.enqueue_create_buffer[DType.uint8](N * 8)
     var descending_buffer = ctx.enqueue_create_buffer[DType.int32](D)
-    var order_buffer = ctx.enqueue_create_buffer[DType.int32](N)
     var input_buffer = ctx.enqueue_create_buffer[DType.float32](C * 8)
     var direct_buffer = ctx.enqueue_create_buffer[DType.float32](C * N)
     # Spikes and recruitment live as one bit per fly; the float copies exist only for host transfer.
@@ -216,14 +190,12 @@ def main() raises:
         weight_buffer.enqueue_fill(0.0)
     ctx.enqueue_copy(port_buffer, port_data.unsafe_ptr())
     ctx.enqueue_copy(descending_buffer, descending_data.unsafe_ptr().unsafe_bitcast[Int32]())
-    ctx.enqueue_copy(order_buffer, host_order.unsafe_ptr())
     var row_tensor = TileTensor(row_buffer, LR)
     var col_tensor = TileTensor(col_buffer, LE)
     var weight_tensor = TileTensor(weight_buffer, LE)
     var port_tensor = TileTensor(port_buffer, LP)
     var input_tensor = TileTensor(input_buffer, LI)
     var direct_tensor = TileTensor(direct_buffer, LS)
-    var order_tensor = TileTensor(order_buffer, LN)
     var x_tensor = TileTensor(x_buffer, LN)
     var y_tensor = TileTensor(y_buffer, LN)
     var ever_tensor = TileTensor(ever_buffer, LN)
@@ -315,11 +287,11 @@ def main() raises:
         for tick in range(4):
             if tick % 2 == 0:
                 ctx.enqueue_function(dynamics, row_tensor, col_tensor, weight_tensor,
-                    port_tensor, input_tensor, direct_tensor, order_tensor, x_tensor, y_tensor, v_tensor,
+                    port_tensor, input_tensor, direct_tensor, x_tensor, y_tensor, v_tensor,
                     trace_tensor, ever_tensor, grid_dim=GRID, block_dim=BLOCK)
             else:
                 ctx.enqueue_function(dynamics, row_tensor, col_tensor, weight_tensor,
-                    port_tensor, input_tensor, direct_tensor, order_tensor, y_tensor, x_tensor, v_tensor,
+                    port_tensor, input_tensor, direct_tensor, y_tensor, x_tensor, v_tensor,
                     trace_tensor, ever_tensor, grid_dim=GRID, block_dim=BLOCK)
         if timing:
             ctx.synchronize()
