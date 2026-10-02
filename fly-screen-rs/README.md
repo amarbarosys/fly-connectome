@@ -11,14 +11,16 @@ cd /home/<user>/Projects/mojo/fly-spmv
 mojo build src/fly_batch_gpu.mojo -o .work/fly_batch_gpu
 
 cd /home/<user>/Projects/science/fly-connectome/fly-screen-rs
-cargo test
-cargo build --release
-FLY_DRY_ONLY=1 FLY_CONDITIONS=3 FLY_STEPS=1 target/release/fly-screen
+cargo test --bin fly-screen
+cargo build --release --bin fly-screen
+FLY_DRY_ONLY=1 FLY_CONDITIONS=50 FLY_STEPS=100 target/release/fly-screen
 ```
 
-The CPU preflight validates the manifest and full connectome dimensions without
-creating a GPU context. Normal runs use `kit/gpujob`, which repeats the dry gate
-and submits one GPU job with a 22 GB reservation and a 180 second timeout.
+The CPU preflight validates the worker's reported manifest, graph dimensions,
+and nonempty unique descending-neuron count without creating a GPU context.
+For a device-side kernel compile check without running a batch, use
+`FLY_GPU_COMPILE_ONLY=1 target/release/fly-screen`; it queues a short 1 GB job.
+Normal runs queue one batch job with a 22 GB reservation and 180 second timeout.
 
 ## Run
 
@@ -26,11 +28,20 @@ and submits one GPU job with a 22 GB reservation and a 180 second timeout.
 target/release/fly-screen
 ```
 
-Defaults are the first 50 deterministic conditions and 100 steps. For a bounded
-smoke, set `FLY_CONDITIONS=3 FLY_STEPS=1..128`; `FLY_DATA_DIR`,
+Defaults request a maximum of 50 deterministic conditions and 100 steps. The
+condition cap is filled only with complete three-dose ladders; current catalog
+ordering therefore produces 48 rows (three controls plus 15 complete ladders).
+`FLY_CONDITIONS` is an upper bound, and both requested and emitted counts are
+recorded. For a bounded smoke, set `FLY_CONDITIONS=3 FLY_STEPS=1`; `FLY_DATA_DIR`,
 `FLY_CONNECTOME_DIR`, `FLY_SPMV_DIR`, `FLY_GPU_ENGINE`, and `FLY_GPUJOB` can
-select local paths. Each run writes `manifest.bin`, `worker.stdout`, a ZSTD
-Parquet summary, and `receipt.json` under `../.work/runs/<run-id>/`.
+select local paths. Direct reads are the default. Set `FLY_RAM_STAGE=1` to copy
+the five engine inputs into a full-hash, content-addressed tmpfs stage. Rust
+checks available capacity, hashes each source while copying, publishes the
+stage atomically, verifies reused stages, and records stage identity and timing
+in the receipt. `FLY_RAM_STAGE_ROOT` can change the tmpfs cache root.
+
+Each run writes `manifest.bin`, `worker.stdout`, a ZSTD Parquet summary, and
+`receipt.json` under `../.work/runs/<run-id>/` (the project's root `.work/runs/`).
 
 ## Binary manifest v1
 
@@ -46,7 +57,11 @@ state are indexed per condition.
 The baseline receipt remains a frozen record of its original run. Its 50 rows
 record varied gains but identical neutral telemetry because the old Python
 runner did not forward its environment into `gpu-wait` job specs. That runner
-now passes `--env` explicitly. Corrected Python and Rust/Mojo telemetry match
-exactly for the three acetylcholine dose points, and controls match the frozen
-receipt. This demonstrates software parity for the checked conditions; the
-global transmitter-gain hypothesis is still not biological validation.
+now passes `--env` explicitly. The earlier 50-condition release build matched
+the corrected Python reference and produced the five-pair benchmark. The current
+complete-ladder build emits 48 conditions and has exact five-field telemetry
+parity for those rows; see the root `../data/screening_claim_fixes_20260930.md`
+and referenced `../.work/runs/` receipt for current-binary evidence. This demonstrates
+software parity for the tested workload; it does not validate biological
+predictions. The project as a whole is not converted: see the root README and
+migration plan for remaining Python tools.

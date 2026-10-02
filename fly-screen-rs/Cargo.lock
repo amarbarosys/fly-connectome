@@ -492,6 +492,7 @@ name = "fly-screen"
 version = "0.1.0"
 dependencies = [
  "duckdb",
+ "libc",
  "serde",
  "serde_json",
  "sha2",
