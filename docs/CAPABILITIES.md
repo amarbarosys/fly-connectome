@@ -44,7 +44,7 @@ Correction 2026-10-02: p-values recomputed with seed clusters (mirrored layouts 
 |---|---|---:|---|---|
 | Reward-trained decoder/readout with fixed connectome weights | PASS | Learning changes readout; connectome weights stay fixed | `docs/plans/ODOR_MEMORY_PILOT.md`; `docs/plans/CONNECTOME_BENEFIT.md` | `./.venv/bin/python -m agent.odor_memory_gate` |
 | Dopamine-gated KC to MBON plasticity (isolated rule) | PASS | Hand-set traces, one LTD event: exactly the eligible edges move, all down, for both the KC x MBON and KC-only rules | `.work/agent/mb-plasticity/verification.json` | `./.venv/bin/python -m agent.verify_mb_plasticity` |
-| Dopamine-gated KC to MBON plasticity (through the odour chain) | FAIL | Rule implemented and logged; at gain 35 eligibility is zero on all 4,096 A-active KC to MBON edges because MBONs are silent | `.work/briefs/science-path/REPORT-P2.md` | `./.venv/bin/python -m agent.verify_sparse_learning` |
+| Dopamine-gated KC to MBON plasticity (through the odour chain) | FAIL | At the P1d point (gain 35, MBON x5, DN x80), KC-only eligibility, reward as depression: A-active KC edges change 23.9x more than B-active; MBONs fire 15/19/4; but MBON response after reward moves more for B (0.187) than A (0.034) | `.work/agent/sparse-learning/result.json` | `./.venv/bin/python -m agent.verify_sparse_learning` |
 | Biological learning in the connectome | UNVERIFIED | Not measured | `docs/plans/CONNECTOME_BENEFIT.md`; `docs/plans/FLY_WORLD_MASTER_PLAN.md` | No biological-learning implementation |
 | Parallel arena experience collection | PASS | 4.60 to 4.67x faster collection; equal experience 29/30 for both policies | `docs/plans/SPECTATOR_PARALLEL_LEARNING.md`; `.work/agent/spectator-learning/learning/comparison.json` | `./.venv/bin/python -m agent.verify_parallel_learning_trial` |
 
@@ -72,6 +72,7 @@ Correction 2026-10-02: p-values recomputed with seed clusters (mirrored layouts 
 | Rust/Mojo screening parity and throughput | PASS | 48 manifest rows match Python reference; 24.44x in paired benchmark | `docs/plans/SCREENING_REBUILD_PLAN.md`; `.work/runs/155567-1790771553562845391/receipt.json`; `.work/benchmarks/rebuild_20260930/paired_benchmark_receipt.json` | `fly-screen-rs/target/release/fly-screen` |
 | Screening biological predictive validity | UNVERIFIED | Not established by parity or speed | `docs/plans/SCREENING_REBUILD_PLAN.md` | No biological-validation entrypoint |
 | GPU neural worker tick | PASS | 3.1 to 4.4x faster per tick, bit-identical to the previous kernel; CPU/GPU parity error 0.0 | commits `d065ff9`, `1eebbd2` | `.work/fly-research/arena-venv/bin/python -m agent.verify_neural` |
+| GPU worker at 64 flies and alternate graphs | PASS | 64-fly build and 2-fly block-s7 graph (FLY_DATA_DIR) within 9.5e-7 of CPUBrain; spike words uint16 up to 16 flies, uint64 above | commit `704becb` | `.work/fly-research/arena-venv/bin/python -m agent.verify_worker_wide` |
 | Ten-fly full-loop capacity | PASS | Optimized aggregate 0.861 fly-seconds/wall-second; per-fly full loop 0.0873x real time | `docs/plans/TEN_FLY_CAPACITY.md`; `.work/agent/ten-fly/independent-verification.json` | `./.venv/bin/python -m agent.verify_batch_capacity` |
 
 ## Not yet / unlockable
