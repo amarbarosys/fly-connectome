@@ -39,3 +39,10 @@ def graph(threshold=5):
     for i in np.flatnonzero((a['class'].to_numpy() == 'olfactory') & pd.Series(types).str.startswith('ORN_').to_numpy()):
         orn.setdefault(types[i][4:], []).append(int(i))
     return pre.astype(np.int64), post.astype(np.int64), w.astype(np.int64), names, (len(bodies), kc, orn)
+
+
+def descending():
+    """Descending-neuron indices in graph() order (superclass descending_neuron)."""
+    a = pd.read_feather(DATA / 'body-annotations-male-cns-v1.0-minconf-0.5.feather', columns=['status', 'superclass'])
+    a = a[a['status'].isin(['Traced', 'Anchor'])].reset_index(drop=True)
+    return np.flatnonzero(a['superclass'].to_numpy() == 'descending_neuron').tolist()

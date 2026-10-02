@@ -1,10 +1,15 @@
 """Shiu et al. 2024 whole-brain LIF on the GPU; twin of ShiuBrain in agent/shiu.py.
 
-usage: shiu_worker GRAPH_DIR/ WORK_DIR/ SEED DELAY_STEPS REFRACTORY_STEPS
+usage: shiu_worker GRAPH_DIR/ WORK_DIR/ SEED DELAY_STEPS REFRACTORY_STEPS [resident]
 GRAPH_DIR holds the out-edge CSR (row_ptr, col_idx int32; weights float32 mV). WORK_DIR holds
 stim_index.bin (int32 entries, column * N + neuron), stim_p.bin (float32 Poisson probability
 per step), windows.bin (int32 ascending step counts) and consts.bin (float32 em, eg, c, v_th,
 poisson kick); counts.bin (int32, windows x C x N) is written there.
+
+resident: the graph stays on the device and each stdin line "sniff" resets the state, rereads
+stim_p.bin, runs to the last window and writes counts at every window for the entries in
+readout.bin only (gather.bin, int32 windows x R), then prints "ok"; "q" ends. Sniff k uses
+seed + k, so repeated sniffs draw fresh Poisson events.
 
 Per step t, three launches in ShiuBrain's order: integrate + threshold + reset, push delivery
 of the spikes from t - DELAY (atomic adds into g, refractory and just-spiked targets skipped),
@@ -118,6 +123,17 @@ def kick(
         u[i] += amount
 
 
+def gather(
+    counts: TileTensor[DType.int32, type_of(LS), MutAnyOrigin],
+    idx: TileTensor[DType.int32, type_of(LS), MutAnyOrigin],
+    dst: TileTensor[DType.int32, type_of(LS), MutAnyOrigin],
+    count: Int32, offset: Int32,
+):
+    var k = block_idx.x * block_dim.x + thread_idx.x
+    if k < Int(count):
+        dst[Int(offset) + k] = counts[Int(idx[k])]
+
+
 def load(path: String, size: Int) raises -> List[UInt8]:
     """Raw little-endian file, length checked; device copies read it in place, no host copy."""
     var raw = open(path, "r").read_bytes()
@@ -128,8 +144,9 @@ def load(path: String, size: Int) raises -> List[UInt8]:
 
 def main() raises:
     var args = argv()
-    if len(args) != 6:
-        raise Error("usage: shiu_worker GRAPH_DIR/ WORK_DIR/ SEED DELAY_STEPS REFRACTORY_STEPS")
+    if len(args) != 6 and not (len(args) == 7 and String(args[6]) == "resident"):
+        raise Error("usage: shiu_worker GRAPH_DIR/ WORK_DIR/ SEED DELAY_STEPS REFRACTORY_STEPS [resident]")
+    var resident = len(args) == 7
     var graph = String(args[1])
     var work = String(args[2])
     var seed = UInt32(Int(String(args[3])))
@@ -198,28 +215,62 @@ def main() raises:
     var ring_t = TileTensor(ring_b, LRING)
     var fill_t = TileTensor(fill_b, LSLOT)
 
-    var out = List[Int32](length=window_count * S, fill=0)
+    var step_gather = ctx.compile_function[gather]()
+    var readout_raw = load(work + "readout.bin", -1) if resident else List[UInt8]()
+    var readout_count = len(readout_raw) // 4
+    if readout_count * window_count > S:
+        raise Error("readout too large")
+    var idx_b = ctx.enqueue_create_buffer[DType.int32](S)
+    var got_b = ctx.enqueue_create_buffer[DType.int32](S)
+    if resident and readout_count > 0:
+        ctx.enqueue_copy(idx_b.create_sub_buffer[DType.int32](0, readout_count), readout_raw.unsafe_ptr().unsafe_bitcast[Int32]())
+    var idx_t = TileTensor(idx_b, LS)
+    var got_t = TileTensor(got_b, LS)
+    var out = List[Int32](length=(window_count * readout_count) if resident else (window_count * S), fill=0)
     var kick_grid = max((Int(stim_count) + BLOCK - 1) // BLOCK, 1)
-    var window = 0
-    var t = 0
-    while window < window_count:
-        var stop = Int(windows.unsafe_offset(window)[])
-        while t < stop:
-            var slot = Int32(t % SLOTS)
-            var due = Int32((t + 1) % SLOTS)  # == (t - delay) mod SLOTS
-            ctx.enqueue_function(step_integrate, u_t, g_t, last_t, rfc_t, counts_t, ring_t, fill_t,
-                k.unsafe_offset(0)[], k.unsafe_offset(1)[], k.unsafe_offset(2)[], k.unsafe_offset(3)[], Int32(t), slot, grid_dim=(S + BLOCK - 1) // BLOCK, block_dim=BLOCK)
-            ctx.enqueue_function(step_deliver, rows_t, cols_t, w_t, g_t, last_t, rfc_t, ring_t, fill_t,
-                Int32(t), due, grid_dim=CAP // BLOCK, block_dim=BLOCK)
-            ctx.enqueue_function(step_kick, stim_t, p_t, u_t, last_t, fill_t, Int32(stim_count), seed, Int32(t),
-                due, k.unsafe_offset(4)[], grid_dim=kick_grid, block_dim=BLOCK)
-            t += 1
-        ctx.enqueue_copy(out.unsafe_ptr().unsafe_offset(window * S), counts_b)
-        window += 1
-    var overflow = List[Int32](length=SLOTS + 1, fill=0)
-    ctx.enqueue_copy(overflow.unsafe_ptr(), fill_b)
-    ctx.synchronize()
-    if overflow[SLOTS] != 0:
-        raise Error("spike ring overflow: " + String(overflow[SLOTS]) + " spikes over capacity")
-    with open(work + "counts.bin", "w") as f:
-        f.write_bytes(Span(unsafe_ptr=out.unsafe_ptr().unsafe_bitcast[UInt8](), length=len(out) * 4))
+    var sniff = 0
+    while True:
+        if resident:
+            var line = input()
+            if line == "q":
+                break
+            var fresh = load(work + "stim_p.bin", stim_count)
+            ctx.enqueue_copy(p_b.create_sub_buffer[DType.float32](0, stim_count), fresh.unsafe_ptr().unsafe_bitcast[Float32]())
+            u_b.enqueue_fill(0.0)
+            g_b.enqueue_fill(0.0)
+            last_b.enqueue_fill(-1000000000)
+            counts_b.enqueue_fill(0)
+            fill_b.enqueue_fill(0)
+        var window = 0
+        var t = 0
+        while window < window_count:
+            var stop = Int(windows.unsafe_offset(window)[])
+            while t < stop:
+                var slot = Int32(t % SLOTS)
+                var due = Int32((t + 1) % SLOTS)  # == (t - delay) mod SLOTS
+                ctx.enqueue_function(step_integrate, u_t, g_t, last_t, rfc_t, counts_t, ring_t, fill_t,
+                    k.unsafe_offset(0)[], k.unsafe_offset(1)[], k.unsafe_offset(2)[], k.unsafe_offset(3)[], Int32(t), slot, grid_dim=(S + BLOCK - 1) // BLOCK, block_dim=BLOCK)
+                ctx.enqueue_function(step_deliver, rows_t, cols_t, w_t, g_t, last_t, rfc_t, ring_t, fill_t,
+                    Int32(t), due, grid_dim=CAP // BLOCK, block_dim=BLOCK)
+                ctx.enqueue_function(step_kick, stim_t, p_t, u_t, last_t, fill_t, Int32(stim_count), seed + UInt32(sniff), Int32(t),
+                    due, k.unsafe_offset(4)[], grid_dim=kick_grid, block_dim=BLOCK)
+                t += 1
+            if resident:
+                ctx.enqueue_function(step_gather, counts_t, idx_t, got_t, Int32(readout_count), Int32(window * readout_count),
+                    grid_dim=max((readout_count + BLOCK - 1) // BLOCK, 1), block_dim=BLOCK)
+            else:
+                ctx.enqueue_copy(out.unsafe_ptr().unsafe_offset(window * S), counts_b)
+            window += 1
+        if resident:
+            ctx.enqueue_copy(out.unsafe_ptr(), got_b.create_sub_buffer[DType.int32](0, len(out)))
+        var overflow = List[Int32](length=SLOTS + 1, fill=0)
+        ctx.enqueue_copy(overflow.unsafe_ptr(), fill_b)
+        ctx.synchronize()
+        if overflow[SLOTS] != 0:
+            raise Error("spike ring overflow: " + String(overflow[SLOTS]) + " spikes over capacity")
+        with open(work + ("gather.bin" if resident else "counts.bin"), "w") as f:
+            f.write_bytes(Span(unsafe_ptr=out.unsafe_ptr().unsafe_bitcast[UInt8](), length=len(out) * 4))
+        if not resident:
+            break
+        print("ok", flush=True)
+        sniff += 1

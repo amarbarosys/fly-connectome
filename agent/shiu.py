@@ -166,3 +166,36 @@ def worker_binary(n, edges, flies):
         subprocess.run([str(Path.home() / '.local/bin/mojo'), 'build', f'-DSHIU_N={n}', f'-DSHIU_E={edges}',
                         f'-DSHIU_C={flies}', str(source), '-o', str(binary)], check=True, cwd=ROOT)
     return binary
+
+
+class ShiuLive(ShiuGPU):
+    """Resident ShiuGPU: graph uploaded once; each sniff(p) resets the brain, runs to the last
+    window with Poisson probabilities p (per stimulate() entry, in insertion order) and returns
+    counts (windows, len(readout)) for the readout entries only. Sniff k uses seed + k."""
+    def start(self, windows, readout):
+        self.work = ROOT / f'.work/agent/shiu/live-{id(self)}'
+        self.work.mkdir(parents=True, exist_ok=True)
+        entries, p = self._stim_arrays()
+        entries.astype(np.int32).tofile(self.work / 'stim_index.bin')
+        p.tofile(self.work / 'stim_p.bin')
+        self.windows, self.readout = np.asarray(windows, np.int32), np.asarray(readout, np.int32)
+        self.windows.tofile(self.work / 'windows.bin')
+        self.readout.tofile(self.work / 'readout.bin')
+        np.asarray([self.em, self.eg, self.c, V_TH, W_SYN * F_POI], np.float32).tofile(self.work / 'consts.bin')
+        self.proc = subprocess.Popen([str(worker_binary(self.n, len(self.col), self.flies)), str(self.graph) + '/',
+                                      str(self.work) + '/', str(self.seed), str(self.delay), str(self.refractory), 'resident'],
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
+        return self
+
+    def sniff(self, p):
+        np.asarray(p, np.float32).tofile(self.work / 'stim_p.bin')
+        self.proc.stdin.write('sniff\n')
+        self.proc.stdin.flush()
+        if self.proc.stdout.readline().strip() != 'ok':
+            raise RuntimeError(f'FAIL shiu_worker resident exited {self.proc.wait()}')
+        return np.fromfile(self.work / 'gather.bin', np.int32).reshape(len(self.windows), len(self.readout))
+
+    def close(self):
+        self.proc.stdin.write('q\n')
+        self.proc.stdin.close()
+        self.proc.wait()
