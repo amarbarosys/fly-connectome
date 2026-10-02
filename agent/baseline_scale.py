@@ -55,6 +55,18 @@ def graph_directory(arm: str) -> Path:
     return BASE / arm
 
 
+def check_control_graph_provenance(graphs_path: Path, source_col_idx: Path) -> None:
+    """Fail before arm execution if control graph provenance is stale."""
+    graphs = json.loads(Path(graphs_path).read_text())
+    expected = graphs.get("sources_sha256", {}).get("data/col_idx.bin")
+    actual = neural_connectome.digest(source_col_idx)
+    if expected != actual:
+        raise RuntimeError(
+            f"FAIL provenance: graphs.json col_idx.bin SHA-256 {expected!r} "
+            f"does not match {source_col_idx} ({actual})"
+        )
+
+
 def output_directory(arm: str) -> Path:
     # Keep the first, invalid attempt as an immutable audit trail.
     return BASE / f"scale-corrected-{arm}"
@@ -314,6 +326,7 @@ def _run_logged(command: list[str], log_path: Path) -> int:
 
 
 def execute(evaluation_seeds: int, workers: int) -> dict:
+    check_control_graph_provenance(BASE / "graphs.json", ROOT / "data/col_idx.bin")
     if evaluation_seeds != 32:
         raise ValueError("the scale brief requires --evaluation-seeds 32 (64 layouts)")
     if not 1 <= workers <= 16:
