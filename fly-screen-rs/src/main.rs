@@ -2,8 +2,10 @@ use duckdb::{Connection, params};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::env;
+use std::ffi::CString;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -11,6 +13,8 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 const MAX_CONDITIONS: usize = 50;
 const GAINS_PER_CONDITION: usize = 8;
 const DEFAULT_STEPS: u32 = 100;
+const EXPECTED_NEURONS: usize = 139_255;
+const EXPECTED_EDGES: usize = 10_572_269;
 
 #[derive(Debug, Clone, Serialize)]
 struct Condition {
@@ -22,11 +26,33 @@ struct Condition {
     gains: [f32; GAINS_PER_CONDITION],
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct InputHash {
     path: String,
     size_bytes: u64,
     sha256: String,
+}
+
+#[derive(Serialize)]
+struct StageManifest {
+    schema_version: u32,
+    files: Vec<StageFile>,
+}
+
+#[derive(Serialize)]
+struct StageFile {
+    filename: String,
+    size_bytes: u64,
+    sha256: String,
+}
+
+#[derive(Serialize)]
+struct StageReceipt {
+    mode: String,
+    directory: String,
+    reused: bool,
+    operation_ms: f64,
+    manifest_sha256: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -50,6 +76,9 @@ struct Receipt {
     run_id: String,
     created_unix_seconds: u64,
     conditions: usize,
+    conditions_requested: usize,
+    dose_ladder_policy: String,
+    descending_neurons: usize,
     steps: u32,
     condition_manifest: Vec<Condition>,
     engine: String,
@@ -60,6 +89,7 @@ struct Receipt {
     host_wall_ms: f64,
     peak_rss_bytes: Option<u64>,
     compact_readback_bytes: usize,
+    data_stage: StageReceipt,
     input_hashes: Vec<InputHash>,
     manifest_sha256: String,
     results_sha256: String,
@@ -89,6 +119,186 @@ fn sha256_file(path: &Path) -> io::Result<InputHash> {
         size_bytes: size,
         sha256: format!("{:x}", hasher.finalize()),
     })
+}
+
+fn available_bytes(path: &Path) -> Option<u64> {
+    let path = CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    let rc = unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) };
+    if rc != 0 {
+        return None;
+    }
+    let stats = unsafe { stats.assume_init() };
+    (stats.f_bavail as u64).checked_mul(stats.f_frsize as u64)
+}
+
+fn copy_and_hash(source: &Path, destination: &Path) -> io::Result<InputHash> {
+    let mut input = File::open(source)?;
+    let mut output = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 1024 * 1024];
+    let mut size = 0_u64;
+    loop {
+        let read = input.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        output.write_all(&buffer[..read])?;
+        size += read as u64;
+    }
+    output.sync_all()?;
+    Ok(InputHash {
+        path: destination.display().to_string(),
+        size_bytes: size,
+        sha256: format!("{:x}", hasher.finalize()),
+    })
+}
+
+fn prepare_ram_stage(
+    data_sources: &[PathBuf],
+    source_hashes: &[InputHash],
+) -> Result<(PathBuf, StageReceipt), String> {
+    if data_sources.len() != source_hashes.len() {
+        return fail("RAM stage source/hash list length mismatch");
+    }
+    let started = Instant::now();
+    let root = PathBuf::from(
+        env::var("FLY_RAM_STAGE_ROOT")
+            .unwrap_or_else(|_| "/dev/shm/fly-connectome/fly-screen-stages/v1".into()),
+    );
+    fs::create_dir_all(&root).map_err(|e| format!("create RAM stage root: {e}"))?;
+    let mut key_hasher = Sha256::new();
+    let mut files = Vec::with_capacity(data_sources.len());
+    for (source, source_hash) in data_sources.iter().zip(source_hashes) {
+        let filename = source
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| format!("invalid data filename: {}", source.display()))?
+            .to_string();
+        key_hasher.update(filename.as_bytes());
+        key_hasher.update(source_hash.sha256.as_bytes());
+        files.push(StageFile {
+            filename,
+            size_bytes: source_hash.size_bytes,
+            sha256: source_hash.sha256.clone(),
+        });
+    }
+    let key = format!("{:x}", key_hasher.finalize());
+    let final_dir = root.join(&key);
+    let stage_manifest = StageManifest {
+        schema_version: 1,
+        files,
+    };
+
+    if final_dir.exists() {
+        let manifest_path = final_dir.join("stage-manifest.json");
+        let existing: serde_json::Value = serde_json::from_slice(
+            &fs::read(&manifest_path)
+                .map_err(|e| format!("read immutable RAM stage manifest: {e}"))?,
+        )
+        .map_err(|e| format!("parse immutable RAM stage manifest: {e}"))?;
+        let expected = serde_json::to_value(&stage_manifest)
+            .map_err(|e| format!("encode stage manifest: {e}"))?;
+        if existing != expected {
+            return fail("content-addressed RAM stage manifest does not match its key");
+        }
+        for (source, expected) in data_sources.iter().zip(source_hashes) {
+            let staged = sha256_file(&final_dir.join(source.file_name().unwrap()))
+                .map_err(|e| format!("verify RAM stage file: {e}"))?;
+            if staged.sha256 != expected.sha256 || staged.size_bytes != expected.size_bytes {
+                return fail(format!(
+                    "immutable RAM stage failed hash verification: {}",
+                    source.display()
+                ));
+            }
+        }
+        let manifest_hash = sha256_file(&manifest_path)
+            .map_err(|e| format!("hash stage manifest: {e}"))?
+            .sha256;
+        return Ok((
+            final_dir.clone(),
+            StageReceipt {
+                mode: "ram_reused".into(),
+                directory: final_dir.display().to_string(),
+                reused: true,
+                operation_ms: started.elapsed().as_secs_f64() * 1000.0,
+                manifest_sha256: Some(manifest_hash),
+            },
+        ));
+    }
+
+    let required = source_hashes
+        .iter()
+        .try_fold(0_u64, |sum, f| sum.checked_add(f.size_bytes))
+        .ok_or_else(|| "RAM stage size overflow".to_string())?;
+    let available = available_bytes(&root)
+        .ok_or_else(|| format!("cannot determine free tmpfs space at {}", root.display()))?;
+    let reserve = 64 * 1024 * 1024_u64;
+    if available < required.saturating_add(reserve) {
+        return fail(format!(
+            "insufficient RAM stage space: need {} bytes plus {} reserve, have {available}",
+            required, reserve
+        ));
+    }
+
+    let temp_dir = root.join(format!(".{key}.{}.tmp", std::process::id()));
+    if temp_dir.exists() {
+        fs::remove_dir_all(&temp_dir).map_err(|e| format!("remove stale stage temp: {e}"))?;
+    }
+    fs::create_dir(&temp_dir).map_err(|e| format!("create temporary RAM stage: {e}"))?;
+    for (source, expected) in data_sources.iter().zip(source_hashes) {
+        let name = source.file_name().unwrap();
+        let copied = copy_and_hash(source, &temp_dir.join(name))
+            .map_err(|e| format!("copy/hash {}: {e}", source.display()))?;
+        if copied.sha256 != expected.sha256 || copied.size_bytes != expected.size_bytes {
+            let _ = fs::remove_dir_all(&temp_dir);
+            return fail(format!(
+                "source changed while staging: {}",
+                source.display()
+            ));
+        }
+    }
+    let manifest_bytes = serde_json::to_vec_pretty(&stage_manifest)
+        .map_err(|e| format!("encode stage manifest: {e}"))?;
+    let manifest_tmp = temp_dir.join("stage-manifest.json.tmp");
+    let mut mf = File::create(&manifest_tmp).map_err(|e| format!("create stage manifest: {e}"))?;
+    mf.write_all(&manifest_bytes)
+        .and_then(|_| mf.sync_all())
+        .map_err(|e| format!("write stage manifest: {e}"))?;
+    fs::rename(&manifest_tmp, temp_dir.join("stage-manifest.json"))
+        .map_err(|e| format!("publish stage manifest: {e}"))?;
+    File::open(&temp_dir)
+        .and_then(|f| f.sync_all())
+        .map_err(|e| format!("sync temporary RAM stage: {e}"))?;
+    if let Err(error) = fs::rename(&temp_dir, &final_dir) {
+        if final_dir.exists() {
+            fs::remove_dir_all(&temp_dir)
+                .map_err(|e| format!("remove duplicate concurrent stage: {e}"))?;
+            return prepare_ram_stage(data_sources, source_hashes);
+        }
+        let _ = fs::remove_dir_all(&temp_dir);
+        return fail(format!("publish immutable RAM stage: {error}"));
+    }
+    File::open(&root)
+        .and_then(|f| f.sync_all())
+        .map_err(|e| format!("sync RAM stage directory: {e}"))?;
+    let manifest_hash = sha256_file(&final_dir.join("stage-manifest.json"))
+        .map_err(|e| format!("hash stage manifest: {e}"))?
+        .sha256;
+    Ok((
+        final_dir.clone(),
+        StageReceipt {
+            mode: "ram_created".into(),
+            directory: final_dir.display().to_string(),
+            reused: false,
+            operation_ms: started.elapsed().as_secs_f64() * 1000.0,
+            manifest_sha256: Some(manifest_hash),
+        },
+    ))
 }
 
 fn resolve_channel(target: &str) -> Option<usize> {
@@ -143,7 +353,6 @@ fn gain_for(action: &str, dose_nm: f64, affinity_nm: f64) -> f64 {
     } else if mode.contains("agonist")
         || mode.contains("inhibitor")
         || mode.contains("ache")
-        || mode.contains("nerve_agent")
     {
         1.0 + (2.0 * ratio) / (1.0 + ratio)
     } else if mode.contains("positive_allosteric_modulator") || mode.contains("pam") {
@@ -151,6 +360,15 @@ fn gain_for(action: &str, dose_nm: f64, affinity_nm: f64) -> f64 {
     } else {
         1.0
     }
+}
+
+fn round_gain_like_python(value: f64) -> f64 {
+    // Rust's `round` uses half-away-from-zero; Python's round(value, 4)
+    // rounds the decimal representation to nearest/even. Formatting at the
+    // target decimal precision matches Python's result for finite gains.
+    format!("{value:.4}")
+        .parse::<f64>()
+        .expect("formatting a finite gain always produces a float")
 }
 
 fn build_conditions(registry: &Path, target_count: usize) -> Result<Vec<Condition>, String> {
@@ -199,16 +417,17 @@ fn build_conditions(registry: &Path, target_count: usize) -> Result<Vec<Conditio
         let compound_id = compound_id.unwrap_or_else(|| name.clone());
         let target = primary.filter(|s| !s.is_empty()).or(bioassay);
         let action = action.unwrap_or_else(|| "antagonist".into());
+        // Treat FLY_CONDITIONS as a cap. Never publish a partial dose ladder.
+        if conditions.len() + doses.len() > target_count {
+            break;
+        }
         for (multiplier, label) in doses {
-            if conditions.len() >= target_count {
-                break;
-            }
             let dose_nm = affinity * multiplier;
             let mut gains = [1.0_f32; GAINS_PER_CONDITION];
             gains[7] = 0.0;
             if let Some(channel) = target.as_deref().and_then(resolve_channel) {
                 let oracle_gain = gain_for(&action, dose_nm, affinity);
-                gains[channel + 1] = ((oracle_gain * 10_000.0).round() / 10_000.0) as f32;
+                gains[channel + 1] = round_gain_like_python(oracle_gain) as f32;
             }
             conditions.push(Condition {
                 condition_id: format!("{}-{label}", compound_id),
@@ -244,15 +463,16 @@ fn parse_output(
     output: &str,
     conditions: &[Condition],
     steps: u32,
-) -> Result<(f64, usize, Vec<ResultRow>), String> {
+) -> Result<(f64, usize, usize, Vec<ResultRow>), String> {
     let mut wall_ms = None;
     let mut count = None;
+    let mut descending_neurons = None;
     let mut reported_conditions = None;
     let mut reported_steps = None;
     let mut version = None;
     let mut rows = Vec::with_capacity(conditions.len());
     let mut current: Option<usize> = None;
-    let mut metrics = [0.0_f64; 5];
+    let mut metrics: [Option<f64>; 5] = [None; 5];
     let mut seen = vec![false; conditions.len()];
     let mut complete = false;
     for line in output.lines() {
@@ -274,6 +494,9 @@ fn parse_output(
         if let Some(value) = line.strip_prefix("FLY_BATCH_RESULT_STEP_COUNT_READBACK_BYTES= ") {
             count = value.trim().parse().ok();
         }
+        if let Some(value) = line.strip_prefix("FLY_BATCH_DESCENDING_UNIQUE_COUNT= ") {
+            descending_neurons = value.trim().parse::<usize>().ok();
+        }
         if let Some(value) = line.strip_prefix("FLY_CONDITION_BEGIN= ") {
             let i = value
                 .trim()
@@ -285,7 +508,7 @@ fn parse_output(
                 ));
             }
             current = Some(i);
-            metrics = [0.0; 5];
+            metrics = [None; 5];
         }
         if let Some(i) = current {
             for (key, slot) in [
@@ -296,13 +519,20 @@ fn parse_output(
                 ("PHARMA_RESULT_SYNCHRONY= ", 4),
             ] {
                 if let Some(value) = line.strip_prefix(key) {
-                    metrics[slot] = value.trim().parse().unwrap_or(f64::NAN);
+                    if metrics[slot].is_some() {
+                        return fail(format!("worker condition {i} duplicated metric {key}"));
+                    }
+                    metrics[slot] = Some(value.trim().parse().unwrap_or(f64::NAN));
                 }
             }
             if line.starts_with("FLY_CONDITION_END= ") {
-                if !metrics.iter().all(|value| value.is_finite()) {
+                if !metrics
+                    .iter()
+                    .all(|value| value.is_some_and(f64::is_finite))
+                {
                     return fail(format!("worker condition {i} omitted finite metrics"));
                 }
+                let values = metrics.map(|value| value.expect("validated metric"));
                 let c = conditions
                     .get(i)
                     .ok_or_else(|| format!("worker returned unknown condition index {i}"))?;
@@ -313,11 +543,11 @@ fn parse_output(
                     dose_level: c.dose_level.clone(),
                     dose_nm: c.dose_nm,
                     steps,
-                    mean_active: metrics[0],
-                    active_pct: metrics[1],
-                    mean_descending: metrics[2],
-                    descending_pct: metrics[3],
-                    synchrony: metrics[4],
+                    mean_active: values[0],
+                    active_pct: values[1],
+                    mean_descending: values[2],
+                    descending_pct: values[3],
+                    synchrony: values[4],
                 });
                 seen[i] = true;
                 current = None;
@@ -348,8 +578,43 @@ fn parse_output(
     Ok((
         wall_ms.ok_or("worker omitted batch wall time")?,
         count.ok_or("worker omitted readback size")?,
+        descending_neurons
+            .filter(|count| *count > 0)
+            .ok_or("worker omitted or reported zero unique descending neurons")?,
         rows,
     ))
+}
+
+fn validate_dry_output(output: &str, conditions: usize, steps: u32) -> Result<(), String> {
+    let expected = [
+        ("FLY_BATCH_DRY_PASS=", "1".to_string()),
+        ("FLY_BATCH_DRY_CONDITIONS=", conditions.to_string()),
+        ("FLY_BATCH_DRY_STEPS=", steps.to_string()),
+        ("FLY_BATCH_DRY_NEURONS=", EXPECTED_NEURONS.to_string()),
+        ("FLY_BATCH_DRY_EDGES=", EXPECTED_EDGES.to_string()),
+    ];
+    for (key, expected_value) in expected {
+        let value = output
+            .lines()
+            .find_map(|line| line.trim().strip_prefix(key))
+            .ok_or_else(|| format!("CPU preflight omitted {key}"))?;
+        if value.trim() != expected_value {
+            return fail(format!(
+                "CPU preflight {key} expected {expected_value}, got {}",
+                value.trim()
+            ));
+        }
+    }
+    output
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("FLY_BATCH_DRY_DESCENDING_UNIQUE_COUNT=")
+        })
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|count| *count > 0)
+        .ok_or("CPU preflight omitted a positive unique descending-neuron count")?;
+    Ok(())
 }
 
 fn sql_quote(value: &str) -> String {
@@ -450,17 +715,39 @@ fn run() -> Result<(), String> {
     fs::rename(&manifest_tmp, &manifest_path)
         .map_err(|e| format!("publish batch manifest: {e}"))?;
 
-    let mut input_hashes = Vec::new();
-    for path in [
-        registry.clone(),
+    let data_sources = [
         data_dir.join("row_ptr.bin"),
         data_dir.join("col_idx.bin"),
         data_dir.join("weights.bin"),
         data_dir.join("neuron_nt_types.bin"),
         data_dir.join("descending_indices.bin"),
-    ] {
-        input_hashes.push(sha256_file(&path).map_err(|e| format!("hash {}: {e}", path.display()))?);
+    ];
+    let mut input_hashes =
+        vec![sha256_file(&registry).map_err(|e| format!("hash {}: {e}", registry.display()))?];
+    let mut data_hashes = Vec::with_capacity(data_sources.len());
+    for path in &data_sources {
+        data_hashes.push(sha256_file(path).map_err(|e| format!("hash {}: {e}", path.display()))?);
     }
+    input_hashes.extend(data_hashes.iter().cloned());
+    let ram_stage_enabled = match env::var("FLY_RAM_STAGE").as_deref() {
+        Ok("1") | Ok("true") => true,
+        Ok("0") | Ok("false") | Err(_) => false,
+        _ => return fail("FLY_RAM_STAGE must be 0 or 1"),
+    };
+    let (worker_data_dir, data_stage) = if ram_stage_enabled {
+        prepare_ram_stage(&data_sources, &data_hashes)?
+    } else {
+        (
+            data_dir.clone(),
+            StageReceipt {
+                mode: "direct".into(),
+                directory: data_dir.display().to_string(),
+                reused: false,
+                operation_ms: 0.0,
+                manifest_sha256: None,
+            },
+        )
+    };
     let engine_hash = sha256_file(&engine)
         .map_err(|e| format!("hash engine {}: {e}", engine.display()))?
         .sha256;
@@ -473,29 +760,44 @@ fn run() -> Result<(), String> {
         .sha256;
 
     if env::var("FLY_DRY_ONLY").as_deref() == Ok("1") {
-        let status = Command::new(&engine)
+        let dry = Command::new(&engine)
             .arg(&manifest_path)
             .env("GPU_DRY", "1")
-            .env("FLY_DATA_DIR", &data_dir)
-            .status()
+            .env("FLY_DATA_DIR", &worker_data_dir)
+            .output()
             .map_err(|e| format!("launch CPU preflight: {e}"))?;
-        if !status.success() {
-            return fail(format!("CPU preflight failed with {status}"));
+        if !dry.status.success() {
+            return fail(format!(
+                "CPU preflight failed with {}: {}",
+                dry.status,
+                String::from_utf8_lossy(&dry.stderr)
+            ));
         }
+        let dry_stdout = String::from_utf8_lossy(&dry.stdout);
+        validate_dry_output(&dry_stdout, conditions.len(), steps)?;
         println!("FLY_SCREEN_PREFLIGHT_PASS=1");
         println!("FLY_SCREEN_PREFLIGHT_CONDITIONS={}", conditions.len());
+        println!("FLY_SCREEN_PREFLIGHT_CONDITIONS_REQUESTED={target_count}");
         println!("FLY_SCREEN_PREFLIGHT_STEPS={steps}");
+        println!("FLY_SCREEN_PREFLIGHT_NEURONS={EXPECTED_NEURONS}");
+        println!("FLY_SCREEN_PREFLIGHT_EDGES={EXPECTED_EDGES}");
         return Ok(());
     }
 
     let gpu_job = env::var("FLY_GPUJOB")
         .unwrap_or_else(|_| "/home/<user>/Projects/gpu-media/Blender/kit/gpujob".into());
     let worker_output_path = out_dir.join("worker.stdout");
-    let worker_command =
-        r#"env FLY_DATA_DIR="$4" "$1" "$2" >"$3" 2>&1; rc=$?; cat "$3"; exit "$rc""#;
+    let compile_only = env::var("FLY_GPU_COMPILE_ONLY").as_deref() == Ok("1");
+    let worker_command = r#"env FLY_DATA_DIR="$4" FLY_COMPILE_ONLY="$5" "$1" "$2" >"$3" 2>&1; rc=$?; cat "$3"; exit "$rc""#;
     let child = Command::new(gpu_job)
         .arg(format!("fly-screen-{run_id}"))
-        .args(["--vram", "22", "--timeout", "180", "--"])
+        .args([
+            "--vram",
+            if compile_only { "1" } else { "22" },
+            "--timeout",
+            "180",
+            "--",
+        ])
         .arg("sh")
         .arg("-c")
         .arg(worker_command)
@@ -503,7 +805,8 @@ fn run() -> Result<(), String> {
         .arg(&engine)
         .arg(&manifest_path)
         .arg(&worker_output_path)
-        .arg(&data_dir)
+        .arg(&worker_data_dir)
+        .arg(if compile_only { "1" } else { "0" })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -524,6 +827,17 @@ fn run() -> Result<(), String> {
         .map_err(|e| format!("gpujob output was not UTF-8: {e}"))?;
     let worker_stdout = fs::read_to_string(&worker_output_path)
         .map_err(|e| format!("read worker output {}: {e}", worker_output_path.display()))?;
+    if compile_only {
+        if !worker_stdout
+            .lines()
+            .any(|line| line.trim() == "FLY_BATCH_KERNEL_COMPILE_PASS=1")
+        {
+            return fail("GPU compile check omitted FLY_BATCH_KERNEL_COMPILE_PASS=1");
+        }
+        println!("FLY_SCREEN_GPU_KERNEL_COMPILE_PASS=1");
+        println!("FLY_SCREEN_GPU_JOB_MS={gpujob_wall_ms:.3}");
+        return Ok(());
+    }
     for expected in &input_hashes {
         let observed = sha256_file(Path::new(&expected.path))
             .map_err(|e| format!("re-hash {}: {e}", expected.path))?;
@@ -531,8 +845,21 @@ fn run() -> Result<(), String> {
             return fail(format!("input changed during run: {}", expected.path));
         }
     }
-    let (wall_ms, readback_bytes, rows) = parse_output(&worker_stdout, &conditions, steps)
-        .map_err(|e| format!("parse worker output: {e}; gpujob summary: {stdout}"))?;
+    if ram_stage_enabled {
+        for (source, expected) in data_sources.iter().zip(&data_hashes) {
+            let staged = sha256_file(&worker_data_dir.join(source.file_name().unwrap()))
+                .map_err(|e| format!("re-hash staged input: {e}"))?;
+            if staged.sha256 != expected.sha256 || staged.size_bytes != expected.size_bytes {
+                return fail(format!(
+                    "RAM stage changed during run: {}",
+                    source.display()
+                ));
+            }
+        }
+    }
+    let (wall_ms, readback_bytes, descending_neurons, rows) =
+        parse_output(&worker_stdout, &conditions, steps)
+            .map_err(|e| format!("parse worker output: {e}; gpujob summary: {stdout}"))?;
     let results_path = out_dir.join("results.parquet");
     let results_tmp = out_dir.join("results.parquet.tmp");
     write_parquet(&results_tmp, &rows)?;
@@ -545,6 +872,9 @@ fn run() -> Result<(), String> {
         run_id,
         created_unix_seconds: now,
         conditions: conditions.len(),
+        conditions_requested: target_count,
+        dose_ladder_policy: "complete_triplets_only".into(),
+        descending_neurons,
         steps,
         condition_manifest: conditions.clone(),
         engine: engine.display().to_string(),
@@ -555,6 +885,7 @@ fn run() -> Result<(), String> {
         host_wall_ms: host_started.elapsed().as_secs_f64() * 1000.0,
         peak_rss_bytes: peak_rss_bytes(),
         compact_readback_bytes: readback_bytes,
+        data_stage,
         input_hashes,
         manifest_sha256: manifest_hash,
         results_sha256: results_hash,
@@ -572,6 +903,7 @@ fn run() -> Result<(), String> {
     println!("FLY_SCREEN_RUN={}", receipt_path.display());
     println!("FLY_SCREEN_RESULTS={}", results_path.display());
     println!("FLY_SCREEN_CONDITIONS={}", conditions.len());
+    println!("FLY_SCREEN_CONDITIONS_REQUESTED={target_count}");
     println!("FLY_SCREEN_STEPS={steps}");
     println!("FLY_SCREEN_GPU_BATCH_MS={wall_ms:.3}");
     println!("FLY_SCREEN_READBACK_BYTES={readback_bytes}");
@@ -608,6 +940,19 @@ mod tests {
     }
 
     #[test]
+    fn gain_rounding_matches_python_decimal_rounding() {
+        for (input, expected) in [
+            (1.23445, 1.2345),
+            (1.23455, 1.2346),
+            (1.23465, 1.2347),
+            (0.00005, 0.0001),
+            (0.00015, 0.0001),
+        ] {
+            assert_eq!(round_gain_like_python(input), expected);
+        }
+    }
+
+    #[test]
     fn binary_manifest_has_versioned_little_endian_header() {
         let path = env::temp_dir().join(format!("flybat-test-{}.bin", std::process::id()));
         let condition = Condition {
@@ -629,7 +974,7 @@ mod tests {
     }
 
     #[test]
-    fn parser_rejects_missing_rows_and_accepts_complete_batch() {
+    fn parser_rejects_missing_metrics_and_rows_and_accepts_complete_batch() {
         let condition = Condition {
             condition_id: "c0".into(),
             compound_id: "cmp".into(),
@@ -638,11 +983,49 @@ mod tests {
             dose_nm: 0.0,
             gains: [1.0; 8],
         };
-        let output = "FLY_BATCH_RESULT_VERSION=1\nFLY_BATCH_RESULT_CONDITIONS= 1\nFLY_BATCH_RESULT_STEPS= 1\nFLY_BATCH_RESULT_WALL_MS= 2.5\nFLY_BATCH_RESULT_STEP_COUNT_READBACK_BYTES= 8\nFLY_CONDITION_BEGIN= 0\nPHARMA_RESULT_MEAN_ACTIVE= 2\nPHARMA_RESULT_ACTIVE_PCT= 0.1\nPHARMA_RESULT_MEAN_DN= 1\nPHARMA_RESULT_DN_PCT= 0.2\nPHARMA_RESULT_SYNCHRONY= 0.3\nFLY_CONDITION_END= 0\nFLY_BATCH_COMPLETE=1\n";
+        let output = "FLY_BATCH_RESULT_VERSION=1\nFLY_BATCH_RESULT_CONDITIONS= 1\nFLY_BATCH_RESULT_STEPS= 1\nFLY_BATCH_RESULT_WALL_MS= 2.5\nFLY_BATCH_RESULT_STEP_COUNT_READBACK_BYTES= 8\nFLY_BATCH_DESCENDING_UNIQUE_COUNT= 1303\nFLY_CONDITION_BEGIN= 0\nPHARMA_RESULT_MEAN_ACTIVE= 2\nPHARMA_RESULT_ACTIVE_PCT= 0.1\nPHARMA_RESULT_MEAN_DN= 1\nPHARMA_RESULT_DN_PCT= 0.2\nPHARMA_RESULT_SYNCHRONY= 0.3\nFLY_CONDITION_END= 0\nFLY_BATCH_COMPLETE=1\n";
         let parsed = parse_output(output, &[condition.clone()], 1).unwrap();
         assert_eq!(parsed.0, 2.5);
         assert_eq!(parsed.1, 8);
-        assert_eq!(parsed.2[0].mean_active, 2.0);
+        assert_eq!(parsed.3[0].mean_active, 2.0);
+        for metric in [
+            "PHARMA_RESULT_MEAN_ACTIVE= 2\n",
+            "PHARMA_RESULT_ACTIVE_PCT= 0.1\n",
+            "PHARMA_RESULT_MEAN_DN= 1\n",
+            "PHARMA_RESULT_DN_PCT= 0.2\n",
+            "PHARMA_RESULT_SYNCHRONY= 0.3\n",
+        ] {
+            assert!(
+                parse_output(&output.replace(metric, ""), &[condition.clone()], 1).is_err(),
+                "accepted missing metric {metric}"
+            );
+        }
+        assert!(
+            parse_output(
+                &output.replace(
+                    "PHARMA_RESULT_SYNCHRONY= 0.3",
+                    "PHARMA_RESULT_SYNCHRONY= NaN"
+                ),
+                &[condition.clone()],
+                1
+            )
+            .is_err()
+        );
         assert!(parse_output("", &[condition], 1).is_err());
+    }
+
+    #[test]
+    fn cpu_preflight_requires_reported_dimensions() {
+        let valid = "FLY_BATCH_DRY_PASS=1\nFLY_BATCH_DRY_CONDITIONS= 48\nFLY_BATCH_DRY_STEPS= 100\nFLY_BATCH_DRY_NEURONS= 139255\nFLY_BATCH_DRY_EDGES= 10572269\nFLY_BATCH_DRY_DESCENDING_UNIQUE_COUNT= 1303\n";
+        assert!(validate_dry_output(valid, 48, 100).is_ok());
+        assert!(validate_dry_output(&valid.replace("139255", "1"), 48, 100).is_err());
+        assert!(validate_dry_output(&valid.replace("10572269", "1"), 48, 100).is_err());
+        assert!(
+            validate_dry_output(&valid.replace("CONDITIONS= 48", "CONDITIONS= 50"), 48, 100)
+                .is_err()
+        );
+        assert!(
+            validate_dry_output(&valid.replace("FLY_BATCH_DRY_PASS=1\n", ""), 48, 100).is_err()
+        );
     }
 }

@@ -6,7 +6,9 @@ This is a network perturbation demonstrator, not an independently validated phar
 
 ## Setup and run
 
-The recorded run used the local Python environment and the Mojo engine in `/home/<user>/Projects/mojo/fly-spmv`:
+The commands below document the legacy single-compound Python workflow. For the current multi-condition batch build, follow the root [`README.md`](README.md): Rust `fly-screen` drives the resident Mojo GPU worker. A request for up to 50 conditions currently produces 48 rows so every compound retains all three dose levels.
+
+The recorded legacy run used the local Python environment and the Mojo engine in `/home/<user>/Projects/mojo/fly-spmv`:
 
 ```bash
 ./.venv/bin/python screen_compound.py --steps 100 --panel
@@ -49,7 +51,7 @@ The original profile increased modeled descending-neuron activity by 283.60%; it
 
 This is **not a validated behavior prediction**. The source's 0-minute baseline is pre-exposure within-well, not a time-matched vehicle control. Larval motility is not the model's whole-connectome descending-neuron count, and the profile has no mapping from 25/100 ppm to transmitter gains. The corrected engine path still does not represent receptor binding or desensitization; its 3.0 ACh gain is illustrative. The profile correction followed signed-edge semantics and target specificity, not Denecke outcome values. The earlier local FlyGym motion-capture assets and unrelated 42-ROI NWB ring-attractor data still do not validate this screener.
 
-Step 6's available directional comparison is complete and records a proxy disagreement: held-out larval movement decreased, while modeled descending activity increased. The study protocol was recorded before outcome summaries/model execution but after inspecting source labels, so it is not prospective preregistration. This does not constitute a matched endpoint validation or a valid prediction because no time-matched vehicle, ppm-to-gain calibration, or neural-to-locomotion mapping is available. Untestable with current evidence: vehicle-corrected chemical effects, calibrated dose response, neural activity correspondence, adult behavior, and antidote/rescue effects. The primary study describes the larval Wiggle Index exposure protocol and RMR endpoint ([Denecke et al. 2017](https://pmc.ncbi.nlm.nih.gov/articles/PMC5596007/)).
+Step 6's available directional comparison is complete and records a proxy disagreement: held-out larval movement decreased, while modeled descending activity increased. The study protocol was recorded before outcome summaries/model execution but after inspecting source labels, so it is not prospective preregistration. This does not constitute a matched endpoint validation or a valid prediction because no time-matched vehicle, ppm-to-gain calibration, or neural-to-locomotion mapping is available. Untestable with current evidence: vehicle-corrected chemical effects, calibrated dose response, neural activity correspondence, adult behavior, . The primary study describes the larval Wiggle Index exposure protocol and RMR endpoint ([Denecke et al. 2017](https://pmc.ncbi.nlm.nih.gov/articles/PMC5596007/)).
 
 Biological validation remains open. Closing it requires independent fly observations with an appropriate time-matched vehicle, target- and dose-matched perturbation, and a defensible mapping from model output to measured behavior or physiology. Keep calibration separate from held-out evaluation and do not tune on held-out observations.
 
