@@ -247,7 +247,10 @@ if __name__ == '__main__':
     import sys
     if '--gpu' in sys.argv:
         raise SystemExit(0 if verify_gpu()['pass'] else 1)
-    if '--flood' in sys.argv:
+    if '--flood-gpu' in sys.argv:  # 6 odours x 10 jitter columns (60), GPU
+        from agent.brain_bench import ODORS6
+        print(json.dumps(flood_code_probe(engine=ShiuGPU, odours=ODORS6, seeds=10, windows_ms=(15, 20, 25, 30, 40, 50))))
+    elif '--flood' in sys.argv:
         print(json.dumps(flood_code_probe()))
     elif '--mb' in sys.argv:
         print(json.dumps(mushroom_body_probe()))
