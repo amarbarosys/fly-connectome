@@ -9,6 +9,11 @@ Current connectome result: across 32 independent seed clusters (64 mirrored odor
 the real graph did not outperform degree-preserving shuffles (pooled p=0.7551); it outperformed
 the in-degree-only random family (pooled p=0.001472). The real arm scored 56/64 and missed its
 frozen gate.
+
+Brain dynamics: with raw synapse-count weights, recurrent activity floods the mushroom body (79% of
+Kenyon cells active, odour identity lost). Per-neuron normalised gain 35 restores a sparse, distinct
+Kenyon-cell code, but mushroom-body output and descending neurons stay silent, so dopamine-gated
+learning on that code is not yet demonstrated (`agent.verify_sparse_learning` records FAIL).
 See [the matched comparison](docs/plans/CONNECTOME_BENEFIT.md) and the [capability map](docs/CAPABILITIES.md).
 
 Correction 2026-10-02: p-values recomputed with seed clusters (mirrored layouts are not independent); old pooled values 0.6990 (shuffles) and 0.000489 (random) are now 0.7551 and 0.001472; conclusions unchanged: no measured advantage over degree-preserving shuffles, and the real graph remains ahead of the random-column family.
@@ -16,8 +21,7 @@ Correction 2026-10-02: p-values recomputed with seed clusters (mirrored layouts 
 Key areas: five multi-omics data layers, embodied agent system
 with checkpoint/restore, and a Rust/Mojo screening rebuild. The compound
 screening engine and chemoinformatics database now live in the separate
-`fly-pharma` repository. GPU physics on RX 7900 XTX remains unverified: the supplied body is blocked
-at conversion and the diagnostic model develops NaNs by 1,000 steps. See [GPU body port status](docs/plans/GPU_BODY_PORT.md) and the
+`fly-pharma` repository. GPU physics on RX 7900 XTX is closed: correct physics was reached after three ROCm-fork fixes, but it did not beat six CPU workers, so CPU MuJoCo remains the backend. See [GPU body port status](docs/plans/GPU_BODY_PORT.md) and the
 [master plan](docs/plans/FLY_WORLD_MASTER_PLAN.md) for the full program.
 
 ## Screening build (Rust/Mojo)

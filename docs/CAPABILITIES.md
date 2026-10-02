@@ -23,6 +23,8 @@ Status describes the cited implementation and gate only. It does not imply biolo
 |---|---|---:|---|---|
 | Odor steering with fixed real connectome and trained readout | FAIL (gate) | 56/64 trained, but only 20.3 points over 43/64 shuffled reward against the frozen 25-point gate; odor-absent and straight controls 0/16 on the sanity subset | `.work/agent/matched-baseline/scale-comparison-corrected.json`; `docs/plans/CONNECTOME_BENEFIT.md` | `./.venv/bin/python -m agent.baseline_scale` (experiment runner; existing results are the cited evidence) |
 | Specific wiring advantage over degree-preserving shuffles, on odor steering | FAIL | Real trails 4/5 shuffles; seed-cluster pooled difference -1.875 percentage points, p=0.7551 | `.work/agent/paired-significance/significance-corrected-seedcluster.json`; `docs/plans/CONNECTOME_BENEFIT.md` | `./.venv/bin/python -m agent.verify_parallel_learning_trial` is a separate learning verifier |
+| Sparse odour code in Kenyon cells (body-free bench) | PASS at gain 35 | Normalised gain 35: KC active 6.5% / 7.6% / 1.9% for odours A/B/C, pairwise Jaccard at most 0.027; raw weights flood to 79% with Jaccard 1.0 | `.work/briefs/science-path/REPORT-P1b.md`; `REPORT-P2.md` | `./.venv/bin/python -m agent.brain_bench` |
+| Mushroom-body output and motor drive at sparse gain | FAIL | 0/96 MBONs fire at gains 30 and 35; 0/1,303 descending neurons fire at gains 25 to 40 | `.work/briefs/science-path/REPORT-P2.md` | `./.venv/bin/python -m agent.verify_sparse_learning` |
 | Degree structure versus in-degree-only random graphs | PASS | Real advantage +18.75 percentage points, seed-cluster pooled p=0.001472 | `.work/agent/paired-significance/significance-corrected-seedcluster.json`; `docs/plans/CONNECTOME_BENEFIT.md` | See cited comparison receipt; no standalone verifier |
 
 Correction 2026-10-02: p-values recomputed with seed clusters (mirrored layouts are not independent); old pooled values 0.6990 (shuffles) and 0.000489 (random) are now 0.7551 and 0.001472; conclusions unchanged: specific wiring does not beat degree-preserving shuffles, while the real graph remains ahead of the random-column family.
@@ -39,6 +41,7 @@ Correction 2026-10-02: p-values recomputed with seed clusters (mirrored layouts 
 | Capability | Status | Number | Receipt | Entrypoint |
 |---|---|---:|---|---|
 | Reward-trained decoder/readout with fixed connectome weights | PASS | Learning changes readout; connectome weights stay fixed | `docs/plans/ODOR_MEMORY_PILOT.md`; `docs/plans/CONNECTOME_BENEFIT.md` | `./.venv/bin/python -m agent.odor_memory_gate` |
+| Dopamine-gated KC to MBON plasticity | FAIL | Rule implemented and logged; at gain 35 eligibility is zero on all 4,096 A-active KC to MBON edges because MBONs are silent | `.work/briefs/science-path/REPORT-P2.md` | `./.venv/bin/python -m agent.verify_sparse_learning` |
 | Biological learning in the connectome | UNVERIFIED | Not measured | `docs/plans/CONNECTOME_BENEFIT.md`; `docs/plans/FLY_WORLD_MASTER_PLAN.md` | No biological-learning implementation |
 | Parallel arena experience collection | PASS | 4.60 to 4.67x faster collection; equal experience 29/30 for both policies | `docs/plans/SPECTATOR_PARALLEL_LEARNING.md`; `.work/agent/spectator-learning/learning/comparison.json` | `./.venv/bin/python -m agent.verify_parallel_learning_trial` |
 
@@ -47,7 +50,7 @@ Correction 2026-10-02: p-values recomputed with seed clusters (mirrored layouts 
 | Capability | Status | Number | Receipt | Entrypoint |
 |---|---|---:|---|---|
 | Odor-guided food task | PASS | 15/16 pilot layouts; odor-absent control 0/16 | `docs/plans/ODOR_MEMORY_PILOT.md`; `.work/agent/matched-baseline/scale-comparison-corrected.json` | `./.venv/bin/python -m agent.odor_memory_gate` |
-| Repaired obstacle avoidance | PASS | 12/16 vs 6/16 straight and 5/16 shuffled-reward; trained minimum upright 0.9904; food retention 14/16 vs 15/16 before | `.work/agent/odor-memory/calibration-v2/metrics.json`; `docs/plans/ODOR_MEMORY_PILOT.md` | `./.venv/bin/python -m agent.verify_odor_memory_receipt --output <receipt>` |
+| Repaired obstacle avoidance | PASS | With 40 rehearsed food examples: 14/16 vs 6/16 straight; food retained 16/16 before and after avoidance training (earlier run 12/16, food 14/16) | `.work/agent/odor-memory/sequential-p0-run/metrics.json`; `docs/plans/ODOR_MEMORY_PILOT.md` | `./.venv/bin/python -m agent.verify_odor_memory_receipt --output <receipt>` |
 | Odor memory, vision, and looming as harder connectome-comparison tasks | UNVERIFIED | No comparative outcome claimed | `docs/plans/CONNECTOME_BENEFIT.md`; `docs/plans/P6_LOOMING_PROTOCOL.md` | No completed comparison entrypoint |
 
 ## SCIENCE TOOLING
@@ -65,14 +68,15 @@ Correction 2026-10-02: p-values recomputed with seed clusters (mirrored layouts 
 |---|---|---:|---|---|
 | Rust/Mojo screening parity and throughput | PASS | 48 manifest rows match Python reference; 24.44x in paired benchmark | `docs/plans/SCREENING_REBUILD_PLAN.md`; `.work/runs/155567-1790771553562845391/receipt.json`; `.work/benchmarks/rebuild_20260930/paired_benchmark_receipt.json` | `fly-screen-rs/target/release/fly-screen` |
 | Screening biological predictive validity | UNVERIFIED | Not established by parity or speed | `docs/plans/SCREENING_REBUILD_PLAN.md` | No biological-validation entrypoint |
+| GPU neural worker tick | PASS | 3.1 to 4.4x faster per tick, bit-identical to the previous kernel; CPU/GPU parity error 0.0 | commits `d065ff9`, `1eebbd2` | `.work/fly-research/arena-venv/bin/python -m agent.verify_neural` |
 | Ten-fly full-loop capacity | PASS | Optimized aggregate 0.861 fly-seconds/wall-second; per-fly full loop 0.0873x real time | `docs/plans/TEN_FLY_CAPACITY.md`; `.work/agent/ten-fly/independent-verification.json` | `./.venv/bin/python -m agent.verify_batch_capacity` |
 
 ## Not yet / unlockable
 
-- Food recovery may improve with a larger rehearsal buffer.
 - Compare wiring on harder tasks where it could matter: odor memory, vision, and looming.
 - Lesion mapping is scoped to dependence under tested conditions; anatomical necessity remains unverified.
-- GPU physics awaits a stable probe on the target device and faithful model support.
+- GPU physics track closed; CPU MuJoCo stays the backend (`docs/plans/GPU_BODY_PORT.md`).
+- Engage MBON output at sparse gain (KC-trace eligibility rule, per-class gain), then the reversal task.
 - Fix the dim-light vision response so the stripe can trigger spikes.
 - Preserve continuous neural state across calcium replay windows.
 
