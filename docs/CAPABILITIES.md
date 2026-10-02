@@ -73,6 +73,7 @@ Correction 2026-10-02: p-values recomputed with seed clusters (mirrored layouts 
 | Screening biological predictive validity | UNVERIFIED | Not established by parity or speed | `docs/plans/SCREENING_REBUILD_PLAN.md` | No biological-validation entrypoint |
 | GPU neural worker tick | PASS | 3.1 to 4.4x faster per tick, bit-identical to the previous kernel; CPU/GPU parity error 0.0 | commits `d065ff9`, `1eebbd2` | `.work/fly-research/arena-venv/bin/python -m agent.verify_neural` |
 | GPU worker at 64 flies and alternate graphs | PASS | 64-fly build and 2-fly block-s7 graph (FLY_DATA_DIR) within 9.5e-7 of CPUBrain; spike words uint16 up to 16 flies, uint64 above | commit `704becb` | `.work/fly-research/arena-venv/bin/python -m agent.verify_worker_wide` |
+| Body-free brain bench on GPU (WorkerBrain) | PASS | Odour drive, normalised and class gains, plasticity edits run on the GPU worker; ever sets identical to CPUBrain; P1d point 2.16 s CPU to 0.19 s GPU, 162-point grid 34 s; 161/162 rows identical to the CPU receipt (one flooded row differs 0.24%, same verdict) | `.work/neural-flies/verify-worker-brain.json`; `.work/agent/brain-bench/sweep-p1d-gpu.json` | `.work/fly-research/arena-venv/bin/python -m agent.verify_worker_brain` |
 | Ten-fly full-loop capacity | PASS | Optimized aggregate 0.861 fly-seconds/wall-second; per-fly full loop 0.0873x real time | `docs/plans/TEN_FLY_CAPACITY.md`; `.work/agent/ten-fly/independent-verification.json` | `./.venv/bin/python -m agent.verify_batch_capacity` |
 
 ## Not yet / unlockable
