@@ -112,6 +112,72 @@ def mushroom_body_probe(rates=(5., 20., 100.), seconds=.2):
     return out
 
 
+def flood_code_probe(seeds=3, keep=.8, rate=100., seconds=.2, windows_ms=(10, 15, 20, 30, 50)):
+    """Not a gate: does odour identity survive the flood, (1) in the first ms after onset,
+    (2) in KC firing rates during the flood? 3 odours x `seeds` ORN-jitter columns."""
+    from agent.neural_connectome import ANNOTATIONS
+    from agent.verify_sparse_learning import ODORS
+    pre, post, w, index = _reference_graph()
+    kc, orn = [], {}
+    for row in csv.DictReader(open(ANNOTATIONS), delimiter='\t'):
+        i = index.get(int(row['root_id']))
+        if i is not None and row['cell_class'] == 'Kenyon_Cell':
+            kc.append(i)
+        if i is not None and row['cell_class'] == 'olfactory' and row['cell_type'].startswith('ORN_'):
+            orn.setdefault(row['cell_type'][4:], []).append(i)
+    rng = np.random.default_rng(20261002)
+    odour = np.repeat(np.arange(len(ODORS)), seeds)
+    brain = ShiuBrain(pre, post, w, n=len(index), flies=len(odour), seed=11)
+    for column, o in enumerate(odour):
+        cells = np.asarray(sum((orn[g] for g in ODORS[o]), []))
+        brain.stimulate(cells[rng.random(len(cells)) < keep], rate, fly=column)
+    same = [(i, j) for i in range(len(odour)) for j in range(i) if odour[i] == odour[j]]
+    diff = [(i, j) for i in range(len(odour)) for j in range(i) if odour[i] != odour[j]]
+
+    def jaccard(sets):
+        jac = lambda i, j: float((sets[:, i] & sets[:, j]).sum() / max(int((sets[:, i] | sets[:, j]).sum()), 1))
+        return float(np.mean([jac(*p) for p in same])), float(np.mean([jac(*p) for p in diff]))
+
+    def correlation(x):
+        c = np.corrcoef(x.T)
+        return float(np.mean([c[p] for p in same])), float(np.mean([c[p] for p in diff]))
+
+    def decode(x):
+        """Leave-one-out nearest centroid (correlation) over the columns; chance = 1/odours."""
+        hits = 0
+        for i in range(len(odour)):
+            others = [j for j in range(len(odour)) if j != i]
+            centroids = [x[:, [j for j in others if odour[j] == o]].mean(axis=1) for o in range(len(ODORS))]
+            with np.errstate(invalid='ignore', divide='ignore'):
+                scores = np.nan_to_num([np.corrcoef(x[:, i], c)[0, 1] for c in centroids], nan=-1.0)
+            hits += int(np.argmax(scores) == odour[i] and scores.max() > -1)  # silent column = miss
+        return hits / len(odour)
+
+    onset, elapsed, snapshots = [], 0, {}
+    for ms in windows_ms:
+        brain.step(round(ms * 1e-3 / brain.dt) - elapsed)
+        elapsed = round(ms * 1e-3 / brain.dt)
+        sets, counts = brain.ever[kc].copy(), brain.spikes[kc].astype(np.float64)
+        snapshots[ms] = counts.copy()
+        js, jd = jaccard(sets)
+        onset.append({'ms': ms, 'kc_active': float(sets.mean()), 'kc_cells_per_column': sets.sum(axis=0).tolist(), 'jaccard_same_odour': js, 'jaccard_diff_odour': jd,
+                      'decode_accuracy': decode(counts) if counts.any() else None})
+    brain.step(round(seconds / brain.dt) - elapsed)
+    flood = brain.spikes[kc].astype(np.float64) - snapshots[windows_ms[-1]]
+    cs, cd = correlation(flood)
+    js, jd = jaccard(brain.ever[kc])
+    out = {'odours': [list(o) for o in ODORS], 'columns': len(odour), 'orn_hz': rate, 'chance': 1 / len(ODORS),
+           'onset': onset,
+           'flood': {'window_ms': [windows_ms[-1], seconds * 1e3], 'kc_active': float(brain.ever[kc].mean()),
+                     'ever_jaccard_same': js, 'ever_jaccard_diff': jd,
+                     'rate_corr_same_odour': cs, 'rate_corr_diff_odour': cd, 'decode_accuracy': decode(flood),
+                     'kc_mean_hz': float(flood.mean() / (seconds - windows_ms[-1] * 1e-3))}}
+    path = ROOT / '.work/agent/shiu/flood-code-probe.json'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(out, indent=2) + '\n')
+    return out
+
+
 def verify():
     result = {'epsp': epsp_check(), 'sugar': sugar_check()}
     result['pass'] = result['epsp']['pass'] and result['sugar']['pass']
@@ -124,7 +190,9 @@ def verify():
 
 if __name__ == '__main__':
     import sys
-    if '--mb' in sys.argv:
+    if '--flood' in sys.argv:
+        print(json.dumps(flood_code_probe()))
+    elif '--mb' in sys.argv:
         print(json.dumps(mushroom_body_probe()))
     else:
         raise SystemExit(0 if verify()['pass'] else 1)
