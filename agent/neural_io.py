@@ -46,8 +46,12 @@ def receive(flies=2):
     if not line:
         return {"op": "quit"}
     request = json.loads(line)
-    if request.get("op") not in {"step", "reset", "quit", "export_state", "import_state"}:
+    if request.get("op") not in {"step", "reset", "quit", "export_state", "import_state", "drive", "weights", "mirror"}:
         raise ValueError("unknown neural operation")
+    if request['op'] in {'drive', 'weights'}:
+        request['path'] = str(work_path(request['path']))
+        if request['op'] == 'weights' and not (isinstance(request.get('gain'), (int, float)) and math.isfinite(request['gain']) and request['gain'] >= 0):
+            raise ValueError('weights op needs a finite non-negative gain')
     if request['op'] in {'export_state', 'import_state'}:
         request['path'] = str(state_path(request['path']))
         if request['op'] == 'import_state':
@@ -76,6 +80,7 @@ def receive(flies=2):
         after=request.get('after',0)
         if type(after) is not int or not 0<=after<=139255:raise ValueError('invalid inactive scan cursor')
         request['after']=after
+        request['lean']=bool(request.get('lean', False))
     return request
 
 
@@ -89,18 +94,46 @@ def ready(features, flies=2, spatial=False):
                       "spatial_neurons":len(spatial_map['nodes']) if spatial else 0}), flush=True)
 
 
-def apply_visual(request, direct_address, flies):
+def work_path(path):
+    from agent.neural_connectome import ROOT
+    value = Path(path).resolve()
+    value.relative_to((ROOT/'.work/neural-flies').resolve())
+    return value
+
+
+_DRIVE = {}
+_MIRROR = {}
+
+
+def set_drive(request, flies):
+    """Keep an (N, flies) drive as its nonzeros; apply_drive adds them every exchange."""
+    drive = np.load(request['path'], allow_pickle=False)
+    if drive.shape != (139255, flies) or not np.isfinite(drive).all() or drive.min() < 0 or drive.max() > 1:
+        raise ValueError('drive must be finite (139255, flies) values in [0,1]')
+    flat = drive.T.reshape(-1)
+    _DRIVE['index'] = np.flatnonzero(flat).astype(np.int32)
+    _DRIVE['value'] = flat[_DRIVE['index']].astype(np.float32)
+    print(json.dumps({'drive': int(_DRIVE['index'].size)}), flush=True)
+
+
+def weights_reply():
+    print('{"weights": true}', flush=True)
+
+
+def apply_drive(request, direct_address, flies):
+    values=np.frombuffer((ctypes.c_float*(flies*139255)).from_address(direct_address),dtype=np.float32)
+    if _DRIVE:
+        values[_DRIVE['index']] += _DRIVE['value']
     if '_visual' not in request:return
     from agent.spatial_vision import mapping
-    values=np.frombuffer((ctypes.c_float*(flies*139255)).from_address(direct_address),dtype=np.float32).reshape(flies,139255)
-    values[:,mapping()['nodes']]=request['_visual']
+    values.reshape(flies,139255)[:,mapping()['nodes']]+=request['_visual']
 
 
 def reply(features, counts, inactive):
     print(json.dumps({"features": features, "counts": counts, "inactive": inactive}, allow_nan=False), flush=True)
 
 
-def reply_buffers(feature_address, spike_address, ever_address, flies, features, neurons, after):
+def reply_buffers(feature_address, spike_address, ever_address, flies, features, neurons, after, lean=False):
     """Read synchronously-owned Mojo host buffers without per-value Python calls."""
     def view(address, size):
         return np.frombuffer((ctypes.c_float*size).from_address(address), dtype=np.float32)
@@ -109,7 +142,19 @@ def reply_buffers(feature_address, spike_address, ever_address, flies, features,
     ever = view(ever_address, flies*neurons).reshape(flies, neurons)
     counts = np.column_stack((spikes.sum(axis=1, dtype=np.float64), ever.sum(axis=1, dtype=np.float64)))
     inactive = (np.flatnonzero(ever[0, after:] == 0)+after)[:256]
-    reply(f.tolist(), counts.tolist(), inactive.tolist())
+    reply([] if lean else f.tolist(), counts.tolist(), inactive.tolist())
+
+
+def mirror_buffers(ever_address, trace_address, flies):
+    """ever and trace to a (2, flies, N) float32 memmap the Python side reads."""
+    def view(address):
+        return np.frombuffer((ctypes.c_float*(flies*139255)).from_address(address), dtype=np.float32)
+    if 'map' not in _MIRROR:
+        from agent.neural_connectome import ROOT
+        _MIRROR['map'] = np.memmap(ROOT/'.work/neural-flies/mirror.f32', np.float32, 'w+', shape=(2, flies*139255))
+    _MIRROR['map'][0], _MIRROR['map'][1] = view(ever_address), view(trace_address)
+    _MIRROR['map'].flush()
+    print('{"mirror": true}', flush=True)
 
 
 def reset_reply():
@@ -132,3 +177,6 @@ def state_buffers(request, voltage_address, spike_address, trace_address, ever_a
 
 def state_reply():
     print('{"state_transfer": true}', flush=True)
+
+
+apply_visual = apply_drive  # name used by already-built worker binaries

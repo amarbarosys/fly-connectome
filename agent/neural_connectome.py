@@ -213,6 +213,53 @@ class CPUBrain:
         return result
 
 
+def worker_binary(flies):
+    """Worker built for `flies` columns, rebuilt when neural_worker.mojo is newer."""
+    source = ROOT/'agent/neural_worker.mojo'
+    binary = ROOT/f'.work/neural-flies/build/neural_worker_c{flies}'
+    if not binary.is_file() or binary.stat().st_mtime < source.stat().st_mtime:
+        binary.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run([str(Path.home()/'.local/bin/mojo'), 'build', f'-DFLY_NEURAL_FLIES={flies}',
+                        str(source), '-o', str(binary)], check=True, cwd=ROOT)
+    return binary
+
+
+class WorkerBrain(CPUBrain):
+    """CPUBrain whose step runs on the GPU worker. The host CSR stays authoritative: each reset
+    uploads graph.data and the gain, so scale_edges, normalisation and plasticity edits apply."""
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.worker, self._drive = Worker(worker_binary(self.flies), flies=self.flies), None
+
+    def reset(self):
+        super().reset()
+        self._stale = False
+        if hasattr(self, 'worker'):
+            self.worker.load_weights(self.graph.data, 1.0 if self.gain_mode == 'raw' else self.gain)
+            self.worker.reset()
+
+    def step(self, inputs, ticks=4, extra_drive=None, **unused):
+        if self.sparse is not None or self.adaptation_ka or unused:
+            raise ValueError('WorkerBrain supports inputs and extra_drive only')
+        if extra_drive is not self._drive:
+            self._drive = extra_drive
+            self.worker.set_drive(np.zeros((N, self.flies), np.float32) if extra_drive is None else extra_drive)
+        self._stale = True
+        return self.worker.step(inputs, ticks=ticks, lean=True)
+
+    def _sync(self):
+        if getattr(self, '_stale', False):
+            ever, trace = self.worker.mirror()
+            self._ever, self._trace, self._stale = ever.T > 0, np.array(trace.T), False
+
+    # ever/trace are fetched from the GPU only when read, once per step at most.
+    ever = property(lambda self: (self._sync(), self._ever)[1], lambda self, value: setattr(self, '_ever', value))
+    trace = property(lambda self: (self._sync(), self._trace)[1], lambda self, value: setattr(self, '_trace', value))
+
+    def close(self):
+        self.worker.close()
+
+
 class Worker:
     """Resident neural process with bounded request waits and explicit failure."""
     def __init__(self, binary=None, *, disconnected=False, flies=2):
@@ -287,10 +334,28 @@ class Worker:
                 validate_state(result, self.flies)
                 return result
 
-    def step(self, inputs, ticks=4, direct=(), after=0, visual=None):
+    def set_drive(self, drive):
+        """Persistent (N, flies) drive, added every exchange like CPUBrain extra_drive."""
+        path = ROOT/'.work/neural-flies/drive.npy'
+        np.save(path, np.asarray(drive, np.float32).reshape(N, self.flies))
+        return self.request({'op': 'drive', 'path': str(path)})
+
+    def load_weights(self, weights, gain=1.0):
+        """Replace the device CSR weights (same structure) and the recurrent gain."""
+        path = ROOT/'.work/neural-flies/weights.f32'
+        np.asarray(weights, '<f4').tofile(path)
+        return self.request({'op': 'weights', 'path': str(path), 'gain': float(gain)})
+
+    def mirror(self):
+        """ever and trace, (2, flies, N), as of the last step."""
+        self.request({'op': 'mirror'})
+        return np.memmap(ROOT/'.work/neural-flies/mirror.f32', np.float32, 'r', shape=(2, self.flies, N))
+
+    def step(self, inputs, ticks=4, direct=(), after=0, visual=None, lean=False):
         if ticks != 4:
             raise ValueError('GPU exchange is exactly four neural ticks')
-        payload={'op': 'step', 'inputs': np.asarray(inputs).reshape(-1).tolist(),'direct':list(direct),'after':after}
+        payload={'op': 'step', 'inputs': np.asarray(inputs).reshape(-1).tolist(),'direct':list(direct),'after':after,
+                 'lean':lean}
         if visual is not None:
             from agent.spatial_vision import mapping, validate_visual
             if not self.ready.get('spatial_drive') or self.ready.get('spatial_mapping_sha256')!=mapping()['sha256']:raise RuntimeError('worker spatial mapping mismatch; rebuild/restart required')

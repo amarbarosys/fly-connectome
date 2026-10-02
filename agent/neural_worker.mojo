@@ -46,6 +46,7 @@ def update(
     voltage: TileTensor[DType.float32, type_of(LS), MutAnyOrigin],
     trace: TileTensor[DType.float32, type_of(LS), MutAnyOrigin],
     ever: TileTensor[W, type_of(LN), MutAnyOrigin],
+    gain: Float32,
 ):
     """One thread per neuron advances every fly; bit `fly` of a spike word is that fly's spike."""
     var neuron = block_idx.x * block_dim.x + thread_idx.x
@@ -83,7 +84,7 @@ def update(
         faded[fly] = trace[fly * N + neuron]
     var fired = 0
     comptime for fly in range(C):
-        var value = fma(Float32(0.65), drive[fly], fma(Float32(0.85), held[fly], 0.08 * total[fly]))
+        var value = fma(Float32(0.65), drive[fly], fma(Float32(0.85), held[fly], 0.08 * (total[fly] * gain)))
         var spike: Float32 = 1.0 if value >= 1.0 else 0.0
         voltage[fly * N + neuron] = 0.0 if spike > 0.0 else (value if value >= -5.0 else -5.0)
         trace[fly * N + neuron] = fma(Float32(0.85), faded[fly], 0.15 * spike)
@@ -157,6 +158,7 @@ def main() raises:
     var row_data = open(data_dir + "row_ptr.bin", "r").read_bytes()
     var col_data = open(data_dir + "col_idx.bin", "r").read_bytes()
     var weight_data = open(data_dir + "weights.bin", "r").read_bytes()
+    var gain: Float32 = 1.0  # CPUBrain multiplies the summed input by gain before coupling
     var port_data = open(assets + "/ports.bin", "r").read_bytes()
     var descending_data = open(assets + "/descending.bin", "r").read_bytes()
     if len(port_data) != N * 8 or len(descending_data) != D * 4:
@@ -249,6 +251,23 @@ def main() raises:
             ctx.synchronize()
             bridge.reset_reply()
             continue
+        if op == "mirror":
+            ctx.enqueue_copy(host_trace.unsafe_ptr(), trace_buffer)
+            ctx.synchronize()
+            bridge.mirror_buffers(Int(host_ever.unsafe_ptr()), Int(host_trace.unsafe_ptr()), C)
+            continue
+        if op == "drive":
+            bridge.set_drive(request, C)
+            continue
+        if op == "weights":
+            weight_data = open(String(py=request["path"]), "r").read_bytes()
+            if len(weight_data) != E * 4:
+                raise Error("weights file must hold E float32 values")
+            gain = Float32(Float64(py=request["gain"]))
+            ctx.enqueue_copy(weight_buffer, weight_data.unsafe_ptr().unsafe_bitcast[Float32]())
+            ctx.synchronize()
+            bridge.weights_reply()
+            continue
         if op == "export_state" or op == "import_state":
             if op == "export_state":
                 ctx.enqueue_function(unpack, x_tensor, ever_tensor, x_float_tensor, ever_float_tensor,
@@ -275,7 +294,7 @@ def main() raises:
         for i in range(C * 8):
             host_inputs[i] = Float32(Float64(py=request["inputs"][i]))
         unsafe_memset_zero(host_direct.unsafe_ptr(), C * N)
-        bridge.apply_visual(request, Int(host_direct.unsafe_ptr()), C)
+        bridge.apply_drive(request, Int(host_direct.unsafe_ptr()), C)
         for i in range(Int(py=request["direct"].__len__())):
             var target = Int(py=request["direct"][i])
             if host_ever[target] == 0.0:
@@ -290,11 +309,11 @@ def main() raises:
             if tick % 2 == 0:
                 ctx.enqueue_function(dynamics, row_tensor, col_tensor, weight_tensor,
                     port_tensor, input_tensor, direct_tensor, x_tensor, y_tensor, v_tensor,
-                    trace_tensor, ever_tensor, grid_dim=GRID, block_dim=BLOCK)
+                    trace_tensor, ever_tensor, gain, grid_dim=GRID, block_dim=BLOCK)
             else:
                 ctx.enqueue_function(dynamics, row_tensor, col_tensor, weight_tensor,
                     port_tensor, input_tensor, direct_tensor, y_tensor, x_tensor, v_tensor,
-                    trace_tensor, ever_tensor, grid_dim=GRID, block_dim=BLOCK)
+                    trace_tensor, ever_tensor, gain, grid_dim=GRID, block_dim=BLOCK)
         if timing:
             ctx.synchronize()
         var t3 = perf_counter_ns()
@@ -308,7 +327,7 @@ def main() raises:
         ctx.synchronize()
         var t4 = perf_counter_ns()
         bridge.reply_buffers(Int(host_features.unsafe_ptr()), Int(host_spikes.unsafe_ptr()),
-            Int(host_ever.unsafe_ptr()), C, F, N, Int(py=request["after"]))
+            Int(host_ever.unsafe_ptr()), C, F, N, Int(py=request["after"]), Bool(py=request["lean"]))
         if timing:
             print("T", (t1 - t0) // 1000, (t2 - t1) // 1000, (t3 - t2) // 1000, (t4 - t3) // 1000,
                 (perf_counter_ns() - t4) // 1000, file=stderr)

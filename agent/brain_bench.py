@@ -10,7 +10,7 @@ from pathlib import Path
 
 import numpy as np
 
-from agent.neural_connectome import ANNOTATIONS, N, ROOT, CPUBrain, normalize_weights_inplace
+from agent.neural_connectome import ANNOTATIONS, N, ROOT, CPUBrain, WorkerBrain, normalize_weights_inplace
 from agent.mb_plasticity import mushroom_body_cells, odor_drive, sparsen
 
 OUT = ROOT / '.work/agent/brain-bench'
@@ -225,7 +225,14 @@ ODORS6 = (('DA1', 'VA1d', 'DL3'), ('VM2', 'DM1', 'VA2'), ('DM2', 'VC1', 'DA2'),
 APL = (31044,)  # FlyWire APL with KC edges; its partner row 31045 has none
 
 
-def sweep_class_gain(seeds=3, keep=.8, control=False, grid=None):
+def odour_columns(seeds=3, keep=.8):
+    """ODORS6 drive, each odour as `seeds` columns driving a random `keep` subset of its ORNs."""
+    rng = np.random.default_rng(20261002)
+    base = odor_drive(*ODORS6)
+    return np.repeat(base, seeds, axis=1) * (rng.random((N, base.shape[1] * seeds)) < keep)
+
+
+def sweep_class_gain(seeds=3, keep=.8, control=False, grid=None, gpu=False):
     """P1d: per-class gains folded into weights at the sparse point (normalized gain 35).
 
     Grid ranges come from agent.operating_point (APL ~7x, MBON 5-11x, DN 23-83x short of
@@ -236,10 +243,8 @@ def sweep_class_gain(seeds=3, keep=.8, control=False, grid=None):
     from regime_sweep import sweep
     cells = mushroom_body_cells()
     kc, mbon = cells['KC'], cells['MBON']
-    rng = np.random.default_rng(20261002)
-    base = odor_drive(*ODORS6)
-    drive = np.repeat(base, seeds, axis=1) * (rng.random((N, base.shape[1] * seeds)) < keep)
-    brain = CPUBrain(flies=drive.shape[1], gain_mode='normalized', gain=35)
+    drive = odour_columns(seeds, keep)
+    brain = (WorkerBrain if gpu else CPUBrain)(flies=drive.shape[1], gain_mode='normalized', gain=35)
     normalized, zeros = brain.graph.data.copy(), np.zeros((drive.shape[1], 8), np.float32)
     odour = np.repeat(np.arange(len(ODORS6)), seeds)
     across = [(i, j) for i in range(len(odour)) for j in range(i) if odour[i] != odour[j] and i % seeds == j % seeds]
@@ -271,7 +276,12 @@ def sweep_class_gain(seeds=3, keep=.8, control=False, grid=None):
                 'kc_distinct': ('kc_jaccard_across_odours', '<', .3),
                 'mbon_responds_every_odour': ('mbon_count', '>=', 1),
                 'dn_fires': ('dn_count_max', '>=', 1), 'brain_bounded': ('brain_active', '<', .05)}
-    return sweep(grid, run, criteria, OUT / ('sweep-p1d-control' if control else 'sweep-p1d'))
+    stem = ('sweep-p1d-control' if control else 'sweep-p1d') + ('-gpu' if gpu else '')
+    try:
+        return sweep(grid, run, criteria, OUT / stem)
+    finally:
+        if gpu:
+            brain.close()
 
 
 if __name__ == '__main__':
@@ -280,7 +290,7 @@ if __name__ == '__main__':
                                                       'mbon_gain': [5., 11.], 'dn_gain': [25., 80.]})
         result['peak_rss_kib'] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     elif '--p1d' in sys.argv:
-        result = sweep_class_gain()
+        result = sweep_class_gain(gpu='--gpu' in sys.argv)
         result['peak_rss_kib'] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     elif '--p1c-cap' in sys.argv:
         result = sweep_power((1.,), (45., 50., 55., 60., 65., 70.), (.005, .01, .015, .02), 'p1c-cap')
