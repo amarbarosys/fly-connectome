@@ -20,7 +20,9 @@ OUT=ROOT/'.work/agent/skeleton-link'
 COLUMNS=['node_id','parent_id','radius','x','y','z','neuron']
 BATCH=1<<21
 FIELDS=['node_count','cable_length_nm','radius_mean_nm','extent_x_nm','extent_y_nm','extent_z_nm',
-    'centroid_x_nm','centroid_y_nm','centroid_z_nm','root_count','absent_parent_count']
+    'centroid_x_nm','centroid_y_nm','centroid_z_nm',
+    'min_x_nm','min_y_nm','min_z_nm','max_x_nm','max_y_nm','max_z_nm',
+    'root_count','absent_parent_count']
 
 
 def morphology(node_id,parent_id,radius,xyz):
@@ -39,6 +41,9 @@ def morphology(node_id,parent_id,radius,xyz):
         'extent_z_nm':float(np.ptp(xyz[:,2])),
         'centroid_x_nm':float(xyz[:,0].mean()),'centroid_y_nm':float(xyz[:,1].mean()),
         'centroid_z_nm':float(xyz[:,2].mean()),
+        'min_x_nm':float(xyz[:,0].min()),'min_y_nm':float(xyz[:,1].min()),
+        'min_z_nm':float(xyz[:,2].min()),'max_x_nm':float(xyz[:,0].max()),
+        'max_y_nm':float(xyz[:,1].max()),'max_z_nm':float(xyz[:,2].max()),
         'root_count':float((parent_id<0).sum()),
         'absent_parent_count':float((~found).sum())}
 
