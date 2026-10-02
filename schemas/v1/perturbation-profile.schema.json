@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://amarbaro.org/schemas/fly-screen/v1/perturbation-profile.schema.json",
+  "title": "Fly simulator perturbation profile",
+  "description": "Explicit current simulator contract. A transmitter gain hypothesis is not receptor pharmacology.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "name", "profile_type", "effects"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "name": {"type": "string", "minLength": 1},
+    "profile_type": {"enum": ["null_model_arm", "transmitter_gain_hypothesis", "unmodeled"]},
+    "effects": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/effect"}
+    }
+  },
+  "$defs": {
+    "effect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target", "action", "value", "unit", "sign_behavior", "evidence"],
+      "properties": {
+        "target": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "id"],
+          "properties": {
+            "kind": {"const": "presynaptic_transmitter"},
+            "id": {"enum": ["ach", "glu", "gaba", "dop", "ser", "oct"]}
+          }
+        },
+        "action": {"const": "scale_signed_synaptic_weight"},
+        "value": {"type": "number"},
+        "unit": {"const": "dimensionless_multiplier"},
+        "sign_behavior": {"enum": ["inverts_signed_edge_sign", "removes_labeled_edge_contribution", "preserves_signed_edge_sign"]},
+        "evidence": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "source", "rationale"],
+          "properties": {
+            "status": {"enum": ["hypothesis", "supported"]},
+            "source": {"type": "string", "minLength": 1},
+            "rationale": {"type": "string", "minLength": 1}
+          },
+          "allOf": [{
+            "if": {"properties": {"status": {"const": "supported"}}, "required": ["status"]},
+            "then": {"properties": {"source": {"pattern": "^(https://|doi:)"}}}
+          }]
+        }
+      },
+      "allOf": [
+        {"if": {"properties": {"value": {"exclusiveMaximum": 0}}, "required": ["value"]}, "then": {"properties": {"sign_behavior": {"const": "inverts_signed_edge_sign"}}}},
+        {"if": {"properties": {"value": {"const": 0}}, "required": ["value"]}, "then": {"properties": {"sign_behavior": {"const": "removes_labeled_edge_contribution"}}}},
+        {"if": {"properties": {"value": {"exclusiveMinimum": 0}}, "required": ["value"]}, "then": {"properties": {"sign_behavior": {"const": "preserves_signed_edge_sign"}}}}
+      ]
+    }
+  },
+  "allOf": [
+    {"if": {"properties": {"profile_type": {"enum": ["null_model_arm", "unmodeled"]}}}, "then": {"properties": {"effects": {"maxItems": 0}}}},
+    {"if": {"properties": {"profile_type": {"const": "transmitter_gain_hypothesis"}}}, "then": {"properties": {"effects": {"minItems": 1}}}}
+  ]
+}

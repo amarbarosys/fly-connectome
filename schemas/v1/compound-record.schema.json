@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://amarbaro.org/schemas/fly-screen/v1/compound-record.schema.json",
+  "title": "Fly screen compound evidence record",
+  "description": "Source-facing compound and assay evidence. Affinity values are not interchangeable across measurement types.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "compound_id", "name", "targets", "evidence_status"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "compound_id": {"type": "string", "minLength": 1},
+    "name": {"type": "string", "minLength": 1},
+    "organism": {"type": ["string", "null"], "description": "Assay organism; do not assume Drosophila when evidence is from another species."},
+    "targets": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/targetEvidence"}
+    },
+    "evidence_status": {"enum": ["supported", "partial", "unverified", "unknown"]},
+    "notes": {"type": ["string", "null"]}
+  },
+  "$defs": {
+    "targetEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target_name", "action", "source"],
+      "properties": {
+        "target_name": {"type": "string", "minLength": 1},
+        "target_identifier": {"type": ["string", "null"], "description": "Stable database identifier where available."},
+        "action": {"enum": ["agonist", "antagonist", "positive_allosteric_modulator", "negative_allosteric_modulator", "channel_blocker", "enzyme_inhibitor", "unknown"]},
+        "affinity": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["measurement_type", "value", "unit"],
+          "properties": {
+            "measurement_type": {"enum": ["Ki", "Kd", "IC50", "EC50"]},
+            "value": {"type": "number", "exclusiveMinimum": 0},
+            "unit": {"enum": ["M", "mM", "uM", "nM", "pM"]},
+            "hill_coefficient": {"type": ["number", "null"], "exclusiveMinimum": 0},
+            "emax": {"type": ["number", "null"], "description": "Must include its measured units/normalization in assay_context before use."},
+            "assay_context": {"type": ["string", "null"]}
+          }
+        },
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["uri", "source_type"],
+          "properties": {
+            "uri": {"type": "string", "minLength": 1},
+            "source_type": {"enum": ["paper", "database_record", "curated_review", "other"]},
+            "accessed_date": {"type": ["string", "null"], "format": "date"}
+          }
+        }
+      }
+    }
+  }
+}

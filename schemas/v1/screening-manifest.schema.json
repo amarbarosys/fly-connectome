@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://amarbaro.org/schemas/fly-screen/v1/screening-manifest.schema.json",
+  "title": "Fly screen reproducible run manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "run_id", "created_utc", "engine", "input_hashes", "conditions"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "run_id": {"type": "string", "minLength": 1},
+    "created_utc": {"type": "string", "format": "date-time"},
+    "engine": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "source_revision", "binary_sha256"],
+      "properties": {
+        "name": {"type": "string"},
+        "source_revision": {"type": ["string", "null"]},
+        "binary_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "input_hashes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "size_bytes", "sha256"],
+        "properties": {
+          "path": {"type": "string"},
+          "size_bytes": {"type": "integer", "minimum": 0},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        }
+      }
+    },
+    "conditions": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/condition"}}
+  },
+  "$defs": {
+    "condition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["condition_id", "compound_id", "dose", "profile", "steps"],
+      "properties": {
+        "condition_id": {"type": "string", "minLength": 1},
+        "compound_id": {"type": "string", "minLength": 1},
+        "dose": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["value", "unit", "basis"],
+          "properties": {
+            "value": {"type": "number", "minimum": 0},
+            "unit": {"enum": ["M", "mM", "uM", "nM", "pM"]},
+            "basis": {"enum": ["measured_exposure", "assumed_nominal", "relative_to_affinity", "vehicle_control"]}
+          }
+        },
+        "profile": {"$ref": "perturbation-profile.schema.json"},
+        "steps": {"type": "integer", "minimum": 1}
+      }
+    }
+  }
+}
