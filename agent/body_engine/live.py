@@ -8,7 +8,7 @@ check (under gpu-wait):
          100 frames is < 0.02 (settled). Control arm: the same fly with only the 6 feet colliding (FEET 'tarsus5',
          which sinks through the floor in MuJoCo too) must fail
   leak   10,000 streamed frames, verify_render_leak's sampler at 100 and 10,000: fds equal, VRAM not up, RSS < +1 MB
-watch: live.py watch [K] [cube] [spider]  -> mpv window (cube: inside the closed 40 mm cube of model.cube, walls
+watch: live.py watch [K] [cube] [spider] [world [SEED]]  -> mpv window (cube: inside the closed 40 mm cube of model.cube, walls
        drawn; spider: the body from models/spider.py instead of the fly) (slow motion: the engine is ~140x slower than real time at one fly)
 
 usage: gpu-wait run --priority 90 --timeout 1800 -- .venv/bin/python -m agent.body_engine.live check
@@ -21,7 +21,7 @@ from pathlib import Path
 import mujoco
 import numpy as np
 
-from agent.body_engine.model import ENGINE, FEET, cube, export, load, meshes, standing
+from agent.body_engine.model import ENGINE, FEET, combine, cube, export, load, meshes, standing, terrain
 from agent.body_engine.render_check import DIST, MJCF, MOJO
 from agent.body_engine.verify_render_leak import sample
 from agent.body_engine.world import height_grad
@@ -29,6 +29,30 @@ from agent.body_engine.world import height_grad
 OUT = Path('.work/agent/body_engine/live')
 W, H = 960, 540
 STATS = Path.home() / 'iTools/video/frame-stats/frame-stats'
+
+
+WORLD = (0, 0, 0.1, 8.0, 4, 1, 2.0, 0.5, 0.5, 40.0, 5.0, 40.0)  # 0.1 mm bumps (0.3 mm floors the fly), cones, seed 1
+
+
+def roots(m):
+    """qpos address of every free joint (one per animal)."""
+    return [int(m.jnt_qposadr[j]) for j in range(m.njnt) if m.jnt_type[j] == mujoco.mjtJoint.mjJNT_FREE]
+
+
+def world_camera(out, m, fovy):
+    """Eye, target, fovy framing every animal: target the roots' mean, distance fitting their bounding sphere (+5 mm)
+    to the fov, azimuth the first of 12 whose sight lines to every root clear the terrain (landmark cones occlude)."""
+    q = np.fromfile(out / 'qpos.bin', np.float32).astype(float)
+    t = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_NUMERIC, 'terrain')
+    p = m.numeric_data[m.numeric_adr[t]:m.numeric_adr[t] + 16]
+    look = np.mean([q[a:a + 3] for a in roots(m)], 0)
+    dist = (max(np.linalg.norm(q[a:a + 3] - look) for a in roots(m)) + 5.0) / np.sin(np.radians(float(fovy)) / 2)
+    s = np.linspace(0, 1, 200)[:, None]
+    for az in np.radians(np.arange(-130, 230, 30)):
+        eye = look + dist * np.array([0.85 * np.cos(az), 0.85 * np.sin(az), 0.52])
+        if all((line := eye + s * (q[a:a + 3] - eye))[:-10, 2].min() > 0 and (line[:-10, 2] > height_grad(line[:-10, 0], line[:-10, 1], p)[0] + 0.2).all() for a in roots(m)):
+            break
+    return [*map(str, eye), *map(str, look), str(fovy)]
 
 
 def prepare(out=OUT, pairs=FEET, mjcf=MJCF, dist=DIST, flat=None):
@@ -41,11 +65,11 @@ def prepare(out=OUT, pairs=FEET, mjcf=MJCF, dist=DIST, flat=None):
     meshes(mjcf, out)
     q, v = standing(load(flat) if flat else m, 2)
     q, v = q[:1], v[:1]
-    if flat:
-        from agent.body_engine.world import height_grad
+    if flat:  # every free root (fly, spider) lifted above its own ground
         t = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_NUMERIC, 'terrain')
-        g = np.mgrid[-4:4:33j, -4:4:33j].reshape(2, -1) + q[0, :2, None]
-        q[0, 2] += float(height_grad(g[0], g[1], m.numeric_data[m.numeric_adr[t]:m.numeric_adr[t] + 16])[0].max()) + 0.05
+        for a in roots(m):
+            g = np.mgrid[-4:4:33j, -4:4:33j].reshape(2, -1) + q[0, a:a + 2, None]
+            q[0, a + 2] += float(height_grad(g[0], g[1], m.numeric_data[m.numeric_adr[t]:m.numeric_adr[t] + 16])[0].max()) + 0.05
     u = np.where(m.actuator_trntype == mujoco.mjtTrn.mjTRN_BODY, 1.0, q[0][m.jnt_qposadr[np.minimum(m.actuator_trnid[:, 0], m.njnt - 1)]])
     q.astype(np.float32).T.copy().tofile(out / 'qpos.bin')
     v.astype(np.float32).T.copy().tofile(out / 'qvel.bin')
@@ -111,31 +135,34 @@ def stand(out, binary, cam, frames, video):
 
 
 def upright(out, m, cam, frames=300, flip=False):
-    """(cos of the root's tilt from the upright start pose, lowest thorax vertex above the terrain) after `frames`
-    frames; flip starts the animal upside down (rolled 180 deg about its root's x axis, the gate's negative control)."""
+    """Per animal (free root): (cos of its root's tilt from the upright start pose, lowest vertex of the root body's
+    first geom above the terrain: fly thorax, spider prosoma) after `frames` frames; flip starts every animal upside
+    down (rolled 180 deg about its root's x axis, the gate's negative control)."""
     q0 = np.fromfile(out / 'qpos.bin', np.float32)
     if flip:
-        r = np.zeros(4)
-        mujoco.mju_mulQuat(r, q0[3:7].astype(float), np.array([0., 1, 0, 0]))
         q1 = q0.copy()
-        q1[3:7], q1[2] = r, q1[2] + 1.0
+        for a in roots(m):
+            r = np.zeros(4)
+            mujoco.mju_mulQuat(r, q0[a + 3:a + 7].astype(float), np.array([0., 1, 0, 0]))
+            q1[a + 3:a + 7], q1[a + 2] = r, q1[a + 2] + 1.0
         q1.tofile(out / 'qpos.bin')
     subprocess.run([str(build(out, m, 10)), str(out) + '/', str(frames), *cam, str(out / 'last.rgba')], check=True, stderr=subprocess.DEVNULL)
-    q = np.fromfile(out / 'last.rgba.qpos', np.float32).astype(float)
     d = mujoco.MjData(m)
-    d.qpos[:] = q
+    d.qpos[:] = np.fromfile(out / 'last.rgba.qpos', np.float32)
     mujoco.mj_kinematics(m, d)
-    r0 = np.zeros(9)
-    mujoco.mju_quat2Mat(r0, q0[3:7].astype(float))
     t = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_NUMERIC, 'terrain')
     p = m.numeric_data[m.numeric_adr[t]:m.numeric_adr[t] + 16] if t >= 0 else (0, 0, 0, 1, 0, 0, 2, 0.5)
-    low = np.inf
-    for g in range(m.ngeom):
-        if 'thorax' in (mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_GEOM, g) or '') and m.geom_type[g] == mujoco.mjtGeom.mjGEOM_MESH:
-            k = m.geom_dataid[g]
-            v = m.mesh_vert[m.mesh_vertadr[k]:m.mesh_vertadr[k] + m.mesh_vertnum[k]] @ d.geom_xmat[g].reshape(3, 3).T + d.geom_xpos[g]
-            low = min(low, float((v[:, 2] - height_grad(v[:, 0], v[:, 1], p)[0]).min()))
-    return float(r0[2::3] @ d.xmat[1].reshape(3, 3)[:, 2]), low  # body z axes of start and end
+    res = []
+    for j in range(m.njnt):
+        if m.jnt_type[j] != mujoco.mjtJoint.mjJNT_FREE:
+            continue
+        a, b = m.jnt_qposadr[j], m.jnt_bodyid[j]
+        r0 = np.zeros(9)
+        mujoco.mju_quat2Mat(r0, q0[a + 3:a + 7].astype(float))
+        g, k = m.body_geomadr[b], m.geom_dataid[m.body_geomadr[b]]
+        v = m.mesh_vert[m.mesh_vertadr[k]:m.mesh_vertadr[k] + m.mesh_vertnum[k]] @ d.geom_xmat[g].reshape(3, 3).T + d.geom_xpos[g]
+        res.append((float(r0[2::3] @ d.xmat[b].reshape(3, 3)[:, 2]), float((v[:, 2] - height_grad(v[:, 0], v[:, 1], p)[0]).min())))
+    return res
 
 
 def upright_check(terrain_mjcf, flat=MJCF):
@@ -148,10 +175,10 @@ def upright_check(terrain_mjcf, flat=MJCF):
     for name, mjcf, off in (('flat', flat, False), ('terrain', terrain_mjcf, False), ('terrain flipped (must fail)', terrain_mjcf, True)):
         out = OUT.parent / ('upright-' + name.split()[0] + ('-flipped' if off else ''))
         cam, m = prepare(out, mjcf=mjcf, flat=None if mjcf == flat else flat)
-        tilt, clear = upright(out, m, cam, flip=off)
-        ref = clear if ref is None else ref
-        res[name] = {'cos_tilt': tilt, 'thorax_clearance': clear, 'flat_clearance': ref,
-                     'pass': bool(tilt > np.cos(np.radians(30)) and clear > 0.5 * ref)}
+        got = upright(out, m, cam, flip=off)
+        ref = [c for _, c in got] if ref is None else ref
+        res[name] = {'cos_tilt': [t for t, _ in got], 'clearance': [c for _, c in got], 'flat_clearance': ref,
+                     'pass': bool(all(t > np.cos(np.radians(30)) and c > 0.5 * r for (t, c), r in zip(got, ref)))}
         print(('PASS' if res[name]['pass'] else 'FAIL'), name, json.dumps(res[name]))
     good = res['flat']['pass'] and res['terrain']['pass'] and not res['terrain flipped (must fail)']['pass']
     print('PASS upright on terrain' if good else 'FAIL upright on terrain')
@@ -192,8 +219,15 @@ def main(cmd, *args):
         if 'spider' in args:
             from agent.body_engine.models.spider import build as spider
             body = str(spider())
-        out = OUT.parent / ('live' + ('-cube' if box else '') + ('-spider' if 'spider' in args else ''))
-        cam, m = prepare(out, mjcf=cube(body, box) if box else body, dist=15.0 if 'spider' in args else DIST)
+        out = OUT.parent / ('live' + ('-cube' if box else '') + ('-spider' if 'spider' in args else '') + ('-world' if 'world' in args else ''))
+        if 'world' in args:  # fly + spider on the endless seeded terrain: live.py watch K world [SEED]
+            from agent.body_engine.models.spider import build as spider
+            body = combine(MJCF, str(spider()))
+            seed = next((int(x) for x in args[1:] if x.isdigit()), 1)
+            cam, m = prepare(out, mjcf=terrain(body, WORLD[:5] + (seed,) + WORLD[6:])[0], flat=body)
+            cam = world_camera(out, m, cam[6])
+        else:
+            cam, m = prepare(out, mjcf=cube(body, box) if box else body, dist=15.0 if 'spider' in args else DIST)
         if box:  # from inside a corner of the cube, looking at the animal
             look = np.array(cam[3:6], float)
             cam = [*map(str, look + np.array([12., -12., 8.]) * (1.6 if 'spider' in args else 1)), *cam[3:]]
@@ -201,8 +235,8 @@ def main(cmd, *args):
         subprocess.run(['mpv', '--demuxer=rawvideo', f'--demuxer-rawvideo-w={W}', f'--demuxer-rawvideo-h={H}',
                         '--demuxer-rawvideo-mp-format=rgba', '-'], stdin=live.stdout)
         return
-    if cmd == 'upright':  # live.py upright TERRAIN_MJCF
-        sys.exit(0 if upright_check(args[0]) else 1)
+    if cmd == 'upright':  # live.py upright TERRAIN_MJCF [FLAT_MJCF]
+        sys.exit(0 if upright_check(*args) else 1)
     cam, m = prepare()
     result = {'frame': frame_check(OUT, m, cam)}
     result['stand'] = stand_check(OUT, m, cam)
