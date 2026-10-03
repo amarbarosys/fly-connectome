@@ -29,6 +29,7 @@ from std.time import perf_counter_ns
 from std.gpu import block_idx, block_dim, thread_idx
 from max.gpu.host import DeviceContext
 from layout import TileTensor, row_major
+from world import P8, height_grad
 
 comptime NB = get_defined_int["NBODY"]()
 comptime NJ = get_defined_int["NJNT"]()
@@ -98,10 +99,8 @@ comptime CPF = NFL0  # STAGE 6: per pair margin, gap, friction 2, solref 2, soli
 comptime CVERT = CPF + 13 * NCP
 comptime COPT = CVERT + 3 * NHV
 comptime HFG = get_defined_int["HFGEOM", -1]()  # heightfield ground geom (model.py feet), else none
-comptime HR = get_defined_int["NHFR", 0]()
-comptime HC = get_defined_int["NHFC", 0]()
-comptime HFO = COPT + 3  # centre x y, half extents x y, world heights (row along +y)
-comptime CACF = HFO + (4 + HR * HC if HR else 0)  # STAGE 7: per actuator gain, bias 0-2, ctrlrange 2, forcerange 2, gear
+comptime HFO = COPT + 3  # world.mojo params (8)
+comptime CACF = HFO + (8 if HFG >= 0 else 0)  # STAGE 7: per actuator gain, bias 0-2, ctrlrange 2, forcerange 2, gear
 comptime NFL = CACF + 9 * NU if STAGE >= 7 else (CACF if STAGE >= 6 else NFL0)
 # smooth.bin rows (per animal): xpos, xquat, xipos of bodies 1.., geom_xpos, xanchor, xaxis
 comptime OXQ = 3 * (NB - 1)
@@ -441,8 +440,8 @@ def contacts(mi: TI, mf: TF, qvel: TV, res: TO, f: Int, o: V3):
     """MuJoCo mjc_PlaneConvex (support vertex + hull neighbours below the margin, at most 3, none within 0.3 rbound of
     the first), mj_instantiateContact (pyramidal condim 3, Jacobian over the body's dof chain), mj_diagApprox,
     mj_makeImpedance and mj_referenceConstraint, per exported plane-mesh pair. A heightfield ground (HFGEOM) is not
-    mjc_ConvexHField (GJK+EPA on cell prisms): the plane is the bilinear tangent plane of the heights under the mesh
-    centre, exact on linear terrain, wrong where the terrain bends inside one mesh."""
+    mjc_ConvexHField (GJK+EPA on cell prisms): the plane is the tangent plane of world.mojo's terrain function under
+    the mesh centre, exact on linear terrain, wrong where the terrain bends inside one mesh."""
     var h = mf[TSTEP]
     var impratio = mf[COPT]
     for p in range(NCP):
@@ -458,20 +457,12 @@ def contacts(mi: TI, mf: TF, qvel: TV, res: TO, f: Int, o: V3):
         var q2 = mul(b2[1], m4(mf, GQUAT + 4 * g2))
         var pos2 = V3(get(res, f, OG + 3 * g2), get(res, f, OG + 3 * g2 + 1), get(res, f, OG + 3 * g2 + 2), 0)
         var normal = rot(q1, basis(2))
-        comptime if HR > 0:
+        comptime if HFG >= 0:
             if g1 == HFG:
                 var w = pos2 + o
-                var dx = 2 * mf[HFO + 2] / Float32(HC - 1); var dy = 2 * mf[HFO + 3] / Float32(HR - 1)
-                var u = min(max((w[0] - mf[HFO] + mf[HFO + 2]) / dx, Float32(0)), Float32(HC - 1) - 1e-3)
-                var t = min(max((w[1] - mf[HFO + 1] + mf[HFO + 3]) / dy, Float32(0)), Float32(HR - 1) - 1e-3)
-                var c = Int(u); var r = Int(t)
-                var tx = u - Float32(c); var ty = t - Float32(r)
-                var a = HFO + 4 + r * HC + c
-                var h00 = mf[a]; var h01 = mf[a + 1]; var h10 = mf[a + HC]; var h11 = mf[a + HC + 1]
-                var gx = ((1 - ty) * (h01 - h00) + ty * (h11 - h10)) / dx
-                var gy = ((1 - tx) * (h10 - h00) + tx * (h11 - h01)) / dy
-                normal = V3(-gx, -gy, 1, 0) / sqrt(gx * gx + gy * gy + 1)
-                pos1 = V3(w[0], w[1], (1 - ty) * ((1 - tx) * h00 + tx * h01) + ty * ((1 - tx) * h10 + tx * h11), 0) - o
+                var hg = height_grad(w[0], w[1], P8(mf[HFO], mf[HFO + 1], mf[HFO + 2], mf[HFO + 3], mf[HFO + 4], mf[HFO + 5], mf[HFO + 6], mf[HFO + 7]))
+                normal = V3(-hg[1], -hg[2], 1, 0) / sqrt(hg[1] * hg[1] + hg[2] * hg[2] + 1)
+                pos1 = V3(pos2[0], pos2[1], hg[0] - o[2], 0)  # pos2's own x, y: no round trip through world coordinates
         if (normal * (pos2 - pos1)).reduce_add() - mf[pf + 12] > margin:  # bounding sphere clear of the plane: the
             for c in range(3):                                          # support vertex would be too (no contact)
                 res[(OVALID + 3 * p + c) * F + f] = 0

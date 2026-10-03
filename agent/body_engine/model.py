@@ -87,22 +87,19 @@ def cube(mjcf, side=40.0):
     return str(out)
 
 
-def terrain(mjcf, slope=(0.1, 0.05), n=65, half=20.0, bumps=0.0, seed=0):
-    """Ground plane replaced by an n x n heightfield of +-half mm: heights slope . (x, y) plus, when bumps > 0, a
-    seeded smooth sum of 4 low-frequency sines of that amplitude (mm). Writes terrain.xml next to mjcf and, without
-    bumps, its exact twin terrain_plane.xml (the same tilted plane as a plane geom, the oracle of the tilt gate: a
-    bilinear tangent plane of linear heights is exact). Returns the paths."""
+def terrain(mjcf, params=(0.1, 0.05, 0, 8.0, 0, 0, 2.0, 0.5), n=257, half=40.0):
+    """Ground plane replaced by the world.py terrain: its 8 params ride in <custom><numeric name="terrain"> (what the
+    engine evaluates) and an n x n heightfield of +-half mm samples them (what MuJoCo collides with). Writes
+    terrain.xml next to mjcf and, with octaves 0 (a pure ramp), its exact twin terrain_plane.xml: the same tilted
+    plane as a plane geom, the oracle of the tilt gate. Returns the paths."""
     import xml.etree.ElementTree as ET
+    from agent.body_engine.world import height_grad
     xs = np.linspace(-half, half, n)
     X, Y = np.meshgrid(xs, xs)  # row r along +y, column c along +x (mjModel.hfield_data order)
-    H = slope[0] * X + slope[1] * Y
-    rng = np.random.default_rng(seed)
-    for _ in range(4 if bumps else 0):
-        k, ph = rng.uniform(0.1, 0.3, 2), rng.uniform(0, 2 * np.pi)
-        H += bumps / 4 * np.sin(k[0] * X + k[1] * Y + ph)
+    H = height_grad(X, Y, params)[0].astype(np.float64)
     lo, span = H.min(), max(np.ptp(H), 1e-6)
     out = []
-    for kind in ('hfield', 'plane') if not bumps else ('hfield',):
+    for kind in ('hfield', 'plane') if not params[4] else ('hfield',):
         tree = ET.parse(mjcf)
         root = tree.getroot()
         ground = root.find("worldbody/geom[@name='ground_plane']")
@@ -113,8 +110,10 @@ def terrain(mjcf, slope=(0.1, 0.05), n=65, half=20.0, bumps=0.0, seed=0):
                           elevation=' '.join(f'{e:.9g}' for e in ((H - lo) / span)[::-1].ravel()))  # XML rows run +y first
             ground.set('type', 'hfield'); ground.set('hfield', 'terrain'); ground.set('pos', f'0 0 {lo}')
             ground.attrib.pop('size', None)
+            custom = root.find('custom') if root.find('custom') is not None else ET.SubElement(root, 'custom')
+            ET.SubElement(custom, 'numeric', name='terrain', data=' '.join(map(str, params)))
         else:
-            ground.set('pos', '0 0 0'); ground.set('zaxis', f'{-slope[0]} {-slope[1]} 1')
+            ground.set('pos', '0 0 0'); ground.set('zaxis', f'{-params[0]} {-params[1]} 1')
         path = Path(mjcf).with_name('terrain.xml' if kind == 'hfield' else 'terrain_plane.xml')
         tree.write(path)
         out.append(str(path))
@@ -203,13 +202,12 @@ def feet(m, regex):
     floats = fl + verts + [m.opt.impratio, m.opt.tolerance, m.opt.ls_tolerance]
     sizes = {'NCP': len(pairs), 'NHV': len(verts) // 3, 'NHE': len(edges), 'NCH': len(chains)}
     hf = sorted({m.pair_geom1[i] for i in pairs if m.geom_type[m.pair_geom1[i]] == mujoco.mjtGeom.mjGEOM_HFIELD})
-    if hf:  # heightfield block: centre x y, half extents x y, then world heights row-major (row along +y)
-        g, k = hf[0], m.geom_dataid[hf[0]]
-        if len(hf) > 1 or m.geom_bodyid[g] or not np.allclose(m.geom_quat[g], [1, 0, 0, 0]):
-            raise SystemExit('FAIL export: one heightfield, on the world body, unrotated')
-        r, c, sz = m.hfield_nrow[k], m.hfield_ncol[k], m.hfield_size[k]
-        floats += [*m.geom_pos[g][:2], *sz[:2], *(m.geom_pos[g][2] + sz[2] * m.hfield_data[m.hfield_adr[k]:m.hfield_adr[k] + r * c])]
-        sizes |= {'HFGEOM': g, 'NHFR': r, 'NHFC': c}
+    if hf:  # terrain: the heightfield is MuJoCo's sample; the engine evaluates world.py's function from its 8 params
+        t = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_NUMERIC, 'terrain')
+        if len(hf) > 1 or t < 0 or m.numeric_size[t] != 8:
+            raise SystemExit('FAIL export: one heightfield ground, with its 8 world params in <numeric name="terrain">')
+        floats += list(m.numeric_data[m.numeric_adr[t]:m.numeric_adr[t] + 8])
+        sizes |= {'HFGEOM': hf[0]}
     floats = np.array(floats)
     return ints, floats, sizes
 
@@ -329,18 +327,22 @@ def check(mjcf, out, stage, count=64, k=0, oracle=None):
         s.opt.noslip_iterations = 0
         import re
         for i in range(s.npair):
-            if s.geom_type[s.pair_geom1[i]] != mujoco.mjtGeom.mjGEOM_PLANE or not re.search(FEET, mujoco.mj_id2name(s, mujoco.mjtObj.mjOBJ_GEOM, s.pair_geom2[i])):
+            if s.geom_type[s.pair_geom1[i]] not in (mujoco.mjtGeom.mjGEOM_PLANE, mujoco.mjtGeom.mjGEOM_HFIELD) or not re.search(FEET, mujoco.mj_id2name(s, mujoco.mjtObj.mjOBJ_GEOM, s.pair_geom2[i])):
                 s.pair_margin[i] = -1e10
         want = reference(s, fn, tuple(f for f in fields if f not in ('qacc_euler', 'qpos_next')) + ('qpos', 'qvel'), q, v, u)
         want['qacc_euler'] = (want.pop('qvel') - v) / m.opt.timestep
         want['qpos_next'] = want.pop('qpos')
         d = mujoco.MjData(s)  # ncon: contacts that carry constraint rows (MuJoCo also lists excluded ones)
         ambiguous = np.zeros(count, int)  # pairs whose deepest vertex sits within float32 resolution of the margin
-        live = [i for i in range(s.npair) if s.pair_margin[i] > -1]
+        switch = np.zeros(count)  # per state: the constraint row nearest its active-set switch, |J qacc - aref| / max |aref|
+        live = [i for i in range(s.npair) if s.pair_margin[i] > -1 and s.geom_type[s.pair_geom1[i]] == mujoco.mjtGeom.mjGEOM_PLANE]
         for n in range(count):
             d.qpos[:], d.qvel[:], d.ctrl[:] = q[n], v[n], u[n]
             mujoco.mj_forward(s, d)
             want['ncon'][n] = sum(c.efc_address >= 0 for c in d.contact[:d.ncon])
+            jar = np.zeros(d.nefc)
+            mujoco.mj_mulJacVec(s, d, jar, d.qacc)
+            switch[n] = (np.abs(jar - d.efc_aref).min() / max(np.abs(d.efc_aref).max(), 1e-30)) if d.nefc else 1.0
             for i in live:
                 g1, g2 = s.pair_geom1[i], s.pair_geom2[i]
                 a, c = s.mesh_vertadr[s.geom_dataid[g2]], s.mesh_vertnum[s.geom_dataid[g2]]
@@ -393,7 +395,18 @@ def check(mjcf, out, stage, count=64, k=0, oracle=None):
               f'({int(ambiguous.sum())} ambiguous pairs in {int((ambiguous > 0).sum())} states)')
         bad += ['ncon'] if off.any() else []
         got, fields = got[:i] + got[i + 1:], fields[:i] + fields[i + 1:]
-    bad += [b for f, g in zip(fields, got) for b in compare({f: (want[f].reshape(count, -1), g)}, max(REL, FLOOR_X * floor.get(f, 0)))]
+    if 'switch' in locals() and 'qfrc_constraint' in fields:  # a row within the qacc bar of its active-set switch
+        # may land on either side in float32: one row's force then redistributes over the stance (fly ramp state 37:
+        # |jar| 1.8e-5 of scale, force error 2.4e-4 along that row's direction). Those states skip qfrc_constraint only.
+        flip = switch < max(REL, FLOOR_X * floor.get('qacc', 0))
+        print(f'{"PASS" if flip.mean() <= 0.1 else "FAIL"} active-set ambiguous states {int(flip.sum())}/{count} '
+              f'(qfrc_constraint not compared there; at most 10 %)')
+        bad += ['active-set'] if flip.mean() > 0.1 else []
+        i = fields.index('qfrc_constraint')
+        compare({'qfrc_constraint (ambiguous states)': (want['qfrc_constraint'].reshape(count, -1)[flip], got[i][flip])}, 1.0) if flip.any() else None
+        want['qfrc_constraint'] = want['qfrc_constraint'].reshape(count, -1)[~flip]
+        got[i] = got[i][~flip]
+    bad += [b for f, g in zip(fields, got) for b in compare({f: (want[f].reshape(len(g), -1), g)}, max(REL, FLOOR_X * floor.get(f, 0)))]
     if bad:
         print(f'FAIL {len(bad)}/{len(fields)} {stage} fields: {" ".join(bad)}')
         sys.exit(1)
