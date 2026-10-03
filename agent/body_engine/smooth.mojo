@@ -61,14 +61,14 @@ comptime MCOL = MNNZ + NV  # STAGE 3: M_colind
 comptime BDOFNUM = MCOL + NC  # STAGE 4: body_dofnum, body_dofadr
 comptime BDOFADR = BDOFNUM + NB
 comptime NI0 = BDOFADR + NB
-# STAGE 6 contact block (model.py feet): per pair 8 ints, hull first edges, edge lists, dof chains, 2 solver ints
+# STAGE 6 contact block (model.py feet): per pair 11 ints, hull first edges, edge lists, dof chains, 2 solver ints
 comptime NCP = get_defined_int["NCP", 0]()
 comptime NHV = get_defined_int["NHV", 0]()
 comptime NHE = get_defined_int["NHE", 0]()
 comptime NCH = get_defined_int["NCH", 0]()
 comptime NH = get_defined_int["NH", 0]()  # H's nonzeros (M's plus the fill of pairs that couple two dof chains)
 comptime CPH = NI0
-comptime CFIRST = CPH + 8 * NCP
+comptime CFIRST = CPH + 11 * NCP
 comptime CEDGE = CFIRST + NHV
 comptime CCHAIN = CEDGE + NHE
 comptime CSIGN = CCHAIN + NCH
@@ -135,7 +135,8 @@ comptime OQACT = OAF + NU
 comptime NOUT = OSC if STAGE == 1 else (OM + NC if STAGE == 2 else (OLDI + NV if STAGE == 3 else (OQH if STAGE == 4 else (OQPOS + NQ if STAGE == 5 else (OQFC + NV if STAGE == 6 else OQACT + NV)))))
 comptime OCACC = NOUT  # scratch rows after the output: cacc, cfrc_body per body (world included)
 comptime OCFRC = OCACC + 6 * NB
-comptime NSLOT = 3 * NCP  # up to 3 contacts per plane-mesh pair (MuJoCo maxplanemesh)
+comptime NSLOT = get_defined_int["NSLOT", 0]()  # contact slots: 3 per plane-mesh pair (MuJoCo maxplanemesh), 1 per sphere pair
+comptime NJE = get_defined_int["NJE", 0]()  # Jacobian entries: 4 rows x slots x chain length, summed over pairs
 comptime NEFC = 4 * NSLOT  # pyramidal condim 3: 4 rows per contact
 comptime OVALID = OCFRC + 6 * NB  # STAGE 6 scratch: slot valid, per row D aref jar jv state, J rows, solver vectors, H
 comptime OD = OVALID + NSLOT
@@ -144,7 +145,7 @@ comptime OJAR = OAREF + NEFC
 comptime OJV = OJAR + NEFC
 comptime OST = OJV + NEFC
 comptime OJ = OST + NEFC
-comptime OQSM = OJ + 12 * NCH
+comptime OQSM = OJ + NJE
 comptime OQACCS = OQSM + NV
 comptime OMA = OQACCS + NV
 comptime OGRAD = OMA + NV
@@ -432,6 +433,21 @@ def jdot(mi: TI, res: TO, f: Int, jadr: Int, nch: Int, choff: Int, X: Int) -> Fl
 
 
 @always_inline
+def sbase(mi: TI, p: Int) -> Int:
+    return Int(mi[CPH + 11 * p + 8])
+
+
+@always_inline
+def nslot(mi: TI, p: Int) -> Int:
+    return Int(mi[CPH + 11 * p + 9])
+
+
+@always_inline
+def jbase(mi: TI, p: Int) -> Int:
+    return Int(mi[CPH + 11 * p + 10])
+
+
+@always_inline
 def powi(a: Float32, b: Float32) -> Float32:
     """MuJoCo power() for a whole exponent (export refuses others): amdgpu links no powf here."""
     var r: Float32 = 1
@@ -457,9 +473,9 @@ def contacts(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int):
     var h = mf[TSTEP]
     var impratio = mf[COPT]
     for p in range(NCP):
-        var g1 = Int(mi[CPH + 8 * p]); var g2 = Int(mi[CPH + 8 * p + 1]); var b = Int(mi[CPH + 8 * p + 2])
-        var nvert = Int(mi[CPH + 8 * p + 3]); var voff = Int(mi[CPH + 8 * p + 4]); var eoff = Int(mi[CPH + 8 * p + 5])
-        var nch = Int(mi[CPH + 8 * p + 6]); var choff = Int(mi[CPH + 8 * p + 7])
+        var g1 = Int(mi[CPH + 11 * p]); var g2 = Int(mi[CPH + 11 * p + 1]); var b = Int(mi[CPH + 11 * p + 2])
+        var nvert = Int(mi[CPH + 11 * p + 3]); var voff = Int(mi[CPH + 11 * p + 4]); var eoff = Int(mi[CPH + 11 * p + 5])
+        var nch = Int(mi[CPH + 11 * p + 6]); var choff = Int(mi[CPH + 11 * p + 7])
         var pf = CPF + 14 * p
         var margin = mf[pf]; var gap = mf[pf + 1]; var f0 = mf[pf + 2]; var f1 = mf[pf + 3]
         var b1 = body(res, f, Int(mi[GBODY + g1]))
@@ -473,14 +489,13 @@ def contacts(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int):
         var dist: Float32
         var locdir = V3(0)
         var best = 0
-        var ncap = 3
         if nvert == 0:  # mjraw_SphereSphere: one contact on the centre line, normal from geom1 to geom2
             var r1 = mf[pf + 13]; var r2 = mf[pf + 12]
             var dif = pos2 - pos1
             var cd2 = (dif * dif).reduce_add()
             if cd2 > (margin + r1 + r2) * (margin + r1 + r2):
-                for c in range(3):
-                    res[(OVALID + 3 * p + c) * F + f] = 0
+                for c in range(nslot(mi, p)):
+                    res[(OVALID + sbase(mi, p) + c) * F + f] = 0
                 continue
             var len = sqrt(cd2)
             dist = len - r1 - r2
@@ -490,7 +505,6 @@ def contacts(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int):
             else:
                 normal = dif / len
             pnt = pos1 + normal * (r1 + dist)  # the loop's contact point pnt - dist/2 normal is MuJoCo's pos
-            ncap = 1
         else:
             var o = origin(mi, qpos, f, b)  # the plane (a world geom, world coordinates) in the animal's frame
             pos1 = pos1 - o
@@ -502,8 +516,8 @@ def contacts(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int):
                     normal = V3(-hg[1], -hg[2], 1, 0) / sqrt(hg[1] * hg[1] + hg[2] * hg[2] + 1)
                     pos1 = V3(pos2[0], pos2[1], hg[0] - o[2], 0)  # pos2's own x, y: no round trip through world coordinates
             if (normal * (pos2 - pos1)).reduce_add() - mf[pf + 12] > margin:  # bounding sphere clear of the plane: the
-                for c in range(3):                                          # support vertex would be too (no contact)
-                    res[(OVALID + 3 * p + c) * F + f] = 0
+                for c in range(nslot(mi, p)):                                        # support vertex would be too (no contact)
+                    res[(OVALID + sbase(mi, p) + c) * F + f] = 0
                 continue
             locdir = rot(Q4(q2[0], -q2[1], -q2[2], -q2[3]), -normal)
             var bdot: Float32 = -3.4e38
@@ -524,7 +538,7 @@ def contacts(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int):
         var threshold = (normal * (pos2 - pos1)).reduce_add() - margin
         var count = 0
         var e = Int(mi[CFIRST + eoff + best])
-        while count < ncap:
+        while count < nslot(mi, p):
             if count > 0:  # hull neighbours of the support vertex
                 var loc = Int(mi[CEDGE + e])
                 if loc < 0:
@@ -540,7 +554,7 @@ def contacts(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int):
             elif dist > margin:
                 break
             var cpos = pnt - normal * (0.5 * dist)
-            var slot = 3 * p + count
+            var slot = sbase(mi, p) + count
             res[(OVALID + slot) * F + f] = 1
             # mj_jacDifPair over the chain: jacp = cdof_lin + cdof_ang x (pos - subtree_com[root]), signed (geom2's body
             # minus geom1's; a dof of both cancels exactly); rows to the contact frame
@@ -550,7 +564,7 @@ def contacts(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int):
                 var ang = V3(get(res, f, cd), get(res, f, cd + 1), get(res, f, cd + 2), 0)
                 var jp = (V3(get(res, f, cd + 3), get(res, f, cd + 4), get(res, f, cd + 5), 0) + cross(ang, off)) * Float32(mi[CSIGN + choff + c])
                 var jn = (normal * jp).reduce_add(); var j1 = (y * jp).reduce_add(); var j2 = (z * jp).reduce_add()
-                var jadr = OJ + 12 * choff + 4 * count * nch + c
+                var jadr = OJ + jbase(mi, p) + 4 * count * nch + c
                 res[jadr * F + f] = jn + f0 * j1
                 res[(jadr + nch) * F + f] = jn - f0 * j1
                 res[(jadr + 2 * nch) * F + f] = jn + f1 * j2
@@ -588,11 +602,11 @@ def contacts(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int):
                 res[(OD + row) * F + f] = D
                 var vel: Float32 = 0
                 for c in range(nch):
-                    vel += get(res, f, OJ + 12 * choff + (4 * count + k) * nch + c) * qvel[Int(mi[CCHAIN + choff + c]) * F + f]
+                    vel += get(res, f, OJ + jbase(mi, p) + (4 * count + k) * nch + c) * qvel[Int(mi[CCHAIN + choff + c]) * F + f]
                 res[(OAREF + row) * F + f] = -B * vel - K * imp * (dist - imargin)
             count += 1
-        for c in range(count, 3):
-            res[(OVALID + 3 * p + c) * F + f] = 0
+        for c in range(count, nslot(mi, p)):
+            res[(OVALID + sbase(mi, p) + c) * F + f] = 0
 
 
 def actuation(mi: TI, mf: TF, qpos: TQ, qvel: TV, ctrl: TU, res: TO, f: Int):
@@ -622,10 +636,10 @@ def actuation(mi: TI, mf: TF, qpos: TQ, qvel: TV, ctrl: TU, res: TO, f: Int):
             var body = Int(mi[a + 1])
             var counter = 0
             for p in range(NCP):
-                if Int(mi[CPH + 8 * p + 2]) != body:
+                if Int(mi[CPH + 11 * p + 2]) != body:
                     continue
-                for sl in range(3):
-                    counter += 1 if get(res, f, OVALID + 3 * p + sl) != 0 else 0
+                for sl in range(nslot(mi, p)):
+                    counter += 1 if get(res, f, OVALID + sbase(mi, p) + sl) != 0 else 0
             var force = mf[af] * c + mf[af + 1]  # length and velocity of a body transmission are 0
             if mi[a + 3] != 0:
                 force = min(max(force, mf[af + 6]), mf[af + 7])
@@ -634,13 +648,13 @@ def actuation(mi: TI, mf: TF, qpos: TQ, qvel: TV, ctrl: TU, res: TO, f: Int):
                 continue
             var scale = -force / Float32(counter)
             for p in range(NCP):
-                if Int(mi[CPH + 8 * p + 2]) != body:
+                if Int(mi[CPH + 11 * p + 2]) != body:
                     continue
-                var nch = Int(mi[CPH + 8 * p + 6]); var choff = Int(mi[CPH + 8 * p + 7])
-                for sl in range(3):
-                    if get(res, f, OVALID + 3 * p + sl) == 0:
+                var nch = Int(mi[CPH + 11 * p + 6]); var choff = Int(mi[CPH + 11 * p + 7])
+                for sl in range(nslot(mi, p)):
+                    if get(res, f, OVALID + sbase(mi, p) + sl) == 0:
                         continue
-                    var jadr = OJ + 12 * choff + 4 * sl * nch
+                    var jadr = OJ + jbase(mi, p) + 4 * sl * nch
                     for k in range(nch):  # normal row = mean of the pyramid's first pair
                         var jn = 0.5 * (get(res, f, jadr + k) + get(res, f, jadr + nch + k))
                         res[(OQACT + Int(mi[CCHAIN + choff + k])) * F + f] += scale * jn
@@ -653,12 +667,12 @@ def update(mi: TI, res: TO, f: Int) -> Float32:
     for v in range(NV):
         res[(OQFC + v) * F + f] = 0
     for p in range(NCP):
-        var nch = Int(mi[CPH + 8 * p + 6]); var choff = Int(mi[CPH + 8 * p + 7])
-        for sl in range(3):
-            if get(res, f, OVALID + 3 * p + sl) == 0:
+        var nch = Int(mi[CPH + 11 * p + 6]); var choff = Int(mi[CPH + 11 * p + 7])
+        for sl in range(nslot(mi, p)):
+            if get(res, f, OVALID + sbase(mi, p) + sl) == 0:
                 continue
             for k in range(4):
-                var row = 4 * (3 * p + sl) + k
+                var row = 4 * (sbase(mi, p) + sl) + k
                 var jar = get(res, f, OJAR + row)
                 var act = jar < 0
                 res[(OST + row) * F + f] = 1 if act else 0
@@ -666,7 +680,7 @@ def update(mi: TI, res: TO, f: Int) -> Float32:
                     var D = get(res, f, OD + row)
                     cost += 0.5 * D * jar * jar
                     var force = -D * jar
-                    var jadr = OJ + 12 * choff + (4 * sl + k) * nch
+                    var jadr = OJ + jbase(mi, p) + (4 * sl + k) * nch
                     for c in range(nch):
                         var v = Int(mi[CCHAIN + choff + c])
                         res[(OQFC + v) * F + f] += get(res, f, jadr + c) * force
@@ -684,16 +698,16 @@ def hessian(mi: TI, res: TO, f: Int):
     for c in range(NC):
         res[(OHN + Int(mi[MTOH + c])) * F + f] = get(res, f, OM + c)
     for p in range(NCP):
-        var nch = Int(mi[CPH + 8 * p + 6]); var choff = Int(mi[CPH + 8 * p + 7])
-        for sl in range(3):
-            if get(res, f, OVALID + 3 * p + sl) == 0:
+        var nch = Int(mi[CPH + 11 * p + 6]); var choff = Int(mi[CPH + 11 * p + 7])
+        for sl in range(nslot(mi, p)):
+            if get(res, f, OVALID + sbase(mi, p) + sl) == 0:
                 continue
             for k in range(4):
-                var row = 4 * (3 * p + sl) + k
+                var row = 4 * (sbase(mi, p) + sl) + k
                 if get(res, f, OST + row) == 0:
                     continue
                 var D = get(res, f, OD + row)
-                var jadr = OJ + 12 * choff + (4 * sl + k) * nch
+                var jadr = OJ + jbase(mi, p) + (4 * sl + k) * nch
                 for a in range(nch):
                     var ja = get(res, f, jadr + a) * D
                     var ra = Int(mi[HADR + Int(mi[CCHAIN + choff + a])])
@@ -759,12 +773,12 @@ def search(mi: TI, res: TO, f: Int, scale: Float32, tolerance: Float32, lsiter: 
     var gtol = tolerance * snorm / scale
     mulM(mi, res, f, OMV, OSRCH)
     for p in range(NCP):
-        var nch = Int(mi[CPH + 8 * p + 6]); var choff = Int(mi[CPH + 8 * p + 7])
-        for sl in range(3):
-            if get(res, f, OVALID + 3 * p + sl) == 0:
+        var nch = Int(mi[CPH + 11 * p + 6]); var choff = Int(mi[CPH + 11 * p + 7])
+        for sl in range(nslot(mi, p)):
+            if get(res, f, OVALID + sbase(mi, p) + sl) == 0:
                 continue
             for k in range(4):
-                res[(OJV + 4 * (3 * p + sl) + k) * F + f] = jdot(mi, res, f, OJ + 12 * choff + (4 * sl + k) * nch, nch, choff, OSRCH)
+                res[(OJV + 4 * (sbase(mi, p) + sl) + k) * F + f] = jdot(mi, res, f, OJ + jbase(mi, p) + (4 * sl + k) * nch, nch, choff, OSRCH)
     var g1: Float32 = 0; var g2: Float32 = 0; var g0: Float32 = 0
     for v in range(NV):
         var sv = get(res, f, OSRCH + v)
@@ -834,14 +848,14 @@ def newton(mi: TI, mf: TF, res: TO, f: Int):
     mulM(mi, res, f, OMA, OCQACC)
     var ncon: Float32 = 0
     for p in range(NCP):
-        var nch = Int(mi[CPH + 8 * p + 6]); var choff = Int(mi[CPH + 8 * p + 7])
-        for sl in range(3):
-            if get(res, f, OVALID + 3 * p + sl) == 0:
+        var nch = Int(mi[CPH + 11 * p + 6]); var choff = Int(mi[CPH + 11 * p + 7])
+        for sl in range(nslot(mi, p)):
+            if get(res, f, OVALID + sbase(mi, p) + sl) == 0:
                 continue
             ncon += 1
             for k in range(4):
-                var row = 4 * (3 * p + sl) + k
-                res[(OJAR + row) * F + f] = jdot(mi, res, f, OJ + 12 * choff + (4 * sl + k) * nch, nch, choff, OCQACC) - get(res, f, OAREF + row)
+                var row = 4 * (sbase(mi, p) + sl) + k
+                res[(OJAR + row) * F + f] = jdot(mi, res, f, OJ + jbase(mi, p) + (4 * sl + k) * nch, nch, choff, OCQACC) - get(res, f, OAREF + row)
     res[ONCON * F + f] = ncon
     var tol = mf[COPT + 1]
     var cost = update(mi, res, f)

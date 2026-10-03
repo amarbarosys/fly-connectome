@@ -225,7 +225,8 @@ def feet(m, regex):
     """Contact pairs (pairs()): ints, floats and -D sizes for smooth.mojo STAGE 6.
 
     ints   per pair: geom1, geom2, geom2's body, hull vertex count (0: sphere-sphere), hull vertex offset,
-           edge-address offset, chain length, chain offset (8); then every hull vertex's first edge (absolute, into the
+           edge-address offset, chain length, chain offset, contact slot offset, slot count (3 mesh, 1 sphere),
+           Jacobian offset (4 rows x slots x chain) (11); then every hull vertex's first edge (absolute, into the
            edge list), the edge lists (hull-local vertex ids, -1 ends a vertex), the dof chains (H's row pattern of the
            pair's deepest dof, ascending), their Jacobian signs (+1 geom2's body only, -1 geom1's only, 0 both or
            neither), H's pattern (rowadr, rownnz, colind as hpattern()), M's entry -> H's entry, opt.iterations,
@@ -252,6 +253,7 @@ def feet(m, regex):
         raise SystemExit('FAIL export: a pair across two animals (Jacobian about one root only)')
     hrow = hpattern(m, [a ^ b for a, b in two])
     head, first, edges, chains, signs, fl, verts, hulls = [], [], [], [], [], [], [], {}
+    nslot = nje = 0
     for i, (a1, a2) in zip(sel, two):
         g1, g2 = m.pair_geom1[i], m.pair_geom2[i]
         b = m.geom_bodyid[g2]
@@ -270,7 +272,9 @@ def feet(m, regex):
                 first += list(len(edges) + edgeadr)
                 edges += list(local)
                 verts += list(m.mesh_vert[m.mesh_vertadr[mesh] + gid].ravel())
-        head += [g1, g2, b, nv, *(hulls[m.geom_dataid[g2]] if nv else (0, 0)), len(chain), len(chains)]
+        ns = 3 if nv else 1
+        head += [g1, g2, b, nv, *(hulls[m.geom_dataid[g2]] if nv else (0, 0)), len(chain), len(chains), nslot, ns, nje]
+        nslot, nje = nslot + ns, nje + 4 * ns * len(chain)
         chains += chain
         signs += [(c in a2) - (c in a1) for c in chain]
         fl += [m.pair_margin[i], m.pair_gap[i], *m.pair_friction[i][:2], *m.pair_solref[i], *m.pair_solimp[i],
@@ -281,7 +285,7 @@ def feet(m, regex):
     mtoh = [hadr[v] + hrow[v].index(m.M_colind[a]) for v in range(m.nv) for a in range(m.M_rowadr[v], m.M_rowadr[v] + m.M_rownnz[v])]
     ints = np.array(head + first + edges + chains + signs + hadr + hnnz + hcol + mtoh + [m.opt.iterations, m.opt.ls_iterations])
     floats = fl + verts + [m.opt.impratio, m.opt.tolerance, m.opt.ls_tolerance]
-    sizes = {'NCP': len(sel), 'NHV': len(verts) // 3, 'NHE': len(edges), 'NCH': len(chains), 'NH': len(hcol)}
+    sizes = {'NCP': len(sel), 'NHV': len(verts) // 3, 'NHE': len(edges), 'NCH': len(chains), 'NH': len(hcol), 'NSLOT': nslot, 'NJE': nje}
     hf = sorted({m.pair_geom1[i] for i in sel if m.geom_type[m.pair_geom1[i]] == mujoco.mjtGeom.mjGEOM_HFIELD})
     if hf:  # terrain: the heightfield is MuJoCo's sample; the engine evaluates world.py's function from its 8 params
         t = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_NUMERIC, 'terrain')
