@@ -28,7 +28,8 @@ readout.bin only (gather.bin, int32 windows x R), then prints "ok"; "q" ends. Sn
 seed + k, so repeated sniffs draw fresh Poisson events.
 
 Per step t, three launches in ShiuBrain's order: integrate + threshold + reset, push delivery
-of the spikes from t - DELAY (atomic adds into g, refractory and just-spiked targets skipped),
+of the spikes from t - DELAY (atomic adds into g, refractory and just-spiked targets skipped;
+last-spike step is int16 and refractory uint8 to cut integrate bytes, so runs are <= 32000 steps),
 Poisson kicks. Spikes wait in a ring of DELAY + 1 slots so step t never overwrites the slot it
 delivers. A full slot is counted and fails the run; nothing is dropped silently.
 """
@@ -64,8 +65,8 @@ comptime LSLOT = row_major[SLOTS + 1]()  # last entry counts overflowed spikes
 def integrate(
     u: TileTensor[DType.float32, type_of(LS), MutAnyOrigin],
     g: TileTensor[DType.float32, type_of(LS), MutAnyOrigin],
-    last: TileTensor[DType.int32, type_of(LS), MutAnyOrigin],
-    rfc: TileTensor[DType.int32, type_of(LS), MutAnyOrigin],
+    last: TileTensor[DType.int16, type_of(LS), MutAnyOrigin],
+    rfc: TileTensor[DType.uint8, type_of(LS), MutAnyOrigin],
     counts: TileTensor[DType.int32, type_of(LS), MutAnyOrigin],
     ring: TileTensor[DType.int32, type_of(LRING), MutAnyOrigin],
     fill: TileTensor[DType.int32, type_of(LSLOT), MutAnyOrigin],
@@ -78,15 +79,15 @@ def integrate(
     var gg = g[i]
     if uu == 0.0 and gg == 0.0:  # at rest: stays exactly 0 and cannot spike (v_th > 0); skip 16 B of state
         return
-    var since = t - last[i]
-    var r = rfc[i]
+    var since = t - Int32(last[i])
+    var r = Int32(rfc[i])
     if since - 1 >= r:
         uu = uu * em + gg * c
         gg = gg * eg
     if since >= r and uu > v_th:
         uu = 0.0
         gg = 0.0
-        last[i] = t
+        last[i] = Int16(t)
         counts[i] += 1
         var k = Atomic.fetch_add(fill.ptr.unsafe_offset(Int(slot)), Int32(1))
         if k < CAP:
@@ -106,8 +107,8 @@ def deliver(
     rank: TileTensor[DType.int32, type_of(LR), MutAnyOrigin],
     factor: TileTensor[DType.float32, type_of(LF), MutAnyOrigin],
     g: TileTensor[DType.float32, type_of(LS), MutAnyOrigin],
-    last: TileTensor[DType.int32, type_of(LS), MutAnyOrigin],
-    rfc: TileTensor[DType.int32, type_of(LS), MutAnyOrigin],
+    last: TileTensor[DType.int16, type_of(LS), MutAnyOrigin],
+    rfc: TileTensor[DType.uint8, type_of(LS), MutAnyOrigin],
     ring: TileTensor[DType.int32, type_of(LRING), MutAnyOrigin],
     fill: TileTensor[DType.int32, type_of(LSLOT), MutAnyOrigin],
     t: Int32, slot: Int32, groups: Int32, plastic: Int32, punish: Int32,
@@ -125,8 +126,8 @@ def deliver(
         var learned = (i // N) * KMAX + Int(rank[pre])  # read only for plastic edges, whose pre is a KC
         for e in range(Int(rows[pre]) + lane, Int(rows[pre + 1]), LANES):
             var j = base + Int(cols[e])
-            var lj = last[j]
-            if t - lj >= rfc[j] and lj != t:
+            var lj = Int32(last[j])
+            if t - lj >= Int32(rfc[j]) and lj != t:
                 var group = Int32(grp[e])
                 var wt = weights[e] * scale[own + Int(group)]
                 if group == plastic:
@@ -152,7 +153,7 @@ def kick(
     key: TileTensor[DType.int32, type_of(LS), MutAnyOrigin],
     p: TileTensor[DType.float32, type_of(LS), MutAnyOrigin],
     u: TileTensor[DType.float32, type_of(LS), MutAnyOrigin],
-    last: TileTensor[DType.int32, type_of(LS), MutAnyOrigin],
+    last: TileTensor[DType.int16, type_of(LS), MutAnyOrigin],
     fill: TileTensor[DType.int32, type_of(LSLOT), MutAnyOrigin],
     count: Int32, seed: UInt32, t: Int32, clear: Int32, amount: Float32,
 ):
@@ -162,7 +163,7 @@ def kick(
     if k >= Int(count):
         return
     var i = Int(stim[k])
-    if last[i] != t and uniform(seed, UInt32(t), UInt32(key[k])) < p[k]:
+    if Int32(last[i]) != t and uniform(seed, UInt32(t), UInt32(key[k])) < p[k]:
         u[i] += amount
 
 
@@ -272,7 +273,9 @@ def main() raises:
         raise Error("invalid run inputs")
     var stim = List[Int32](length=S, fill=0)
     var p = List[Float32](length=S, fill=0.0)
-    var rfc = List[Int32](length=S, fill=refractory)
+    if refractory > 255 or Int(windows.unsafe_offset(window_count - 1)[]) > 32000:
+        raise Error("state is int16 last-spike step and uint8 refractory: needs <= 32000 steps, <= 255 refractory steps")
+    var rfc = List[UInt8](length=S, fill=UInt8(refractory))
     for i in range(stim_count):
         stim[i] = stim_raw.unsafe_ptr().unsafe_bitcast[Int32]().unsafe_offset(i)[]
         p[i] = p_raw.unsafe_ptr().unsafe_bitcast[Float32]().unsafe_offset(i)[]
@@ -303,8 +306,8 @@ def main() raises:
         ctx.enqueue_copy(kc_b.create_sub_buffer[DType.int32](0, kcs), plastic_raw.unsafe_ptr().unsafe_bitcast[Int32]().unsafe_offset(1))
     var u_b = ctx.enqueue_create_buffer[DType.float32](S)
     var g_b = ctx.enqueue_create_buffer[DType.float32](S)
-    var last_b = ctx.enqueue_create_buffer[DType.int32](S)
-    var rfc_b = ctx.enqueue_create_buffer[DType.int32](S)
+    var last_b = ctx.enqueue_create_buffer[DType.int16](S)
+    var rfc_b = ctx.enqueue_create_buffer[DType.uint8](S)
     var counts_b = ctx.enqueue_create_buffer[DType.int32](S)
     var stim_b = ctx.enqueue_create_buffer[DType.int32](S)
     var key_b = ctx.enqueue_create_buffer[DType.int32](S)
@@ -327,7 +330,7 @@ def main() raises:
     ctx.enqueue_copy(p_b, p.unsafe_ptr())
     u_b.enqueue_fill(0.0)
     g_b.enqueue_fill(0.0)
-    last_b.enqueue_fill(-1000000000)
+    last_b.enqueue_fill(-32768)
     counts_b.enqueue_fill(0)
     fill_b.enqueue_fill(0)
     var rows_t = TileTensor(row_b, LR)
@@ -407,7 +410,7 @@ def main() raises:
             ctx.enqueue_copy(p_b.create_sub_buffer[DType.float32](0, stim_count), fresh.unsafe_ptr().unsafe_bitcast[Float32]())
             u_b.enqueue_fill(0.0)
             g_b.enqueue_fill(0.0)
-            last_b.enqueue_fill(-1000000000)
+            last_b.enqueue_fill(-32768)
             counts_b.enqueue_fill(0)
             fill_b.enqueue_fill(0)
         var window = 0
