@@ -8,7 +8,8 @@ Status describes the cited implementation and gate only. It does not imply biolo
 |---|---|---:|---|---|
 | CPU embodied floor and wall gate | PASS | 20/20 floor trials upright; 19/20 wall escapes | `docs/plans/GPU_BODY_PORT.md`; `.work/agent/p1-body-gate/full-verification-cpu-ui.json` | `./.venv/bin/python -m agent.verify_body_gate` (supply receipt paths) |
 | RX 7900 XTX GPU body physics | UNVERIFIED | 1 diagnostic step finite; diagnostic qpos NaN by 1,000 steps | `docs/plans/GPU_BODY_PORT.md`; `.work/agent/gfx1100-probe/result.json` | Probe in progress; no validated runtime entrypoint |
-| Own GPU body engine (MuJoCo 3.9.0 port, any MJCF) | PARTIAL (S1 2/7 stages) | kinematics, comPos, crb match MuJoCo within 1.3e-06 of field scale on fly and spider test body, mutants caught; 65,536 animals 6.37 ms per launch | `docs/plans/BODY_ENGINE.md`; commits `ccd9695`, `019783a` | `gpu-wait run --timeout 1800 -- agent/body_engine/check.sh crb` |
+| Own GPU body engine (MuJoCo 3.9.0 port, any MJCF) | PARTIAL (S1, S2 feet, S3 PASS; noslip and non-foot contacts missing) | actuated fly (44 servos, 6 adhesion, feet on the floor, Newton) matches MuJoCo within 1e-5 on every field, mutants caught; 65,536 animals 42.2 ms per step (0.64 us, 22x CPU MuJoCo), 1,024 animals 13.7 ms (beats CPU) | `docs/plans/BODY_ENGINE.md`; commits `ccd9695`..`dd2f42c` | `gpu-wait run --priority 90 --timeout 3600 -- agent/body_engine/check.sh actuated` |
+| Own renderer on the engine's poses | PASS (steps 1-5) | silhouette IoU vs mujoco.Renderer 0.995-0.998 in 3 views; 1 fly 960 x 540 0.57-1.0 ms per frame; 10,000 frames without leak (fds 7/7, VRAM flat 152 MB) | `docs/plans/RENDERER.md`; commits `0ad21a9`, `905d2bc`, `86fb4d2` | `env MUJOCO_GL=egl python -m agent.body_engine.render_check`; `python -m agent.body_engine.verify_render_leak` |
 
 ## SENSES
 
