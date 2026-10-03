@@ -1,6 +1,7 @@
 """Smooth dynamics, ported from MuJoCo 3.9.0 src/engine/engine_core_smooth.c (Apache-2.0), batched:
 one GPU thread per animal. STAGE 1: mj_kinematics1 + the inertia and geom part of mj_kinematics2.
 STAGE 2: + mj_comPos (subtree_com, cinert, cdof) + mj_crb (sparse M in MuJoCo's own M_rowadr layout).
+STAGE 3: + mj_factorM (mj_factorI: sparse L'DL of M in place, qLD, qLDiagInv).
 
 Model arrays come from agent/body_engine/model.py export (mi.bin int32, mf.bin float32, field order
 INTS / FLOATS there); sizes are -D constants, so any MJCF body (fly, spider) builds its own binary.
@@ -12,7 +13,7 @@ in one transaction. Model arrays are shared by all flies and stay in cache.
 
 usage: smooth DIR/      reads DIR/mi.bin, mf.bin, qpos.bin (NQ x FLIES); writes DIR/smooth.bin, rows:
        xpos, xquat, xipos (bodies 1..), geom_xpos, xanchor, xaxis; STAGE 2 adds subtree_com,
-       cinert (bodies 1..), cdof, crb (bodies 1..), M; then prints us per launch
+       cinert (bodies 1..), cdof, crb (bodies 1..), M; STAGE 3 adds qLD, qLDiagInv; then prints us per launch
 """
 from std.math import cos, sin, sqrt
 from std.sys import argv, get_defined_int
@@ -43,7 +44,8 @@ comptime DPARENT = DOFADR + NJ
 comptime DBODY = DPARENT + NV
 comptime MADR = DBODY + NV
 comptime MNNZ = MADR + NV
-comptime NI = MNNZ + NV
+comptime MCOL = MNNZ + NV  # STAGE 3: M_colind
+comptime NI = MCOL + NC
 # mf.bin: body_pos, body_quat, jnt_pos, jnt_axis, qpos0, body_ipos, body_iquat, geom_pos, geom_quat
 comptime BPOS = 0
 comptime BQUAT = 3 * NB
@@ -70,7 +72,9 @@ comptime OCI = OSC + 3 * NB
 comptime OCD = OCI + 10 * (NB - 1)
 comptime OCRB = OCD + 6 * NV
 comptime OM = OCRB + 10 * (NB - 1)
-comptime NOUT = OSC if STAGE == 1 else OM + NC
+comptime OLD = OM + NC  # STAGE 3: qLD, qLDiagInv
+comptime OLDI = OLD + NC
+comptime NOUT = OSC if STAGE == 1 else (OM + NC if STAGE == 2 else OLDI + NV)
 comptime LI = row_major[NI]()
 comptime LF = row_major[NFL]()
 comptime LQ = row_major[NQ * F]()
@@ -305,6 +309,24 @@ def smooth(mi: TI, mf: TF, qpos: TQ, res: TO):
                 first = False
                 adr -= 1
                 j = Int(mi[DPARENT + j])
+    comptime if STAGE >= 3:
+        # mj_factorI: backward over rows k, L(i, 0..i) -= L(i, 0..i) L(k, i) / L(k, k), then L(k, :) /= L(k, k)
+        for c in range(NC):
+            res[(OLD + c) * F + f] = get(res, f, OM + c)
+        for k in range(NV - 1, -1, -1):
+            var start = Int(mi[MADR + k])
+            var diag = Int(mi[MNNZ + k]) - 1
+            var end = start + diag
+            var invD = 1 / get(res, f, OLD + end)
+            res[(OLDI + k) * F + f] = invD
+            for adr in range(end - 1, start - 1, -1):
+                var i = Int(mi[MCOL + adr])
+                var scl = -get(res, f, OLD + adr) * invD
+                var ri = Int(mi[MADR + i])
+                for c in range(Int(mi[MNNZ + i])):
+                    res[(OLD + ri + c) * F + f] += get(res, f, OLD + start + c) * scl
+            for c in range(diag):
+                res[(OLD + start + c) * F + f] = get(res, f, OLD + start + c) * invD
 
 
 def load(path: String, size: Int) raises -> List[UInt8]:

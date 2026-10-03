@@ -15,5 +15,9 @@ if [ "$stage" = crb ]; then  # the gate must fail with the hinge cdof lever arm 
   ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo 's/var off = com - anchor/var off = anchor - com/' -- \
     $M -m agent.body_engine.model check .work/agent/gpu-body-port/body-v2/body.xml $X/mutant crb 64 || fail=$((fail+1))
 fi
+if [ "$stage" = factorM ]; then  # the gate must fail with the elimination update's sign flipped
+  ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo 's/var scl = -get(res, f, OLD + adr) \* invD/var scl = get(res, f, OLD + adr) * invD/' -- \
+    $M -m agent.body_engine.model check .work/agent/gpu-body-port/body-v2/body.xml $X/mutant factorM 64 || fail=$((fail+1))
+fi
 [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
 echo "PASS all $stage checks"

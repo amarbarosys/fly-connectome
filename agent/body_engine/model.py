@@ -24,13 +24,14 @@ sys.path.insert(0, str(Path.home() / 'iTools/science/mj-oracle'))
 from mj_oracle import compare, reference, states  # noqa: E402  (random states, MuJoCo reference, per-field compare)
 
 INTS = ('body_parentid', 'body_jntadr', 'body_jntnum', 'jnt_type', 'jnt_qposadr', 'geom_bodyid',
-        'body_rootid', 'jnt_dofadr', 'dof_parentid', 'dof_bodyid', 'M_rowadr', 'M_rownnz')
+        'body_rootid', 'jnt_dofadr', 'dof_parentid', 'dof_bodyid', 'M_rowadr', 'M_rownnz', 'M_colind')
 FLOATS = ('body_pos', 'body_quat', 'jnt_pos', 'jnt_axis', 'qpos0', 'body_ipos', 'body_iquat', 'geom_pos', 'geom_quat',
           'body_mass', 'body_subtreemass', 'body_inertia', 'dof_armature')
 KIN = ('xpos', 'xquat', 'xipos', 'geom_xpos', 'xanchor', 'xaxis')
 STAGES = {  # name: (STAGE number in smooth.mojo, MuJoCo functions run in order, output fields)
     'kinematics': (1, 'mj_kinematics', KIN),
     'crb': (2, 'mj_kinematics,mj_comPos,mj_crb', KIN + ('subtree_com', 'cinert', 'cdof', 'crb', 'M')),
+    'factorM': (3, 'mj_kinematics,mj_comPos,mj_crb,mj_factorM', KIN + ('subtree_com', 'cinert', 'cdof', 'crb', 'M', 'qLD', 'qLDiagInv')),
 }
 REL = 1e-5
 WORLD_FIRST = ('xpos', 'xquat', 'xipos', 'cinert', 'crb')  # body-indexed fields whose row 0 is the world
