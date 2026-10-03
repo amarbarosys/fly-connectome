@@ -21,7 +21,7 @@ from pathlib import Path
 import mujoco
 import numpy as np
 
-from agent.body_engine.model import ENGINE, FEET, cube, export, meshes, standing
+from agent.body_engine.model import ENGINE, FEET, cube, export, load, meshes, standing
 from agent.body_engine.render_check import DIST, MJCF, MOJO
 from agent.body_engine.verify_render_leak import sample
 
@@ -30,14 +30,21 @@ W, H = 960, 540
 STATS = Path.home() / 'iTools/video/frame-stats/frame-stats'
 
 
-def prepare(out=OUT, pairs=FEET, mjcf=MJCF, dist=DIST):
+def prepare(out=OUT, pairs=FEET, mjcf=MJCF, dist=DIST, flat=None):
     """Engine + mesh files for one fly standing still: state from model.standing, servos holding its joint angles,
-    adhesion on. Returns the camera args (eye, target, fovy) and the model."""
+    adhesion on. Returns the camera args (eye, target, fovy) and the model. flat: on terrain, stand on this flat-floor
+    MJCF instead and lift the animal 0.05 mm above the highest ground within 4 mm of it (MuJoCo's own rollout on the
+    sampled heightfield jams thin feet through its prisms: root 2.05 mm up, feet 0.81 mm under the surface)."""
     out.mkdir(parents=True, exist_ok=True)
     m = export(mjcf, out, pairs, True)
     meshes(mjcf, out)
-    q, v = standing(m, 2)
+    q, v = standing(load(flat) if flat else m, 2)
     q, v = q[:1], v[:1]
+    if flat:
+        from agent.body_engine.world import height_grad
+        t = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_NUMERIC, 'terrain')
+        g = np.mgrid[-4:4:33j, -4:4:33j].reshape(2, -1) + q[0, :2, None]
+        q[0, 2] += float(height_grad(g[0], g[1], m.numeric_data[m.numeric_adr[t]:m.numeric_adr[t] + 8])[0].max()) + 0.05
     u = np.where(m.actuator_trntype == mujoco.mjtTrn.mjTRN_BODY, 1.0, q[0][m.jnt_qposadr[np.minimum(m.actuator_trnid[:, 0], m.njnt - 1)]])
     q.astype(np.float32).T.copy().tofile(out / 'qpos.bin')
     v.astype(np.float32).T.copy().tofile(out / 'qvel.bin')
@@ -53,6 +60,7 @@ def prepare(out=OUT, pairs=FEET, mjcf=MJCF, dist=DIST):
 
 def build(out, m, k, box=0):
     flags = (out / 'sizes.txt').read_text().split() + (out / 'rsizes.txt').read_text().split()
+    flags += ['-DTERRAIN=1'] if any(f.startswith('-DHFGEOM') for f in flags) else []
     binary = out / f'live_k{k}_b{box}'
     src = [ENGINE / f for f in ('live.mojo', 'smooth.mojo', 'render.mojo')] + [out / 'sizes.txt', out / 'rsizes.txt']
     if binary.is_file() and binary.stat().st_mtime > max(f.stat().st_mtime for f in src):

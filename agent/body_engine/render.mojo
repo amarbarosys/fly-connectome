@@ -26,6 +26,7 @@ from std.time import perf_counter_ns
 from std.gpu import block_idx, block_dim, thread_idx
 from max.gpu.host import DeviceContext
 from layout import TileTensor, row_major
+from world import P8, height_grad
 
 comptime W = get_defined_int["W", 1920]()
 comptime H = get_defined_int["H", 1080]()
@@ -50,7 +51,9 @@ comptime LRV = row_major[NRV * 3]()
 comptime LRT = row_major[NRT]()
 comptime LRP = row_major[NTRI]()
 comptime LPOSE = row_major[PROWS * F]()
-comptime LCAM = row_major[16]()
+comptime NCAM = 24  # eye 3, target 3, fovy, focal, ..., [10] grid spacing; [16:24] world.mojo terrain params
+comptime LCAM = row_major[NCAM]()
+comptime TERRAIN = get_defined_int["TERRAIN", 0]()  # 1: the ground is world.mojo's terrain (cam[16:24]), not z = 0
 comptime TVIS = TileTensor[DType.uint64, type_of(LVIS), MutAnyOrigin]
 comptime TIMG = TileTensor[DType.uint32, type_of(LVIS), MutAnyOrigin]
 comptime TPI = TileTensor[DType.int32, type_of(LPI), MutAnyOrigin]
@@ -159,6 +162,40 @@ def raster(vis: TVIS, pi: TPI, pf: TPF, rv: TRV, rt: TRT, rp: TRP, pose: TPOSE, 
             _ = Atomic.min[ordering=Ordering.RELAXED](vis.ptr.unsafe_offset(y * W + x), key)
 
 
+@always_inline
+def terrain(cam: TCAM) -> P8:
+    return P8(cam[16], cam[17], cam[18], cam[19], cam[20], cam[21], cam[22], cam[23])
+
+
+def ground(cam: TCAM, eye: V3, ray: V3) -> Float32:
+    """Ray parameter of the first terrain hit (3.4e38: none within FAR mm). Octaves 0 is a plane: solved exactly
+    (so a flat world renders as the old z = 0 floor); so is amplitude 0. Else 96 steps, denser near the eye, then 10 bisections on
+    eye z - height."""
+    var p = terrain(cam)
+    if Int(p[4]) == 0 or p[2] == 0:  # no noise: a plane
+        var den = ray[2] - p[0] * ray[0] - p[1] * ray[1]
+        var t = (p[0] * eye[0] + p[1] * eye[1] - eye[2]) / den if den != 0 else Float32(-1)
+        return t if t > 0 else Float32(3.4e38)
+    var far = Float32(300) / sqrt(dot(ray, ray))
+    var lo = Float32(0)
+    for k in range(1, 97):
+        var s = Float32(k) / 96
+        var t = far * s * s
+        var x = eye + ray * t
+        if x[2] < height_grad(x[0], x[1], p)[0]:
+            var hi = t
+            for _ in range(10):
+                var m = 0.5 * (lo + hi)
+                var y = eye + ray * m
+                if y[2] < height_grad(y[0], y[1], p)[0]:
+                    hi = m
+                else:
+                    lo = m
+            return hi
+        lo = t
+    return Float32(3.4e38)
+
+
 def shade(vis: TVIS, img: TIMG, pi: TPI, pf: TPF, rv: TRV, rt: TRT, rp: TRP, pose: TPOSE, cam: TCAM):
     var i = Int(block_idx.x * block_dim.x + thread_idx.x)
     if i >= W * H:
@@ -178,6 +215,10 @@ def shade(vis: TVIS, img: TIMG, pi: TPI, pf: TPF, rv: TRV, rt: TRT, rp: TRP, pos
                     tmin = t
                     face = 2 * a + (1 if ray[a] > 0 else 0)
         floor_depth = tmin * c[4]
+    elif TERRAIN:
+        tmin = ground(cam, c[0], ray)
+        if tmin < 3.4e38:
+            floor_depth = tmin * c[4]
     else:
         if ray[2] < 0:
             floor_depth = -c[0][2] / ray[2] * c[4]  # ray scaled so its forward component is the focal length
@@ -201,7 +242,15 @@ def shade(vis: TVIS, img: TIMG, pi: TPI, pf: TPF, rv: TRV, rt: TRT, rp: TRP, pos
         var check = (Int(u + 1e4) + Int(v + 1e4)) % 2
         var tint = V3(0.55, 0.57, 0.6, 0) if face == 4 else (V3(0.62, 0.6, 0.55, 0) if face == 5 else V3(0.5, 0.56, 0.62, 0))
         rgb = tint * (Float32(0.8) if check == 0 else Float32(1.0))
-    elif ray[2] < 0:
+    elif TERRAIN and floor_depth < 3.4e38:
+        var hit = c[0] + ray * tmin
+        var hg = height_grad(hit[0], hit[1], terrain(cam))
+        var n = V3(-hg[1], -hg[2], 1, 0) / sqrt(hg[1] * hg[1] + hg[2] * hg[2] + 1)
+        var lit = (Float32(0.35) + Float32(0.65) * dot(n, V3(0.3, 0.2, 0.93, 0))) / (Float32(0.35) + Float32(0.65) * Float32(0.93))
+        var check = (Int(hit[0] + 1e4) + Int(hit[1] + 1e4)) % 2
+        var fade = Float32(1) / (1 + 0.02 * sqrt(dot(hit - c[0], hit - c[0])))
+        rgb = V3(0.55, 0.57, 0.6, 0) * (Float32(0.8) if check == 0 else Float32(1.0)) * lit * fade + V3(0.6, 0.65, 0.72, 0) * (1 - fade)
+    elif not TERRAIN and ray[2] < 0:
         var hit = c[0] + ray * (-c[0][2] / ray[2])
         var check = (Int(hit[0] + 1e4) + Int(hit[1] + 1e4)) % 2
         var fade = Float32(1) / (1 + 0.02 * sqrt(dot(hit - c[0], hit - c[0])))
@@ -216,11 +265,11 @@ def shade(vis: TVIS, img: TIMG, pi: TPI, pf: TPF, rv: TRV, rt: TRT, rp: TRP, pos
 
 def stream(ctx: DeviceContext, kc: type_of(DeviceContext(0).compile_function[clear]()), kr: type_of(DeviceContext(0).compile_function[raster]()),
            ks: type_of(DeviceContext(0).compile_function[shade]()), vis: TVIS, img: TIMG, tpi: TPI, tpf: TPF, trv: TRV, trt: TRT, trp: TRP,
-           tpose: TPOSE, tcam: TCAM, cam_b: type_of(DeviceContext(0).enqueue_create_buffer[DType.float32](16)), mut camh: List[Float32],
+           tpose: TPOSE, tcam: TCAM, cam_b: type_of(DeviceContext(0).enqueue_create_buffer[DType.float32](NCAM)), mut camh: List[Float32],
            img_b: type_of(DeviceContext(0).enqueue_create_buffer[DType.uint32](W * H)), out_h: type_of(DeviceContext(0).enqueue_create_host_buffer[DType.uint32](W * H)),
            frames: Int) raises:
     """Raw RGBA frames to fd 1 with one write(2) each, the camera orbiting the target; ends after FRAMES frames
-    or when the reader closes the pipe. Allocates nothing: the camera goes through the same 16-float buffer."""
+    or when the reader closes the pipe. Allocates nothing: the camera goes through the same NCAM-float buffer."""
     var tx = camh[3]; var ty = camh[4]
     var rx = camh[0] - tx; var ry = camh[1] - ty
     var fr = 0
@@ -257,7 +306,7 @@ def main() raises:
     var a = argv()
     var rdir = String(a[1])
     var frames = Int(String(a[4]))
-    var camh = List[Float32](length=16, fill=0)
+    var camh = List[Float32](length=NCAM, fill=0)
     for k in range(6):
         camh[k] = Float32(atof(String(a[5 + k])))
     var fovy = Float32(atof(String(a[11]))) * 3.14159265 / 180
@@ -280,7 +329,7 @@ def main() raises:
     var rt_b = ctx.enqueue_create_buffer[DType.uint16](NRT)
     var rp_b = ctx.enqueue_create_buffer[DType.uint8](NTRI)
     var pose_b = ctx.enqueue_create_buffer[DType.float32](PROWS * F)
-    var cam_b = ctx.enqueue_create_buffer[DType.float32](16)
+    var cam_b = ctx.enqueue_create_buffer[DType.float32](NCAM)
     var vis_b = ctx.enqueue_create_buffer[DType.uint64](W * H)
     var img_b = ctx.enqueue_create_buffer[DType.uint32](W * H)
     var out_h = ctx.enqueue_create_host_buffer[DType.uint32](W * H)

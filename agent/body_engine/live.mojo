@@ -58,16 +58,20 @@ def main() raises:
     var rv_b = ctx.enqueue_create_buffer[DType.int16](3 * ren.NRV)
     var rt_b = ctx.enqueue_create_buffer[DType.uint16](ren.NRT)
     var rp_b = ctx.enqueue_create_buffer[DType.uint8](ren.NTRI)
-    var cam_b = ctx.enqueue_create_buffer[DType.float32](16)
+    var cam_b = ctx.enqueue_create_buffer[DType.float32](ren.NCAM)
     var vis_b = ctx.enqueue_create_buffer[DType.uint64](ren.W * ren.H)
     var img_b = ctx.enqueue_create_buffer[DType.uint32](ren.W * ren.H)
     var out_h = ctx.enqueue_create_host_buffer[DType.uint32](ren.W * ren.H)
-    var camh = List[Float32](length=16, fill=0)
+    var camh = List[Float32](length=ren.NCAM, fill=0)
     for k in range(6):
         camh[k] = Float32(atof(String(a[3 + k])))
     var fovy = Float32(atof(String(a[9]))) * 3.14159265 / 180
     camh[6] = fovy
     camh[7] = Float32(ren.H) * 0.5 / tan(fovy * 0.5)
+    comptime if eng.HFG >= 0:  # the renderer draws the engine's own terrain
+        var mfp = mf.unsafe_ptr().unsafe_bitcast[Float32]()
+        for k in range(8):
+            camh[16 + k] = mfp[eng.HFO + k]
     ctx.enqueue_copy(pi_b, pi_h.unsafe_ptr().unsafe_bitcast[Int32]())
     ctx.enqueue_copy(pf_b, pf_h.unsafe_ptr().unsafe_bitcast[Float32]())
     ctx.enqueue_copy(rv_b, rv_h.unsafe_ptr().unsafe_bitcast[Int16]())
