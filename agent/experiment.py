@@ -10,7 +10,8 @@ are summed on the device; groups named in `per_cell` also return their cells' ow
                variants=[{}, {'alln': 12}], stimuli={'odour': (orn_ids, 200.)}, repeats=8,
                windows=(300, 2000), groups={'kc': kc_ids, 'dn': dn_ids}, per_cell=('kc',)).run()
 
-A variant may carry 'hz', which replaces every stimulus rate for its columns.
+A variant may carry 'hz', which replaces every stimulus rate for its columns. Every variant's column
+(s, r) draws the same Poisson events (common random numbers), so variant differences are paired.
 """
 import csv
 from dataclasses import dataclass, field
@@ -69,8 +70,9 @@ class Experiment:
             for s, (ids, hz) in enumerate(self.stimuli.values()):
                 for r in range(R):
                     for t in range(T):
-                        brain.stimulate(np.asarray(ids) + t * self.n, variant.get('hz', hz), fly=(v * S + s) * R + r)
-        brain.edge_groups(grp, np.repeat(scale, S * R, axis=0))
+                        brain.stimulate(np.asarray(ids) + t * self.n, variant.get('hz', hz), fly=(v * S + s) * R + r, key=s * R + r)
+        if names:  # no edits: no group files, every weight as given
+            brain.edge_groups(grp, np.repeat(scale, S * R, axis=0))
         cgrp = np.full(T * self.n, -1, np.int32)
         for t in range(T):
             for g, ids in enumerate(self.groups.values()):

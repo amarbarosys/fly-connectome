@@ -1,49 +1,28 @@
-"""Mushroom-body learning on the Shiu brain, step 1-2: does an early-window KC code make reward specific?
+"""Mushroom-body learning on the Shiu brain, step 1-2: is a reward to odour A specific to A?
 
-The Shiu Kenyon-cell layer floods (most KCs fire for every odour by 200 ms), which is why a
-KC-eligibility rule rewarded for A moved B's MBON response more than A's (f3e46c9). Here a KC is
-eligible only if it fires in the first 30 ms of the odour, before the flood. For each odour pair
-(A, B) in ODORS6, on the graph with antennal-lobe inhibition x LN (no flood): reward A once by depressing every KC -> MBON edge from A's early KC set by DEPRESS
-(dopamine LTD, KC-only eligibility as e2dd362), then compare the MBON spikes lost for A and B.
-Sham: depress as many KCs drawn from those active for neither odour. Pass per pair: A loses more
-than twice what B loses, and more than twice what A loses under the sham, and at least 2 spikes
-(absolute, since B's MBON response can be 1 spike). Eligibility windows of 50 and 200 ms.
-Authors' graph (LN 1): FAIL at 20/25/30 ms, because the 200 ms readout floods (3d3c5a3). Real wiring only.
+On the authors' graph the Kenyon-cell layer floods (about 3,400 of 5,177 KCs fire for every odour by
+200 ms), so a reward to A moved B's MBON response as much as A's at every eligibility window (FAIL,
+3d3c5a3). Antennal-lobe inhibition (ALLN negative edges x LN, agent/shiu_apl.py) ends the flood.
+On that graph, for each odour pair (A, B) in ODORS6 and eligibility window: reward A once by scaling
+every KC -> MBON edge from A's KC set (KCs firing by the window in at least half of A's repeats) by
+1 - DEPRESS (dopamine LTD, KC-only eligibility as e2dd362). Sham: as many KCs drawn from those active
+for neither odour. Baseline, learned and sham run as weight variants of one graph with common random
+numbers, so every difference is paired. Pass per pair: A loses more than twice what B loses, more
+than twice what A loses under the sham, and at least 2 MBON spikes per column.
 """
-import csv
 import json
 
 import numpy as np
 
-from agent import shiu_g1
 from agent.brain_bench import ODORS6
-from agent.neural_connectome import ANNOTATIONS, ROOT
-from agent.shiu import ShiuGPU
-from agent.shiu_loop import HZ, PAIRS, cells as olfactory
+from agent.experiment import Experiment, cells
+from agent.neural_connectome import ROOT
+from agent.shiu_loop import HZ, PAIRS
 from agent.verify_shiu import _reference_graph
 
-K, DEPRESS, LATE = 8, .5, 2000  # columns per odour; LTD factor; 200 ms
+K, DEPRESS, LATE = 8, .5, 2000  # repeats per odour; LTD factor; 200 ms
 EARLY = (500, 2000)  # eligibility windows: 50, 200 ms
 LN = 12  # antennal-lobe (ALLN) inhibition gain that ends the flood (agent/shiu_apl.py); 1 = authors' graph
-
-
-def mb_cells():
-    index, kc, mbon = _reference_graph()[3], [], []
-    for r in csv.DictReader(open(ANNOTATIONS), delimiter='\t'):
-        i = index.get(int(r['root_id']))
-        if i is not None and r['cell_class'] == 'Kenyon_Cell':
-            kc.append(i)
-        if i is not None and r['cell_class'] == 'MBON':
-            mbon.append(i)
-    return np.array(kc), np.array(mbon)
-
-
-def respond(pre, post, w, n, orn, seed):
-    """Counts at each EARLY window and at LATE, (n, 6 * K): K columns per odour in ODORS6 order."""
-    brain = ShiuGPU(pre, post, w, n=n, flies=len(ODORS6) * K, seed=seed)
-    for c in range(len(ODORS6) * K):
-        brain.stimulate([i for g in ODORS6[c // K] for i in orn[g]], HZ, fly=c)
-    return brain.run([*EARLY, LATE])
 
 
 def jaccard(a, b):
@@ -51,51 +30,45 @@ def jaccard(a, b):
 
 
 def main():
-    pre, post, w, names, _ = shiu_g1.flywire()
-    n = len(names)
-    from agent.shiu_apl import masks, mb_variant  # shiu_apl builds on this module
-    is_kc, apl = masks(n)[:2]
-    w = mb_variant(pre, post, w, names, is_kc, apl, g_ln=LN)
-    orn, _ = olfactory('flywire')
-    kc, mbon = mb_cells()
-    *earlies, late = respond(pre, post, w, n, orn, seed=51)
-    by_odour = lambda x, o: x[:, o * K:(o + 1) * K]
-    late_set = [set(kc[(by_odour(late, o)[kc] > 0).mean(1) >= .5].tolist()) for o in range(len(ODORS6))]
-    out = {'kcs': len(kc), 'mbons': len(mbon), 'depress': DEPRESS, 'alln_gain': LN, 'pairs': []}
-    is_mbon = np.zeros(n, bool)
-    is_mbon[mbon] = True
+    pre, post, w, _ = _reference_graph()
+    c = cells()
+    names = c.klass
+    is_kc, is_mbon = names == 'Kenyon_Cell', names == 'MBON'
+    kc, mbon = np.flatnonzero(is_kc), np.flatnonzero(is_mbon)
+    stimuli = {'+'.join(o): (np.flatnonzero((names == 'olfactory') & np.isin(c.type, ['ORN_' + g for g in o])), HZ)
+               for o in ODORS6}
+    ln = lambda p, q, x: (names[p] == 'ALLN') & (x < 0)
+
+    def run(edges, variants, per_cell=()):
+        return Experiment([(pre, post, w)], len(names), stimuli, EARLY, {'kc': kc, 'mbon': mbon}, {'ln': ln, **edges},
+                          [{'ln': LN, **v} for v in variants], K, per_cell).run()
+
+    base = run({}, [{}], ('kc',))['cells']['kc'][:, :, 0, 0]  # (window, kc, odour, repeat)
+    sets = [[set(kc[(base[i, :, o] > 0).mean(1) >= .5].tolist()) for o in range(len(ODORS6))] for i in range(len(EARLY))]
     rng = np.random.default_rng(5)
-
-    def depress(cells):
-        mask = np.zeros(n, bool)
-        mask[list(cells)] = True
-        edges = mask[pre] & is_mbon[post]
-        learned = w.copy()
-        learned[edges] = np.round(learned[edges] * (1 - DEPRESS)).astype(w.dtype)
-        return edges, respond(pre, post, learned, n, orn, seed=51)[-1]
-
-    def drop(after, o):  # MBON spikes lost per column for odour o, 0-200 ms
-        return float(by_odour(late, o)[mbon].sum(0).mean() - by_odour(after, o)[mbon].sum(0).mean())
-
-    for window, early in zip(EARLY, earlies):
-        early_set = [set(kc[(by_odour(early, o)[kc] > 0).mean(1) >= .5].tolist()) for o in range(len(ODORS6))]
+    out = {'kcs': len(kc), 'mbons': len(mbon), 'depress': DEPRESS, 'alln_gain': LN, 'pairs': []}
+    for i, window in enumerate(EARLY):
         for a, b in PAIRS:
-            edges, after = depress(early_set[a])
-            # control: as many KCs, drawn from those active for neither odour of the pair at 200 ms
-            spare = np.setdiff1d(kc, list(late_set[a] | late_set[b]))
-            _, sham = depress(rng.choice(spare, len(early_set[a]), replace=False))
-            b_eligible = np.zeros(n, bool)
-            b_eligible[list(early_set[b])] = True
+            learn = np.zeros(len(names), bool)
+            learn[list(sets[i][a])] = True
+            sham = np.zeros(len(names), bool)
+            spare = np.setdiff1d(kc, list(sets[-1][a] | sets[-1][b]))  # active for neither odour at 200 ms
+            sham[rng.choice(spare, len(sets[i][a]), replace=False)] = True
+            mb = run({'learn': lambda p, q, x: learn[p] & is_mbon[q], 'sham': lambda p, q, x: sham[p] & is_mbon[q]},
+                     [{}, {'learn': 1 - DEPRESS}, {'sham': 1 - DEPRESS}])['sums']['mbon'][-1, 0]  # (variant, odour, repeat)
+            per_column = mb.mean(2)
+            drop = lambda v, o: float(per_column[0, o] - per_column[v, o])
+            shared = np.zeros(len(names), bool)
+            shared[list(sets[i][b])] = True
             row = {'A': list(ODORS6[a]), 'B': list(ODORS6[b]), 'window_ms': window / 10,
-                   'early_kc': [len(early_set[a]), len(early_set[b])], 'late_kc': [len(late_set[a]), len(late_set[b])],
-                   'early_jaccard': jaccard(early_set[a], early_set[b]), 'late_jaccard': jaccard(late_set[a], late_set[b]),
-                   'edges_changed': int(edges.sum()), 'edges_also_B_early': int((edges & b_eligible[pre]).sum()),
-                   'mbon_spikes_A_B_before': [float(by_odour(late, o)[mbon].sum(0).mean()) for o in (a, b)],
-                   'drop_A': drop(after, a), 'drop_B': drop(after, b), 'sham_drop_A': drop(sham, a), 'sham_drop_B': drop(sham, b)}
+                   'kc': [len(sets[i][a]), len(sets[i][b])], 'jaccard': jaccard(sets[i][a], sets[i][b]),
+                   'edges_changed': int((learn[pre] & is_mbon[post]).sum()), 'edges_also_B': int(((learn & shared)[pre] & is_mbon[post]).sum()),
+                   'mbon_spikes_A_B_before': [float(per_column[0, a]), float(per_column[0, b])],
+                   'drop_A': drop(1, a), 'drop_B': drop(1, b), 'sham_drop_A': drop(2, a), 'sham_drop_B': drop(2, b)}
             row['pass'] = row['drop_A'] > 2 * max(abs(row['drop_B']), abs(row['sham_drop_A']), 1.)
             out['pairs'].append(row)
-            print(f"{window / 10:4.0f}ms {'+'.join(row['A']):12s} vs {'+'.join(row['B']):12s} KC {row['early_kc']} J {row['early_jaccard']:.2f}  "
-                  f"edges {row['edges_changed']} (B-shared {row['edges_also_B_early']})  MBON before {row['mbon_spikes_A_B_before'][0]:.0f}/{row['mbon_spikes_A_B_before'][1]:.0f}  "
+            print(f"{window / 10:4.0f}ms {'+'.join(row['A']):12s} vs {'+'.join(row['B']):12s} KC {row['kc']} J {row['jaccard']:.2f}  "
+                  f"edges {row['edges_changed']} (B-shared {row['edges_also_B']})  MBON before {row['mbon_spikes_A_B_before'][0]:.0f}/{row['mbon_spikes_A_B_before'][1]:.0f}  "
                   f"drop A {row['drop_A']:+.1f} B {row['drop_B']:+.1f}  sham A {row['sham_drop_A']:+.1f} B {row['sham_drop_B']:+.1f}  "
                   f"{'PASS' if row['pass'] else 'FAIL'}", flush=True)
     out['status'] = 'PASS' if all(r['pass'] for r in out['pairs']) else 'FAIL'

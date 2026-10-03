@@ -93,6 +93,7 @@ class ShiuBrain:
         self.em, self.eg, self.c = constants(dt)
         self.delay, self.refractory = round(T_DLY / dt), round(T_RFC / dt)
         self.stim = {}  # entry (column * n + neuron) -> Poisson probability per step
+        self.key = {}  # entry -> entry whose Poisson draws it uses (common random numbers)
         self.grp, self.scale = None, None
         self.reset()
 
@@ -116,18 +117,24 @@ class ShiuBrain:
         self.ring = [np.zeros(0, np.int64)] * self.delay
         self.t, self.counts = 0, np.zeros(size, np.int32)
 
-    def stimulate(self, cells, rate, fly=None):
-        """Poisson input at `rate` Hz on `cells` (all flies unless one is named)."""
+    def stimulate(self, cells, rate, fly=None, key=None):
+        """Poisson input at `rate` Hz on `cells` (all flies unless one is named); with `key`, the
+        named fly's events are drawn as column `key`'s would be, so columns can share inputs."""
         for column in range(self.flies) if fly is None else [fly]:
             for cell in np.asarray(cells, np.int64):
                 self.stim[int(column * self.n + cell)] = np.float32(rate * self.dt)
+                self.key[int(column * self.n + cell)] = int((column if key is None else key) * self.n + cell)
 
     def _stim_arrays(self):
         entries = np.fromiter(self.stim, np.int64, len(self.stim))
         return entries, np.fromiter(self.stim.values(), np.float32, len(self.stim))
 
+    def _stim_keys(self, entries):
+        return np.fromiter((self.key[int(e)] for e in entries), np.int64, len(entries))
+
     def step(self, steps=1):
         entries, p = self._stim_arrays()
+        keys = self._stim_keys(entries)
         refractory = np.full(self.n * self.flies, self.refractory, np.int64)
         refractory[entries] = 0
         for _ in range(steps):
@@ -150,7 +157,7 @@ class ShiuBrain:
                     w = w * self.scale[np.repeat(column, end - start), self.grp[edges]]
                 self.g += np.bincount(target[keep], w[keep], minlength=self.g.size).astype(np.float32)
             self.ring[t % self.delay] = spike
-            hit = entries[(uniform(self.seed, t, entries) < p) & (self.last[entries] != t)]
+            hit = entries[(uniform(self.seed, t, keys) < p) & (self.last[entries] != t)]
             self.u[hit] += np.float32(W_SYN * F_POI)
             self.t += 1
 
@@ -201,6 +208,7 @@ class ShiuGPU(ShiuBrain):
                 readout.tofile(work / 'readout.bin')
         entries, p = self._stim_arrays()
         entries.astype(np.int32).tofile(work / 'stim_index.bin')
+        self._stim_keys(entries).astype(np.int32).tofile(work / 'stim_key.bin')
         p.tofile(work / 'stim_p.bin')
         np.asarray(windows, np.int32).tofile(work / 'windows.bin')
         self._write_groups(work)
@@ -233,6 +241,7 @@ class ShiuLive(ShiuGPU):
         self.work.mkdir(parents=True, exist_ok=True)
         entries, p = self._stim_arrays()
         entries.astype(np.int32).tofile(self.work / 'stim_index.bin')
+        self._stim_keys(entries).astype(np.int32).tofile(self.work / 'stim_key.bin')
         p.tofile(self.work / 'stim_p.bin')
         self.windows, self.readout = np.asarray(windows, np.int32), np.asarray(readout, np.int32)
         self.windows.tofile(self.work / 'windows.bin')

@@ -12,15 +12,14 @@ First sweep (APL alone): APL out x4 gives KC 6% but J 0.83, because ALPNs are al
 with J 0.96 at 30 ms; the antennal lobe floods before the KCs. Second sweep: ALLN inhibition x16
 (APL x1, 100 Hz) gives KC 3.9%, J 0.06, MBONs and DNs live; this sweep tunes around it.
 """
-import csv
 import json
 
 import numpy as np
 
 from agent.brain_bench import ODORS6
-from agent.neural_connectome import ANNOTATIONS, ROOT
+from agent.neural_connectome import ROOT
 from agent.experiment import Experiment, cells
-from agent.shiu_learning import K, jaccard, mb_cells
+from agent.shiu_learning import K, jaccard
 from agent.shiu_loop import PAIRS
 from agent.verify_shiu import _reference_graph
 
@@ -29,30 +28,6 @@ VARIANTS = [  # (KC->KC kept, DAN->KC kept, APL gain in, APL gain out, ALLN inhi
     (1, 1, 1, 1, 16, 200), (1, 1, 1, 1, 12, 200), (1, 1, 1, 1, 10, 200), (1, 1, 1, 1, 8, 200),
     (1, 1, 1, 2, 10, 200), (1, 1, 1, 2, 8, 200)]
 WINDOWS = (300, 500, 1000, 2000)  # 30, 50, 100, 200 ms
-
-
-def masks(n):
-    index, apl = _reference_graph()[3], np.zeros(n, bool)
-    for r in csv.DictReader(open(ANNOTATIONS), delimiter='\t'):
-        i = index.get(int(r['root_id']))
-        if i is not None and r['cell_type'] == 'APL':
-            apl[i] = True
-    kc, mbon = mb_cells()
-    is_kc = np.zeros(n, bool)
-    is_kc[kc] = True
-    return is_kc, apl, kc, mbon, np.flatnonzero(apl)
-
-
-def mb_variant(pre, post, w, names, is_kc, apl, kckc=1, dan=1, g_in=1, g_out=1, g_ln=1, hz=None):
-    """Copy of w with KC->KC and DAN->KC zeroed when not kept, the APL loop and the antennal-lobe
-    local neurons' inhibition (ALLN, negative edges) scaled; hz is the arm's ORN rate, not a graph edit."""
-    v = w.copy()
-    v[is_kc[pre] & is_kc[post]] *= kckc
-    v[(names[pre] == 'DAN') & is_kc[post]] *= dan
-    v[is_kc[pre] & apl[post]] *= g_in
-    v[apl[pre] & is_kc[post]] *= g_out
-    v[(names[pre] == 'ALLN') & (w < 0)] *= g_ln
-    return v
 
 
 def main():

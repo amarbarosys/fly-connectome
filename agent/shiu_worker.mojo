@@ -8,6 +8,8 @@ poisson kick); counts.bin (int32, windows x C x N) is written there. Optional ed
 grp.bin (uint8 group per edge) and scale.bin (float32 C x G); an edge delivers weight x scale of its
 group in the spiking cell's column, so weight variants of one topology run as columns of one graph.
 Without them every edge is group 0 at scale 1.0, which leaves each weight bit-identical.
+Optional stim_key.bin (int32 per stimulus entry) names the entry whose Poisson draws an entry uses
+(default itself), so columns of different weight variants can see the same input events.
 Optional cell groups: cgrp.bin (int32 group per neuron, -1 none) makes a one-shot run write sums.bin
 (int32 windows x G x C, spikes per group and column) instead of counts.bin, plus gather.bin for the
 cells in readout.bin when that file is there.
@@ -124,6 +126,7 @@ def uniform(seed: UInt32, t: UInt32, entry: UInt32) -> Float32:
 
 def kick(
     stim: TileTensor[DType.int32, type_of(LS), MutAnyOrigin],
+    key: TileTensor[DType.int32, type_of(LS), MutAnyOrigin],
     p: TileTensor[DType.float32, type_of(LS), MutAnyOrigin],
     u: TileTensor[DType.float32, type_of(LS), MutAnyOrigin],
     last: TileTensor[DType.int32, type_of(LS), MutAnyOrigin],
@@ -136,7 +139,7 @@ def kick(
     if k >= Int(count):
         return
     var i = Int(stim[k])
-    if last[i] != t and uniform(seed, UInt32(t), UInt32(i)) < p[k]:
+    if last[i] != t and uniform(seed, UInt32(t), UInt32(key[k])) < p[k]:
         u[i] += amount
 
 
@@ -204,6 +207,7 @@ def main() raises:
     var windows = windows_raw.unsafe_ptr().unsafe_bitcast[Int32]()
     var k = k_raw.unsafe_ptr().unsafe_bitcast[Float32]()
     var stim_count = len(stim_raw) // 4
+    var key_raw = load(work + "stim_key.bin", stim_count) if exists(work + "stim_key.bin") else stim_raw.copy()
     var window_count = len(windows_raw) // 4
     if stim_count > S or window_count == 0:
         raise Error("invalid run inputs")
@@ -230,6 +234,7 @@ def main() raises:
     var rfc_b = ctx.enqueue_create_buffer[DType.int32](S)
     var counts_b = ctx.enqueue_create_buffer[DType.int32](S)
     var stim_b = ctx.enqueue_create_buffer[DType.int32](S)
+    var key_b = ctx.enqueue_create_buffer[DType.int32](S)
     var p_b = ctx.enqueue_create_buffer[DType.float32](S)
     var ring_b = ctx.enqueue_create_buffer[DType.int32](SLOTS * CAP)
     var fill_b = ctx.enqueue_create_buffer[DType.int32](SLOTS + 1)
@@ -244,6 +249,8 @@ def main() raises:
         scale_b.enqueue_fill(1.0)
     ctx.enqueue_copy(rfc_b, rfc.unsafe_ptr())
     ctx.enqueue_copy(stim_b, stim.unsafe_ptr())
+    if stim_count > 0:
+        ctx.enqueue_copy(key_b.create_sub_buffer[DType.int32](0, stim_count), key_raw.unsafe_ptr().unsafe_bitcast[Int32]())
     ctx.enqueue_copy(p_b, p.unsafe_ptr())
     u_b.enqueue_fill(0.0)
     g_b.enqueue_fill(0.0)
@@ -261,6 +268,7 @@ def main() raises:
     var rfc_t = TileTensor(rfc_b, LS)
     var counts_t = TileTensor(counts_b, LS)
     var stim_t = TileTensor(stim_b, LS)
+    var key_t = TileTensor(key_b, LS)
     var p_t = TileTensor(p_b, LS)
     var ring_t = TileTensor(ring_b, LRING)
     var fill_t = TileTensor(fill_b, LSLOT)
@@ -319,7 +327,7 @@ def main() raises:
                     k.unsafe_offset(0)[], k.unsafe_offset(1)[], k.unsafe_offset(2)[], k.unsafe_offset(3)[], Int32(t), slot, grid_dim=(S + BLOCK - 1) // BLOCK, block_dim=BLOCK)
                 ctx.enqueue_function(step_deliver, rows_t, cols_t, w_t, grp_t, scale_t, g_t, last_t, rfc_t, ring_t, fill_t,
                     Int32(t), due, Int32(groups), grid_dim=DGRID, block_dim=BLOCK)
-                ctx.enqueue_function(step_kick, stim_t, p_t, u_t, last_t, fill_t, Int32(stim_count), seed + UInt32(sniff), Int32(t),
+                ctx.enqueue_function(step_kick, stim_t, key_t, p_t, u_t, last_t, fill_t, Int32(stim_count), seed + UInt32(sniff), Int32(t),
                     due, k.unsafe_offset(4)[], grid_dim=kick_grid, block_dim=BLOCK)
                 t += 1
             if gathered:
