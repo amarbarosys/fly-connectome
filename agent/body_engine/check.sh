@@ -32,8 +32,15 @@ if [ "$stage" = terrain ]; then  # heightfield ground (tangent plane) on a tilte
 fi
 if [ "$stage" = world ]; then  # fly + spider in one model (model.combine): engine vs MuJoCo on it, and MuJoCo merged vs
   # each animal alone (constraint islands: the merged solve must equal the separate ones)
-  W=$($M -c "from agent.body_engine.model import combine; print(combine('.work/agent/gpu-body-port/body-v2/body.xml', '.work/agent/body_engine/spider-body/spider.xml'))")
-  $M -m agent.body_engine.model check $W $X/world actuated 64 || { echo "FAIL world"; fail=$((fail+1)); }
+  # spider 8 mm and 200 mm from the fly: each animal computes relative to its own origin (smooth.mojo origin())
+  for off in 200 8; do
+    W=$($M -c "from agent.body_engine.model import combine; print(combine('.work/agent/gpu-body-port/body-v2/body.xml', '.work/agent/body_engine/spider-body/spider.xml', ($off, 0, 0), 'world$off'))")
+    $M -m agent.body_engine.model check $W $X/world$off actuated 64 || { echo "FAIL world spider at $off mm"; fail=$((fail+1)); }
+    if [ $off = 200 ]; then  # the gate must fail when the spider uses the fly's origin (one origin per model)
+      ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo 's/    var r = Int(mi\[ROOT + b\])/    var r = Int(mi[ROOT + 1])/' -- \
+        $M -m agent.body_engine.model check $W $X/mutant actuated 64 || fail=$((fail+1))
+    fi
+  done
   $M -c "
 import numpy as np, mujoco
 from agent.body_engine.model import load, standing

@@ -444,7 +444,7 @@ def terrain(mf: TF) -> PW:
     return p
 
 
-def contacts(mi: TI, mf: TF, qvel: TV, res: TO, f: Int, o: V3):
+def contacts(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int):
     """MuJoCo mjc_PlaneConvex (support vertex + hull neighbours below the margin, at most 3, none within 0.3 rbound of
     the first), mj_instantiateContact (pyramidal condim 3, Jacobian over the body's dof chain), mj_diagApprox,
     mj_makeImpedance and mj_referenceConstraint, per exported plane-mesh pair. A heightfield ground (HFGEOM) is not
@@ -460,7 +460,8 @@ def contacts(mi: TI, mf: TF, qvel: TV, res: TO, f: Int, o: V3):
         var margin = mf[pf]; var gap = mf[pf + 1]; var f0 = mf[pf + 2]; var f1 = mf[pf + 3]
         var b1 = body(res, f, Int(mi[GBODY + g1]))
         var q1 = mul(b1[1], m4(mf, GQUAT + 4 * g1))
-        var pos1 = V3(get(res, f, OG + 3 * g1), get(res, f, OG + 3 * g1 + 1), get(res, f, OG + 3 * g1 + 2), 0)
+        var o = origin(mi, qpos, f, b)  # the plane (a world geom, world coordinates) in the animal's frame
+        var pos1 = V3(get(res, f, OG + 3 * g1), get(res, f, OG + 3 * g1 + 1), get(res, f, OG + 3 * g1 + 2), 0) - o
         var b2 = body(res, f, b)
         var q2 = mul(b2[1], m4(mf, GQUAT + 4 * g2))
         var pos2 = V3(get(res, f, OG + 3 * g2), get(res, f, OG + 3 * g2 + 1), get(res, f, OG + 3 * g2 + 2), 0)
@@ -893,30 +894,36 @@ def euler(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int):
             res[(OQPOS + a) * F + f] += h * (qvel[da * F + f] + h * get(res, f, OQACC + da))
 
 
-def origin(mi: TI, qpos: TQ, f: Int) -> V3:
-    """Floating origin: the position of the first free joint (the animal's root), else 0. The step computes every
-    position relative to it, so differences of nearby points stay exact in float32 however far the animal is from
-    the world origin (at 40 mm a float32 position resolves 4e-6 mm, enough to move cinert by 1e-5)."""
-    for i in range(1, NB):
-        var ja = Int(mi[JNTADR + i])
-        if Int(mi[JNTNUM + i]) >= 1 and mi[JTYPE + ja] == 0:
-            var a = Int(mi[QADR + ja])
-            return V3(qpos[a * F + f], qpos[(a + 1) * F + f], qpos[(a + 2) * F + f], 0)
+def origin(mi: TI, qpos: TQ, f: Int, b: Int) -> V3:
+    """Floating origin of body b's tree: the position of its root's free joint (each animal its own), else 0 (the
+    world and trees fixed to it). The step computes every position relative to it, so differences of nearby points
+    stay exact in float32 however far each animal is from the world origin or from the other animals (one shared
+    origin put a spider 8 mm from the fly at a ~100x float32 input floor)."""
+    var r = Int(mi[ROOT + b])
+    var ja = Int(mi[JNTADR + r])
+    if r > 0 and Int(mi[JNTNUM + r]) >= 1 and mi[JTYPE + ja] == 0:
+        var a = Int(mi[QADR + ja])
+        return V3(qpos[a * F + f], qpos[(a + 1) * F + f], qpos[(a + 2) * F + f], 0)
     return V3(0)
 
 
-def absolute(res: TO, f: Int, o: V3):
+def absolute(mi: TI, qpos: TQ, res: TO, f: Int):
     """Back to world positions, once per step, in the rows a later reader takes as world: xpos, xipos, geom_xpos,
-    xanchor, subtree_com (STAGE >= 2)."""
+    xanchor, subtree_com (STAGE >= 2), each by its own tree's origin (world geoms are already world)."""
     for i in range(NB - 1):
+        var o = origin(mi, qpos, f, i + 1)
         put(res, f, 3 * i, V3(get(res, f, 3 * i), get(res, f, 3 * i + 1), get(res, f, 3 * i + 2), 0) + o, 3)
         put(res, f, OXI + 3 * i, V3(get(res, f, OXI + 3 * i), get(res, f, OXI + 3 * i + 1), get(res, f, OXI + 3 * i + 2), 0) + o, 3)
     for g in range(NG):
+        var o = origin(mi, qpos, f, Int(mi[GBODY + g]))
         put(res, f, OG + 3 * g, V3(get(res, f, OG + 3 * g), get(res, f, OG + 3 * g + 1), get(res, f, OG + 3 * g + 2), 0) + o, 3)
-    for j in range(NJ):
-        put(res, f, OA + 3 * j, V3(get(res, f, OA + 3 * j), get(res, f, OA + 3 * j + 1), get(res, f, OA + 3 * j + 2), 0) + o, 3)
+    for i in range(1, NB):
+        var o = origin(mi, qpos, f, i)
+        for j in range(Int(mi[JNTADR + i]), Int(mi[JNTADR + i]) + Int(mi[JNTNUM + i])):
+            put(res, f, OA + 3 * j, V3(get(res, f, OA + 3 * j), get(res, f, OA + 3 * j + 1), get(res, f, OA + 3 * j + 2), 0) + o, 3)
     comptime if STAGE >= 2:
         for i in range(NB):
+            var o = origin(mi, qpos, f, i)
             put(res, f, OSC + 3 * i, V3(get(res, f, OSC + 3 * i), get(res, f, OSC + 3 * i + 1), get(res, f, OSC + 3 * i + 2), 0) + o, 3)
 
 
@@ -925,9 +932,8 @@ def smooth(mi: TI, mf: TF, qpos: TQ, qvel: TV, ctrl: TU, res: TO):
     if f >= F:
         return
     for _ in range(max(K, 1)):
-        var o = origin(mi, qpos, f)
-        step(mi, mf, qpos, qvel, ctrl, res, f, o)
-        absolute(res, f, o)
+        step(mi, mf, qpos, qvel, ctrl, res, f)
+        absolute(mi, qpos, res, f)
         comptime if K > 0:  # mj_Euler's write-back: qvel += h qacc, qpos = integrated qpos
             for v in range(NV):
                 qvel[v * F + f] += mf[TSTEP] * get(res, f, OQACC + v)
@@ -935,7 +941,7 @@ def smooth(mi: TI, mf: TF, qpos: TQ, qvel: TV, ctrl: TU, res: TO):
                 qpos[a * F + f] = get(res, f, OQPOS + a)
 
 
-def step(mi: TI, mf: TF, qpos: TQ, qvel: TV, ctrl: TU, res: TO, f: Int, o: V3):
+def step(mi: TI, mf: TF, qpos: TQ, qvel: TV, ctrl: TU, res: TO, f: Int):
 
     for i in range(1, NB):
         var ja = Int(mi[JNTADR + i])
@@ -944,14 +950,14 @@ def step(mi: TI, mf: TF, qpos: TQ, qvel: TV, ctrl: TU, res: TO, f: Int, o: V3):
         var xquat: Q4
         if jn == 1 and mi[JTYPE + ja] == 0:  # free joint: pose straight from qpos
             var a = Int(mi[QADR + ja])
-            xpos = V3(qpos[a * F + f], qpos[(a + 1) * F + f], qpos[(a + 2) * F + f], 0) - o
+            xpos = V3(0)  # its own tree's origin
             xquat = unit(Q4(qpos[(a + 3) * F + f], qpos[(a + 4) * F + f], qpos[(a + 5) * F + f], qpos[(a + 6) * F + f]))
             put(res, f, OA + 3 * ja, xpos, 3)
             put(res, f, OX + 3 * ja, m3(mf, JAXIS + 3 * ja), 3)
         else:
             var pid = Int(mi[PARENT + i])
             var p = body(res, f, pid)
-            xpos = rot(p[1], m3(mf, BPOS + 3 * i)) + p[0] if pid else m3(mf, BPOS + 3 * i) - o
+            xpos = rot(p[1], m3(mf, BPOS + 3 * i)) + p[0] if pid else m3(mf, BPOS + 3 * i)  # a fixed tree's origin is 0
             xquat = mul(p[1], m4(mf, BQUAT + 4 * i)) if pid else m4(mf, BQUAT + 4 * i)
             for j in range(ja, ja + jn):
                 var a = Int(mi[QADR + j])
@@ -978,7 +984,7 @@ def step(mi: TI, mf: TF, qpos: TQ, qvel: TV, ctrl: TU, res: TO, f: Int, o: V3):
         put(res, f, OXI + 3 * (i - 1), rot(xquat, m3(mf, IPOS + 3 * i)) + xpos, 3)
     for g in range(NG):
         var b = body(res, f, Int(mi[GBODY + g]))
-        put(res, f, OG + 3 * g, rot(b[1], m3(mf, GPOS + 3 * g)) + b[0] - (o if mi[GBODY + g] == 0 else V3(0)), 3)
+        put(res, f, OG + 3 * g, rot(b[1], m3(mf, GPOS + 3 * g)) + b[0], 3)
     comptime if STOP == 1:
         return
     comptime if STAGE >= 2:
@@ -988,8 +994,9 @@ def step(mi: TI, mf: TF, qpos: TQ, qvel: TV, ctrl: TU, res: TO, f: Int, o: V3):
             put(res, f, OSC + 3 * i, xi * mf[MASS + i], 3)
         for i in range(NB - 1, 0, -1):
             var p = Int(mi[PARENT + i])
+            var o = origin(mi, qpos, f, i) * mf[SUBMASS + i] if p == 0 else V3(0)  # a tree's sum into the world: world frame
             for c in range(3):
-                res[(OSC + 3 * p + c) * F + f] += get(res, f, OSC + 3 * i + c)
+                res[(OSC + 3 * p + c) * F + f] += get(res, f, OSC + 3 * i + c) + o[c]
         for i in range(NB):
             var sm = mf[SUBMASS + i]
             for c in range(3):
@@ -1098,7 +1105,7 @@ def step(mi: TI, mf: TF, qpos: TQ, qvel: TV, ctrl: TU, res: TO, f: Int, o: V3):
     comptime if STOP == 4:
         return
     comptime if STAGE >= 6:
-        contacts(mi, mf, qvel, res, f, o)
+        contacts(mi, mf, qpos, qvel, res, f)
         comptime if STAGE >= 7:
             actuation(mi, mf, qpos, qvel, ctrl, res, f)
         comptime if STOP == 5:
