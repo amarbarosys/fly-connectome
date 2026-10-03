@@ -47,7 +47,6 @@ def main() raises:
     ctx.enqueue_copy(v_b, qv.unsafe_ptr().unsafe_bitcast[Float32]())
     ctx.enqueue_copy(u_b, uv.unsafe_ptr().unsafe_bitcast[Float32]())
     var step = ctx.compile_function[eng.smooth]()
-    var grid = (eng.F + 63) // 64
     # renderer: render.main's buffers, the pose tensor over the engine's output
     var pi_h = ren.load(dir + "rmi.bin", 20 * ren.NPART)
     var pf_h = ren.load(dir + "rmf.bin", 4 * ren.PFS * ren.NPART)
@@ -96,7 +95,7 @@ def main() raises:
     var fr = 0
     while frames == 0 or fr < frames:
         ctx.enqueue_function(step, TileTensor(mi_b, eng.LI), TileTensor(mf_b, eng.LF), TileTensor(q_b, eng.LQ), TileTensor(v_b, eng.LV),
-            TileTensor(u_b, eng.LU), TileTensor(o_b, eng.LO), grid_dim=grid, block_dim=64)
+            TileTensor(u_b, eng.LU), TileTensor(o_b, eng.LO), grid_dim=eng.GRID, block_dim=eng.BLOCK)
         ctx.enqueue_function(kc, vis, grid_dim=(ren.W * ren.H + 255) // 256, block_dim=256)
         ctx.enqueue_function(kr, vis, tpi, tpf, trv, trt, trp, tpose, tcam, grid_dim=(ren.F * ren.NTRI + 255) // 256, block_dim=256)
         ctx.enqueue_function(ks, vis, img, tpi, tpf, trv, trt, trp, tpose, tcam, grid_dim=(ren.W * ren.H + 255) // 256, block_dim=256)

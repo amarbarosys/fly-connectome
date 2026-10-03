@@ -25,7 +25,7 @@ if not os.path.exists('$d/ctrl.bin'):  # states are seeded: reuse them, the expo
         for i in range(m.nu):
             u[i] = q[:, m.jnt_qposadr[m.actuator_trnid[i, 0]]] if m.actuator_trntype[i] == 0 else 1.0
     u.astype(np.float32).tofile('$d/ctrl.bin')" >/dev/null || { echo "FAIL export $n"; fail=$((fail+1)); continue; }
-    ~/.local/bin/mojo build $(cat "$d/sizes.txt") -DFLIES=$n -DSTAGE=$stage agent/body_engine/smooth.mojo -o "$d/step" 2>&1 | grep -v warning | grep . && { echo "FAIL build $n"; fail=$((fail+1)); } || true
+    ~/.local/bin/mojo build $(cat "$d/sizes.txt") -DFLIES=$n -DSTAGE=$stage -DWAVE=${WAVE:-0} agent/body_engine/smooth.mojo -o "$d/step" 2>&1 | grep -v warning | grep . && { echo "FAIL build $n"; fail=$((fail+1)); } || true
   else
     "$d/step" "$d/" || { echo "FAIL run $n"; fail=$((fail+1)); }
   fi

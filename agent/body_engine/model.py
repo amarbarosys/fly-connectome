@@ -468,7 +468,7 @@ def check(mjcf, out, stage, count=64, k=0, oracle=None):
     v.astype(np.float32).T.copy().tofile(out / 'qvel.bin')  # (nv, flies)
     binary = out / f'{stage}_{count}'
     flags = (out / 'sizes.txt').read_text().split()
-    subprocess.run([str(Path.home() / '.local/bin/mojo'), 'build', *flags, f'-DFLIES={count}', f'-DSTAGE={number}', f'-DK={k}', str(ENGINE / 'smooth.mojo'), '-o', str(binary)], check=True)
+    subprocess.run([str(Path.home() / '.local/bin/mojo'), 'build', *flags, f'-DFLIES={count}', f'-DSTAGE={number}', f'-DK={k}', f"-DWAVE={os.environ.get('WAVE', 0)}", str(ENGINE / 'smooth.mojo'), '-o', str(binary)], check=True)
     subprocess.run([str(binary), str(out) + '/'], check=True)
     rows = np.fromfile(out / ('state.bin' if k else 'smooth.bin'), np.float32).reshape(-1, count).T
     sizes = [want[f][0].size for f in fields]

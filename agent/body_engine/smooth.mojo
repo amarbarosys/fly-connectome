@@ -27,6 +27,7 @@ from std.math import cos, sin, sqrt
 from std.sys import argv, get_defined_int
 from std.time import perf_counter_ns
 from std.gpu import block_idx, block_dim, thread_idx
+from max.gpu.sync import barrier
 from max.gpu.host import DeviceContext
 from layout import TileTensor, row_major
 from world import NP, PW, height_grad
@@ -39,6 +40,10 @@ comptime NV = get_defined_int["NV"]()
 comptime NC = get_defined_int["NC"]()
 comptime F = get_defined_int["FLIES"]()
 comptime STAGE = get_defined_int["STAGE", 1]()
+comptime WAVE = get_defined_int["WAVE", 0]() == 1  # one animal per 32-lane wave (live): serial code runs on every lane
+comptime LN = 32 if WAVE else 1  # alike; loops written range(lane(), n, LN) split over lanes, sync() before others read
+comptime BLOCK = 32 if WAVE else 64
+comptime GRID = F if WAVE else (F + 63) // 64
 comptime STOP = get_defined_int["STOP", 99]()
 comptime K = get_defined_int["K", 0]()  # K > 0 (STAGE >= 5): K steps per launch, qpos/qvel written back in place
 comptime STEPTOL = Float32(get_defined_int["STEPTOL_E7", 10]()) * 1e-7  # Newton stops when a step moves qacc less than this
@@ -307,9 +312,43 @@ def atan2p(y: Float32, x: Float32) -> Float32:
     return 2 * (1.5707963267949 - a if flip else a)
 
 
+@always_inline
+def lane() -> Int:
+    comptime if WAVE:
+        return Int(thread_idx.x)
+    return 0
+
+
+@always_inline
+def sync():
+    comptime if WAVE:
+        barrier()
+
+
 def factorI(mi: TI, res: TO, f: Int, L: Int, LI_: Int, A: Int = MADR):
     """MuJoCo mj_factorI: sparse L'DL of rows L.. in place, backward over rows k: L(i, 0..i) -= L(i, 0..i) L(k, i) / L(k, k),
-    then L(k, :) /= L(k, k); 1 / L(k, k) to rows LI_.. Pattern at A: rowadr, rownnz, colind (M's, or H's at HADR)."""
+    then L(k, :) /= L(k, k); 1 / L(k, k) to rows LI_.. Pattern at A: rowadr, rownnz, colind (M's, or H's at HADR).
+    WAVE: row k's updates (j, c), c <= j, are independent (a row's pattern is its chain, so row j's is a prefix of k's)
+    and spread over lanes (proto_factor.mojo, 10x at 1,024 animals)."""
+    comptime if WAVE:
+        sync()
+        for k in range(NV - 1, -1, -1):
+            var start = Int(mi[A + k])
+            var diag = Int(mi[A + NV + k]) - 1
+            var invD = 1 / get(res, f, L + start + diag)
+            for t in range(lane(), diag * (diag + 1) // 2, LN):
+                var j = Int((sqrt(Float32(8 * t + 1)) - 1) / 2)
+                if (j + 1) * (j + 2) // 2 <= t:  # float rounding of the triangular root
+                    j += 1
+                var c = t - j * (j + 1) // 2
+                var i = Int(mi[A + 2 * NV + start + j])
+                res[(L + Int(mi[A + i]) + c) * F + f] += get(res, f, L + start + c) * (-get(res, f, L + start + j) * invD)
+            sync()
+            for c in range(lane(), diag, LN):
+                res[(L + start + c) * F + f] = get(res, f, L + start + c) * invD
+            res[(LI_ + k) * F + f] = invD
+            sync()
+        return
     for k in range(NV - 1, -1, -1):
         var start = Int(mi[A + k])
         var diag = Int(mi[A + NV + k]) - 1
@@ -1105,7 +1144,7 @@ def absolute(mi: TI, qpos: TQ, res: TO, f: Int):
 
 
 def smooth(mi: TI, mf: TF, qpos: TQ, qvel: TV, ctrl: TU, res: TO):
-    var f = block_idx.x * block_dim.x + thread_idx.x
+    var f = block_idx.x if WAVE else block_idx.x * block_dim.x + thread_idx.x
     if f >= F:
         return
     for _ in range(max(K, 1)):
@@ -1323,8 +1362,7 @@ def main() raises:
     ctx.enqueue_copy(v_b, qv.unsafe_ptr().unsafe_bitcast[Float32]())
     ctx.enqueue_copy(u_b, uv.unsafe_ptr().unsafe_bitcast[Float32]())
     var kernel = ctx.compile_function[smooth]()
-    var grid = (F + 63) // 64
-    ctx.enqueue_function(kernel, TileTensor(mi_b, LI), TileTensor(mf_b, LF), TileTensor(q_b, LQ), TileTensor(v_b, LV), TileTensor(u_b, LU), TileTensor(o_b, LO), grid_dim=grid, block_dim=64)
+    ctx.enqueue_function(kernel, TileTensor(mi_b, LI), TileTensor(mf_b, LF), TileTensor(q_b, LQ), TileTensor(v_b, LV), TileTensor(u_b, LU), TileTensor(o_b, LO), grid_dim=GRID, block_dim=BLOCK)
     ctx.synchronize()
     comptime if K > 0:
         var state = List[Float32](length=(NQ + NV) * F, fill=0)
@@ -1335,7 +1373,7 @@ def main() raises:
             file.write_bytes(Span(unsafe_ptr=state.unsafe_ptr().unsafe_bitcast[UInt8](), length=(NQ + NV) * F * 4))
         comptime if 10 % K == 0:  # state after 10 steps (10 / K launches): K=1 and K=10 must give the same bytes
             for _ in range(10 // K - 1):
-                ctx.enqueue_function(kernel, TileTensor(mi_b, LI), TileTensor(mf_b, LF), TileTensor(q_b, LQ), TileTensor(v_b, LV), TileTensor(u_b, LU), TileTensor(o_b, LO), grid_dim=grid, block_dim=64)
+                ctx.enqueue_function(kernel, TileTensor(mi_b, LI), TileTensor(mf_b, LF), TileTensor(q_b, LQ), TileTensor(v_b, LV), TileTensor(u_b, LU), TileTensor(o_b, LO), grid_dim=GRID, block_dim=BLOCK)
             ctx.enqueue_copy(state.unsafe_ptr(), q_b)
             ctx.enqueue_copy(state.unsafe_ptr().unsafe_offset(NQ * F), v_b)
             ctx.synchronize()
@@ -1343,7 +1381,7 @@ def main() raises:
                 file.write_bytes(Span(unsafe_ptr=state.unsafe_ptr().unsafe_bitcast[UInt8](), length=(NQ + NV) * F * 4))
     var t0 = perf_counter_ns()
     for _ in range(100):
-        ctx.enqueue_function(kernel, TileTensor(mi_b, LI), TileTensor(mf_b, LF), TileTensor(q_b, LQ), TileTensor(v_b, LV), TileTensor(u_b, LU), TileTensor(o_b, LO), grid_dim=grid, block_dim=64)
+        ctx.enqueue_function(kernel, TileTensor(mi_b, LI), TileTensor(mf_b, LF), TileTensor(q_b, LQ), TileTensor(v_b, LV), TileTensor(u_b, LU), TileTensor(o_b, LO), grid_dim=GRID, block_dim=BLOCK)
     ctx.synchronize()
     var us = Float64(perf_counter_ns() - t0) / 100 / 1000
     var host = List[Float32](length=NROW * F, fill=0)
