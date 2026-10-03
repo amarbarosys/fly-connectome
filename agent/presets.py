@@ -186,5 +186,39 @@ def trace():
     path('trace-sugar-pam').write_text(json.dumps(out, indent=1) + '\n')
 
 
+HUNGER = (0., .5, 1.)
+
+
+def hunger():
+    """Does hunger let sugar reach PAM? Three edge groups scale with hunger h (invented gains, shaped
+    like agent/desire.py: sugar-GRN out x(1+2h), bitter-proxy out x(1-h/2), excitatory into PAM
+    x(1+2h)); stimuli sugar-both, LB3b both sides (bitter proxy: drives PPL, `taste.json`) and
+    silence; readout PAM, PPL, MN9 summed over 200 ms, K repeats. PASS: at some h, sugar's PAM spikes
+    exceed silence at z > 4 and exceed the bitter proxy's."""
+    c = cells()
+    pre, post, w, _ = _reference_graph()
+    t = c.type.astype(str)
+    sug, bit = sugar(), np.flatnonzero(t == 'LB3b')
+    pam, ppl, mn9 = (np.flatnonzero(np.char.startswith(t, p)) for p in ('PAM', 'PPL', 'CB0701'))
+    is_s, is_b, is_p = (np.isin(np.arange(len(t)), x) for x in (sug, bit, pam))
+    res = Experiment([(pre, post, w)], len(t), {'sugar': (sug, HZ), 'bitter': (bit, HZ), 'silence': (sug, 0.)}, WINDOWS,
+                     {'pam': pam, 'ppl': ppl, 'mn9': mn9},
+                     edges={'sugar': lambda a, b, w: is_s[a], 'bitter': lambda a, b, w: is_b[a], 'pam': lambda a, b, w: is_p[b] & (w > 0)},
+                     variants=[{'sugar': 1 + 2 * h, 'bitter': 1 - h / 2, 'pam': 1 + 2 * h} for h in HUNGER], repeats=K, seed=73).run()
+    s = {g: x[-1, 0].astype(float) for g, x in res['sums'].items()}  # (V, S, R)
+    out, ok = {}, False
+    for v, h in enumerate(HUNGER):
+        row = {g: [round(float(x[v, i].mean()), 1) for i in range(3)] for g, x in s.items()}
+        p = s['pam'][v]
+        z = (p[0].mean() - p[2].mean()) / np.sqrt(p[0].var(ddof=1) / K + p[2].var(ddof=1) / K + 1 / K)
+        win = z > 4 and p[0].mean() > p[1].mean()
+        ok |= win
+        out[str(h)] = {**row, 'sugar_pam_z': round(float(z), 2), 'pass': bool(win)}
+        print(f"hunger {h:.1f}  PAM sugar/bitter/silence {row['pam']}  PPL {row['ppl']}  MN9 {row['mn9']}  z {z:.2f}  {'PASS' if win else 'FAIL'}")
+    path('hunger').write_text(json.dumps(out, indent=1) + '\n')
+    print(('PASS' if ok else 'FAIL hunger: sugar never reaches PAM above silence and bitter'), '->', path('hunger'))
+    sys.exit(0 if ok else 1)
+
+
 if __name__ == '__main__':
-    trace() if sys.argv[1] == 'trace' else {'map': map_presets, 'check': check}[sys.argv[2]](sys.argv[1])
+    hunger() if sys.argv[1] == 'hunger' else trace() if sys.argv[1] == 'trace' else {'map': map_presets, 'check': check}[sys.argv[2]](sys.argv[1])
