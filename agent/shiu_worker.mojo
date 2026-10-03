@@ -74,10 +74,12 @@ def integrate(
     var i = block_idx.x * block_dim.x + thread_idx.x
     if i >= S:
         return
-    var since = t - last[i]
-    var r = rfc[i]
     var uu = u[i]
     var gg = g[i]
+    if uu == 0.0 and gg == 0.0:  # at rest: stays exactly 0 and cannot spike (v_th > 0); skip 16 B of state
+        return
+    var since = t - last[i]
+    var r = rfc[i]
     if since - 1 >= r:
         uu = uu * em + gg * c
         gg = gg * eg
