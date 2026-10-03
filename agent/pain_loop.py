@@ -22,7 +22,7 @@ import numpy as np
 
 from agent import maps
 from agent.fly_checkpoint import pack
-from agent.learning_loop import NOISE, RESNIFF, STEP, STEPS, TRIALS, WINDOW, odour_valence, setup
+from agent.learning_loop import NOISE, RESNIFF, STEP, STEPS, TRIALS, WINDOW, odour_valence, setup, smell
 from agent.neural_connectome import ROOT
 from agent.paired_significance import _exact_sign_flip
 from agent.shiu import ShiuLive
@@ -39,7 +39,7 @@ def main(map_name='tmaze'):
     mbon = np.concatenate([approach, avoid])
     live.start([WINDOW], (np.arange(flies)[None] * n + mbon[:, None]).reshape(-1))
     entries, p0 = live._stim_arrays()
-    kind = np.where(np.isin(entries % n, odour[0]), 0, 1)
+    column, kind = entries // n, np.where(np.isin(entries % n, odour[0]), 0, 1)
     only = [np.where(kind == k, p0, 0).astype(np.float32) for k in (0, 1)]
     sign = np.tile(np.where(np.arange(PAIRS) % 2, 1., -1.), 3)
     arm = np.repeat(np.arange(3), PAIRS)  # 0 pain, 1 relief, 2 twin
@@ -70,6 +70,8 @@ def main(map_name='tmaze'):
             pun = np.where(hit & learner, PUN, 0).astype(np.float32)
             rel = np.where((arm == 1) & ~hit & (since <= ESCAPE) & (gap() > before), RELIEF, 0).astype(np.float32)
             if pun.any() or rel.any():
+                smell(live, m, pos, sources, sign, column, kind)  # credit the KCs of what it smells now
+                sniffs += 1
                 live.reward(rel, pun)
                 stale = True
             if stale and t % RESNIFF == RESNIFF - 1:

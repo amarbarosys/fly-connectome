@@ -63,6 +63,16 @@ def brain(engine, pre, post, w, n, grp, kc, odour, flies):
     return b
 
 
+def smell(live, m, pos, sources, sign, column, kind):
+    """Sniff the mixture each fly smells where it stands (strongest odour at HZ), so that reward() credits
+    the KCs of the moment of learning. reward() acts on the KCs of the LAST sniff: after a valence probe
+    that is odour B alone, and crediting B whatever the fly smelled sank the reward loop (p=0.86)."""
+    conc = maps.concentration(m, pos, sources, sign)
+    strongest = conc.max(1, keepdims=True)
+    conc = np.where(strongest > 1e-3, conc / np.maximum(strongest, 1e-12), 0)
+    live.sniff((HZ * live.dt * conc[column, kind]).astype(np.float32))
+
+
 def odour_valence(live, only, n_approach, flies):
     """(F, 2) valence of each odour sniffed alone; `only` = per-odour Poisson probabilities."""
     out = []
@@ -80,7 +90,7 @@ def main(map_name='tmaze'):
     mbon = np.concatenate([approach, avoid])
     live.start([WINDOW], (np.arange(flies)[None] * n + mbon[:, None]).reshape(-1))
     entries, p0 = live._stim_arrays()
-    kind = np.where(np.isin(entries % n, odour[0]), 0, 1)
+    column, kind = entries // n, np.where(np.isin(entries % n, odour[0]), 0, 1)
     only = [np.where(kind == k, p0, 0).astype(np.float32) for k in (0, 1)]
     sign = np.tile(np.where(np.arange(PAIRS) % 2, 1., -1.), 2)
     learner = np.arange(flies) < PAIRS
@@ -101,6 +111,8 @@ def main(map_name='tmaze'):
             hunger = np.minimum(1, hunger + 1 / STEPS)
             fed = bite[:, 0] > 0
             if (fed & learner).any():
+                smell(live, m, pos, sources, sign, column, kind)
+                sniffs += 1
                 live.reward(np.where(fed & learner, LR * hunger, 0).astype(np.float32))
                 stale = True
             if stale and t % RESNIFF == RESNIFF - 1:
