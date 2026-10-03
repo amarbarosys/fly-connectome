@@ -20,6 +20,14 @@ angle is the circular mean of sources it wins in the OTHER radii (leave-one-out)
 of 200 shuffles of winner vs source. Radius angles read from the label positions in
 AraneusWebandSpider.pdf.
 
+Check D: distance, same dataset. Source at points 1-4 along one radius (farther each step) at 3
+source strengths (1x, 10x, 20x), on the Araneus hub legs and the Zygiella signal thread (one
+sensor). D1: every cue (peak transverse, peak longitudinal, transverse-minus-longitudinal arrival
+gap) must be perfectly monotonic with distance at every strength. D2: strength unknown, linear
+decode of distance from log peak longitudinal + arrival gap, leave-one-strength-out; must beat 95%
+of 200 distance-label shuffles. The cue pair was chosen after comparing 8 pairs on this data
+(best per web differed; this pair is the one that works on both).
+
 Data: Hung, sparse clone (skips 1.5 GB of weights): git clone --depth 1 --filter=blob:none
 --sparse https://github.com/GordusLab/spider_prey_capture_paper .work/spider-docs/hung-repo,
 then git sparse-checkout set 5_localization. Mortimer: Dryad zip (browser download, API needs
@@ -89,6 +97,42 @@ def loo_error(cases, wins):
     return np.degrees(np.mean(errs))
 
 
+def distance_feats(f, hub):
+    x = np.genfromtxt(f, delimiter=";", skip_header=2 if hub else 1)
+    t, lon, tr = x[:, 0], np.abs(x[:, 1::3]), np.abs(x[:, 3::3])
+    arrive = lambda s: t[np.argmax((s > 5 * NOISE).any(1))]
+    return np.log10(tr.max()), np.log10(lon.max()), (arrive(tr) - arrive(lon)) * 1e3
+
+
+def loso_error(rows, dist):
+    X, amp = np.c_[rows[:, 3], rows[:, 4], np.ones(len(rows))], rows[:, 1]
+    err = []
+    for a in np.unique(amp):
+        fit, test = amp != a, amp == a
+        w = np.linalg.lstsq(X[fit], dist[fit], rcond=None)[0]
+        err += list(np.abs(X[test] @ w - dist[test]))
+    return np.mean(err)
+
+
+def check_distance():
+    base = MORT.parents[1]
+    webs = {"Araneus hub": (lambda p, a: base / f"A6/Amplitud analysis/A6RP{p}A{a}mass.txt", True),
+            "Zygiella thread": (lambda p, a: base / f"Z6/Amplitude analysis/Z6R6{'' if p == 1 else f'P{p}'}A{a}mass.txt", False)}
+    ok, rng = True, np.random.default_rng(2)
+    for name, (path, hub) in webs.items():
+        rows = np.array([(p, a, *distance_feats(path(p, a), hub)) for a in (1, 10, 20) for p in (1, 2, 3, 4)])
+        mono = all(abs(stats.spearmanr(rows[rows[:, 1] == a, 0], rows[rows[:, 1] == a, k]).statistic) == 1
+                   for a in (1, 10, 20) for k in (2, 3, 4))
+        err = loso_error(rows, rows[:, 0])
+        shuf = np.array([loso_error(rows, rng.permutation(rows[:, 0])) for _ in range(N_SHUF)])
+        pct = (shuf > err).mean()
+        good = mono and pct >= 0.95
+        ok &= good
+        print(f"D {name}: monotonic {'yes' if mono else 'NO'}, strength-unknown error {err:.2f} steps, "
+              f"shuffled {shuf.mean():.2f}+-{shuf.std():.2f}, beats {pct:.1%} -> {'PASS' if good else 'FAIL'}")
+    return ok
+
+
 def main():
     import pandas as pd
     df = pd.read_csv(ROOT / "singal_data.csv", encoding="utf-8-sig")
@@ -134,8 +178,9 @@ def main():
     print(f"C FEM web, 8 legs: {len(cases)} cases, winners {''.join(str(w + 1) for _, _, w in cases[:14])}, "
           f"error {err_c:.1f} deg, shuffled {shuf_c.mean():.1f}+-{shuf_c.std():.1f} deg, beats {pct_c:.1%} "
           f"-> {'PASS' if ok_c else 'FAIL'}")
-    if not (ok_a and ok_b and ok_c):
-        print(f"FAIL {3 - ok_a - ok_b - ok_c}/3 checks")
+    ok_d = check_distance()
+    if not (ok_a and ok_b and ok_c and ok_d):
+        print(f"FAIL {4 - ok_a - ok_b - ok_c - ok_d}/4 checks")
         sys.exit(1)
 
 
