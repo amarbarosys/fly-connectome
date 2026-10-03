@@ -202,7 +202,7 @@ def standing(m, count, seed=0):
     return np.array(q), np.array(v)
 
 
-def check(mjcf, out, stage, count=64):
+def check(mjcf, out, stage, count=64, k=0):
     feet = stage in ('contact', 'actuated')
     m, out = export(mjcf, out, FEET if feet else None, stage == 'actuated'), Path(out)
     number, fn, fields = STAGES[stage]
@@ -239,6 +239,12 @@ def check(mjcf, out, stage, count=64):
         r32 = lambda x: x.astype(np.float32).astype(np.float64)
         alt = reference(s, fn, ('qacc', 'qfrc_constraint'), r32(q), r32(v), r32(u))
         floor = {f: float(np.abs(alt[f] - want[f]).max() / np.abs(want[f]).max()) for f in alt}
+        if k:  # K-step loop: the state after k chained mj_step calls, ctrl held; its own float32 floor
+            chain = ','.join(['mj_step'] * k)
+            want = reference(s, chain, ('qpos', 'qvel'), q, v, u)
+            alt = reference(s, chain, ('qpos', 'qvel'), r32(q), r32(v), r32(u))
+            floor = {f: float(np.abs(alt[f] - want[f]).max() / np.abs(want[f]).max()) for f in alt}
+            fields = ('qpos', 'qvel')
         print('float32 input floor: ' + ', '.join(f'{f} {e:.2e}' for f, e in floor.items()))
     elif stage == 'step':
         s = load(mjcf)
@@ -253,9 +259,9 @@ def check(mjcf, out, stage, count=64):
     v.astype(np.float32).T.copy().tofile(out / 'qvel.bin')  # (nv, flies)
     binary = out / f'{stage}_{count}'
     flags = (out / 'sizes.txt').read_text().split()
-    subprocess.run([str(Path.home() / '.local/bin/mojo'), 'build', *flags, f'-DFLIES={count}', f'-DSTAGE={number}', str(ENGINE / 'smooth.mojo'), '-o', str(binary)], check=True)
+    subprocess.run([str(Path.home() / '.local/bin/mojo'), 'build', *flags, f'-DFLIES={count}', f'-DSTAGE={number}', f'-DK={k}', str(ENGINE / 'smooth.mojo'), '-o', str(binary)], check=True)
     subprocess.run([str(binary), str(out) + '/'], check=True)
-    rows = np.fromfile(out / 'smooth.bin', np.float32).reshape(-1, count).T
+    rows = np.fromfile(out / ('state.bin' if k else 'smooth.bin'), np.float32).reshape(-1, count).T
     sizes = [want[f][0].size for f in fields]
     if rows.shape[1] != sum(sizes):
         raise SystemExit(f'FAIL {stage}: engine wrote {rows.shape[1]} values per fly, MuJoCo {sum(sizes)}')
@@ -266,7 +272,7 @@ def check(mjcf, out, stage, count=64):
         print(f'FAIL {len(bad)}/{len(fields)} {stage} fields: {" ".join(bad)}')
         sys.exit(1)
     lifted = ', '.join(f'{f} {FLOOR_X * e:.1e}' for f, e in floor.items() if FLOOR_X * e > REL)
-    print(f'PASS {stage}: {len(fields)} fields x {count} states within {REL:g}' + (f' (float32-floor bars: {lifted})' if lifted else ''))
+    print(f'PASS {stage}' + (f' K={k}' if k else '') + f': {len(fields)} fields x {count} states within {REL:g}' + (f' (float32-floor bars: {lifted})' if lifted else ''))
 
 
 if __name__ == '__main__':

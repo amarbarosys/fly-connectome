@@ -18,7 +18,9 @@ in one transaction. Model arrays are shared by all flies and stay in cache.
 usage: smooth DIR/      reads DIR/mi.bin, mf.bin, qpos.bin (NQ x FLIES), qvel.bin (NV x FLIES); writes DIR/smooth.bin, rows:
        xpos, xquat, xipos (bodies 1..), geom_xpos, xanchor, xaxis; STAGE 2 adds subtree_com,
        cinert (bodies 1..), cdof, crb (bodies 1..), M; STAGE 3 adds qLD, qLDiagInv; STAGE 4 adds cvel (bodies
-       1..), cdof_dot, qfrc_passive, qfrc_bias; STAGE 5 adds qH, qHDiagInv, qacc_euler, qpos_next; prints us per launch
+       1..), cdof_dot, qfrc_passive, qfrc_bias; STAGE 5 adds qH, qHDiagInv, qacc_euler, qpos_next; prints us per launch.
+       -DK=k: k steps per launch, state kept on the card; the state after the first launch goes to DIR/state.bin
+       (qpos rows, then qvel rows), the state after 10 steps to DIR/state10.bin when K divides 10
 """
 from std.ffi import external_call
 from std.math import cos, sin, sqrt
@@ -37,6 +39,7 @@ comptime NC = get_defined_int["NC"]()
 comptime F = get_defined_int["FLIES"]()
 comptime STAGE = get_defined_int["STAGE", 1]()
 comptime STOP = get_defined_int["STOP", 99]()
+comptime K = get_defined_int["K", 0]()  # K > 0 (STAGE >= 5): K steps per launch, qpos/qvel written back in place
 comptime STEPTOL = Float32(get_defined_int["STEPTOL_E7", 10]()) * 1e-7  # Newton stops when a step moves qacc less than this
 comptime LSFLOOR = Float32(get_defined_int["LSFLOOR_E7", 10]()) * 1e-7  # line-search slope floor, relative to alpha = 0  # phase timing (phases.sh): return after phase STOP
 # mi.bin: body_parentid, body_jntadr, body_jntnum, jnt_type, jnt_qposadr, geom_bodyid
@@ -871,6 +874,16 @@ def smooth(mi: TI, mf: TF, qpos: TQ, qvel: TV, ctrl: TU, res: TO):
     var f = block_idx.x * block_dim.x + thread_idx.x
     if f >= F:
         return
+    for _ in range(max(K, 1)):
+        step(mi, mf, qpos, qvel, ctrl, res, f)
+        comptime if K > 0:  # mj_Euler's write-back: qvel += h qacc, qpos = integrated qpos
+            for v in range(NV):
+                qvel[v * F + f] += mf[TSTEP] * get(res, f, OQACC + v)
+            for a in range(NQ):
+                qpos[a * F + f] = get(res, f, OQPOS + a)
+
+
+def step(mi: TI, mf: TF, qpos: TQ, qvel: TV, ctrl: TU, res: TO, f: Int):
 
     for i in range(1, NB):
         var ja = Int(mi[JNTADR + i])
@@ -1076,6 +1089,21 @@ def main() raises:
     var grid = (F + 63) // 64
     ctx.enqueue_function(kernel, TileTensor(mi_b, LI), TileTensor(mf_b, LF), TileTensor(q_b, LQ), TileTensor(v_b, LV), TileTensor(u_b, LU), TileTensor(o_b, LO), grid_dim=grid, block_dim=64)
     ctx.synchronize()
+    comptime if K > 0:
+        var state = List[Float32](length=(NQ + NV) * F, fill=0)
+        ctx.enqueue_copy(state.unsafe_ptr(), q_b)
+        ctx.enqueue_copy(state.unsafe_ptr().unsafe_offset(NQ * F), v_b)
+        ctx.synchronize()
+        with open(dir + "state.bin", "w") as file:
+            file.write_bytes(Span(unsafe_ptr=state.unsafe_ptr().unsafe_bitcast[UInt8](), length=(NQ + NV) * F * 4))
+        comptime if 10 % K == 0:  # state after 10 steps (10 / K launches): K=1 and K=10 must give the same bytes
+            for _ in range(10 // K - 1):
+                ctx.enqueue_function(kernel, TileTensor(mi_b, LI), TileTensor(mf_b, LF), TileTensor(q_b, LQ), TileTensor(v_b, LV), TileTensor(u_b, LU), TileTensor(o_b, LO), grid_dim=grid, block_dim=64)
+            ctx.enqueue_copy(state.unsafe_ptr(), q_b)
+            ctx.enqueue_copy(state.unsafe_ptr().unsafe_offset(NQ * F), v_b)
+            ctx.synchronize()
+            with open(dir + "state10.bin", "w") as file:
+                file.write_bytes(Span(unsafe_ptr=state.unsafe_ptr().unsafe_bitcast[UInt8](), length=(NQ + NV) * F * 4))
     var t0 = perf_counter_ns()
     for _ in range(100):
         ctx.enqueue_function(kernel, TileTensor(mi_b, LI), TileTensor(mf_b, LF), TileTensor(q_b, LQ), TileTensor(v_b, LV), TileTensor(u_b, LU), TileTensor(o_b, LO), grid_dim=grid, block_dim=64)
@@ -1086,7 +1114,7 @@ def main() raises:
     ctx.synchronize()
     with open(dir + "smooth.bin", "w") as file:
         file.write_bytes(Span(unsafe_ptr=host.unsafe_ptr().unsafe_bitcast[UInt8](), length=NOUT * F * 4))
-    print(F, "animals, stage", STAGE, ":", us, "us per launch,", Float64(F) / us * 1e6, "animals/s")
+    print(F, "animals, stage", STAGE, ", K", max(K, 1), ":", us, "us per launch,", Float64(F * max(K, 1)) / us * 1e6, "animal-steps/s")
     comptime if STAGE >= 6:
         var it: Float64 = 0; var ev: Float64 = 0; var itmax: Float32 = 0
         for a in range(F):
