@@ -97,8 +97,12 @@ comptime NFL0 = TSTEP + 1
 comptime CPF = NFL0  # STAGE 6: per pair margin, gap, friction 2, solref 2, solimp 5, invweight, rbound; hull verts; 3 opts
 comptime CVERT = CPF + 13 * NCP
 comptime COPT = CVERT + 3 * NHV
-comptime CACF = COPT + 3  # STAGE 7: per actuator gain, bias 0-2, ctrlrange 2, forcerange 2, gear
-comptime NFL = CACF + 9 * NU if STAGE >= 7 else (COPT + 3 if STAGE >= 6 else NFL0)
+comptime HFG = get_defined_int["HFGEOM", -1]()  # heightfield ground geom (model.py feet), else none
+comptime HR = get_defined_int["NHFR", 0]()
+comptime HC = get_defined_int["NHFC", 0]()
+comptime HFO = COPT + 3  # centre x y, half extents x y, world heights (row along +y)
+comptime CACF = HFO + (4 + HR * HC if HR else 0)  # STAGE 7: per actuator gain, bias 0-2, ctrlrange 2, forcerange 2, gear
+comptime NFL = CACF + 9 * NU if STAGE >= 7 else (CACF if STAGE >= 6 else NFL0)
 # smooth.bin rows (per animal): xpos, xquat, xipos of bodies 1.., geom_xpos, xanchor, xaxis
 comptime OXQ = 3 * (NB - 1)
 comptime OXI = 7 * (NB - 1)
@@ -433,10 +437,12 @@ def powi(a: Float32, b: Float32) -> Float32:
     return r
 
 
-def contacts(mi: TI, mf: TF, qvel: TV, res: TO, f: Int):
+def contacts(mi: TI, mf: TF, qvel: TV, res: TO, f: Int, o: V3):
     """MuJoCo mjc_PlaneConvex (support vertex + hull neighbours below the margin, at most 3, none within 0.3 rbound of
     the first), mj_instantiateContact (pyramidal condim 3, Jacobian over the body's dof chain), mj_diagApprox,
-    mj_makeImpedance and mj_referenceConstraint, per exported plane-mesh pair."""
+    mj_makeImpedance and mj_referenceConstraint, per exported plane-mesh pair. A heightfield ground (HFGEOM) is not
+    mjc_ConvexHField (GJK+EPA on cell prisms): the plane is the bilinear tangent plane of the heights under the mesh
+    centre, exact on linear terrain, wrong where the terrain bends inside one mesh."""
     var h = mf[TSTEP]
     var impratio = mf[COPT]
     for p in range(NCP):
@@ -452,6 +458,20 @@ def contacts(mi: TI, mf: TF, qvel: TV, res: TO, f: Int):
         var q2 = mul(b2[1], m4(mf, GQUAT + 4 * g2))
         var pos2 = V3(get(res, f, OG + 3 * g2), get(res, f, OG + 3 * g2 + 1), get(res, f, OG + 3 * g2 + 2), 0)
         var normal = rot(q1, basis(2))
+        comptime if HR > 0:
+            if g1 == HFG:
+                var w = pos2 + o
+                var dx = 2 * mf[HFO + 2] / Float32(HC - 1); var dy = 2 * mf[HFO + 3] / Float32(HR - 1)
+                var u = min(max((w[0] - mf[HFO] + mf[HFO + 2]) / dx, Float32(0)), Float32(HC - 1) - 1e-3)
+                var t = min(max((w[1] - mf[HFO + 1] + mf[HFO + 3]) / dy, Float32(0)), Float32(HR - 1) - 1e-3)
+                var c = Int(u); var r = Int(t)
+                var tx = u - Float32(c); var ty = t - Float32(r)
+                var a = HFO + 4 + r * HC + c
+                var h00 = mf[a]; var h01 = mf[a + 1]; var h10 = mf[a + HC]; var h11 = mf[a + HC + 1]
+                var gx = ((1 - ty) * (h01 - h00) + ty * (h11 - h10)) / dx
+                var gy = ((1 - tx) * (h10 - h00) + tx * (h11 - h01)) / dy
+                normal = V3(-gx, -gy, 1, 0) / sqrt(gx * gx + gy * gy + 1)
+                pos1 = V3(w[0], w[1], (1 - ty) * ((1 - tx) * h00 + tx * h01) + ty * ((1 - tx) * h10 + tx * h11), 0) - o
         if (normal * (pos2 - pos1)).reduce_add() - mf[pf + 12] > margin:  # bounding sphere clear of the plane: the
             for c in range(3):                                          # support vertex would be too (no contact)
                 res[(OVALID + 3 * p + c) * F + f] = 0
@@ -1079,7 +1099,7 @@ def step(mi: TI, mf: TF, qpos: TQ, qvel: TV, ctrl: TU, res: TO, f: Int, o: V3):
     comptime if STOP == 4:
         return
     comptime if STAGE >= 6:
-        contacts(mi, mf, qvel, res, f)
+        contacts(mi, mf, qvel, res, f, o)
         comptime if STAGE >= 7:
             actuation(mi, mf, qpos, qvel, ctrl, res, f)
         comptime if STOP == 5:

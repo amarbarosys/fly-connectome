@@ -14,6 +14,17 @@ if [ "$stage" = cube ]; then  # closed 40 mm cube of planes (floor, 4 walls, cei
   [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
   echo "PASS all cube checks"; exit 0
 fi
+if [ "$stage" = terrain ]; then  # heightfield ground (tangent plane) on a tilted ramp vs MuJoCo on the same tilted plane
+  for B in ${BODY:-.work/agent/gpu-body-port/body-v2/body.xml .work/agent/body_engine/spider-body/spider.xml}; do
+    read T P < <($M -c "from agent.body_engine.model import terrain; print(*terrain('$B'))")
+    ORACLE=$P $M -m agent.body_engine.model check $T $X/terrain-$(basename $B .xml) actuated 64 || { echo "FAIL terrain $(basename $B .xml)"; fail=$((fail+1)); }
+  done
+  # the gate must fail with the slope's normal tilted the wrong way
+  ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo 's/normal = V3(-gx, -gy, 1, 0)/normal = V3(gx, gy, 1, 0)/' -- \
+    env ORACLE=$P $M -m agent.body_engine.model check $T $X/mutant actuated 64 || fail=$((fail+1))
+  [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
+  echo "PASS all terrain checks"; exit 0
+fi
 if [ "$stage" = loop ]; then  # K steps per launch, state kept on the card. K=1 vs mj_step (one step: the accuracy
   # gate); one K=10 launch must equal ten K=1 launches byte for byte (the loop). K=10 vs ten chained mj_step is not a
   # gate: the engine's ~5e-6 per-step float32 error grows ~12x in 10 steps on contact-rich states (diag/k_floor.py)

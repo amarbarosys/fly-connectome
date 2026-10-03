@@ -87,6 +87,40 @@ def cube(mjcf, side=40.0):
     return str(out)
 
 
+def terrain(mjcf, slope=(0.1, 0.05), n=65, half=20.0, bumps=0.0, seed=0):
+    """Ground plane replaced by an n x n heightfield of +-half mm: heights slope . (x, y) plus, when bumps > 0, a
+    seeded smooth sum of 4 low-frequency sines of that amplitude (mm). Writes terrain.xml next to mjcf and, without
+    bumps, its exact twin terrain_plane.xml (the same tilted plane as a plane geom, the oracle of the tilt gate: a
+    bilinear tangent plane of linear heights is exact). Returns the paths."""
+    import xml.etree.ElementTree as ET
+    xs = np.linspace(-half, half, n)
+    X, Y = np.meshgrid(xs, xs)  # row r along +y, column c along +x (mjModel.hfield_data order)
+    H = slope[0] * X + slope[1] * Y
+    rng = np.random.default_rng(seed)
+    for _ in range(4 if bumps else 0):
+        k, ph = rng.uniform(0.1, 0.3, 2), rng.uniform(0, 2 * np.pi)
+        H += bumps / 4 * np.sin(k[0] * X + k[1] * Y + ph)
+    lo, span = H.min(), max(np.ptp(H), 1e-6)
+    out = []
+    for kind in ('hfield', 'plane') if not bumps else ('hfield',):
+        tree = ET.parse(mjcf)
+        root = tree.getroot()
+        ground = root.find("worldbody/geom[@name='ground_plane']")
+        ground.attrib.pop('quat', None)
+        if kind == 'hfield':
+            asset = root.find('asset') if root.find('asset') is not None else ET.SubElement(root, 'asset')
+            ET.SubElement(asset, 'hfield', name='terrain', nrow=str(n), ncol=str(n), size=f'{half} {half} {span} 1',
+                          elevation=' '.join(f'{e:.9g}' for e in ((H - lo) / span)[::-1].ravel()))  # XML rows run +y first
+            ground.set('type', 'hfield'); ground.set('hfield', 'terrain'); ground.set('pos', f'0 0 {lo}')
+            ground.attrib.pop('size', None)
+        else:
+            ground.set('pos', '0 0 0'); ground.set('zaxis', f'{-slope[0]} {-slope[1]} 1')
+        path = Path(mjcf).with_name('terrain.xml' if kind == 'hfield' else 'terrain_plane.xml')
+        tree.write(path)
+        out.append(str(path))
+    return out
+
+
 def onfaces(q, v, side):
     """Standing states moved onto the cube's 6 faces in turn (state n on face n % 6): the whole fly rotated so the
     floor's up becomes the face's inward normal and placed at the face; free-joint linear velocity rotated with it,
@@ -135,7 +169,8 @@ def feet(m, regex):
     import re
     if m.opt.cone != mujoco.mjtCone.mjCONE_PYRAMIDAL or (m.geom_contype & m.geom_conaffinity).any():
         raise SystemExit('FAIL export: contacts need the pyramidal cone and explicit pairs only')
-    pairs = [i for i in range(m.npair) if m.geom_type[m.pair_geom1[i]] == mujoco.mjtGeom.mjGEOM_PLANE
+    ground = (mujoco.mjtGeom.mjGEOM_PLANE, mujoco.mjtGeom.mjGEOM_HFIELD)
+    pairs = [i for i in range(m.npair) if m.geom_type[m.pair_geom1[i]] in ground
              and m.geom_type[m.pair_geom2[i]] == mujoco.mjtGeom.mjGEOM_MESH and re.search(regex, mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_GEOM, m.pair_geom2[i]))]
     if any(m.pair_dim[i] != 3 for i in pairs):
         raise SystemExit('FAIL export: only condim 3 contacts are ported')
@@ -165,8 +200,17 @@ def feet(m, regex):
         fl += [m.pair_margin[i], m.pair_gap[i], *m.pair_friction[i][:2], *m.pair_solref[i], *m.pair_solimp[i],
                m.body_invweight0[m.geom_bodyid[g1], 0] + m.body_invweight0[b, 0], m.geom_rbound[g2]]
     ints = np.array(head + first + edges + chains + [m.opt.iterations, m.opt.ls_iterations])
-    floats = np.array(fl + verts + [m.opt.impratio, m.opt.tolerance, m.opt.ls_tolerance])
+    floats = fl + verts + [m.opt.impratio, m.opt.tolerance, m.opt.ls_tolerance]
     sizes = {'NCP': len(pairs), 'NHV': len(verts) // 3, 'NHE': len(edges), 'NCH': len(chains)}
+    hf = sorted({m.pair_geom1[i] for i in pairs if m.geom_type[m.pair_geom1[i]] == mujoco.mjtGeom.mjGEOM_HFIELD})
+    if hf:  # heightfield block: centre x y, half extents x y, then world heights row-major (row along +y)
+        g, k = hf[0], m.geom_dataid[hf[0]]
+        if len(hf) > 1 or m.geom_bodyid[g] or not np.allclose(m.geom_quat[g], [1, 0, 0, 0]):
+            raise SystemExit('FAIL export: one heightfield, on the world body, unrotated')
+        r, c, sz = m.hfield_nrow[k], m.hfield_ncol[k], m.hfield_size[k]
+        floats += [*m.geom_pos[g][:2], *sz[:2], *(m.geom_pos[g][2] + sz[2] * m.hfield_data[m.hfield_adr[k]:m.hfield_adr[k] + r * c])]
+        sizes |= {'HFGEOM': g, 'NHFR': r, 'NHFC': c}
+    floats = np.array(floats)
     return ints, floats, sizes
 
 
@@ -260,11 +304,13 @@ def standing(m, count, seed=0):
     return np.array(q), np.array(v)
 
 
-def check(mjcf, out, stage, count=64, k=0):
+def check(mjcf, out, stage, count=64, k=0, oracle=None):
+    """oracle: MuJoCo runs this MJCF instead of mjcf (same bodies and pair order), e.g. terrain_plane.xml for the
+    engine's heightfield terrain.xml; standing states come from it too."""
     feet = stage in ('contact', 'actuated')
     m, out = export(mjcf, out, FEET if feet else None, stage == 'actuated'), Path(out)
     number, fn, fields = STAGES[stage]
-    q, v = standing(m, count) if feet else (states(m, count), velocities(m, count, scale=VSCALE))
+    q, v = standing(load(oracle) if oracle else m, count) if feet else (states(m, count), velocities(m, count, scale=VSCALE))
     if feet and Path(mjcf).name.startswith('cube'):  # every face of the cube carries states
         q, v = onfaces(q, v, float(Path(mjcf).stem[4:]))
     u = np.zeros((count, m.nu))
@@ -277,7 +323,7 @@ def check(mjcf, out, stage, count=64, k=0):
                 u[:, i] = rng.uniform(0, 1, count)
     u.astype(np.float32).T.copy().tofile(out / 'ctrl.bin')  # (nu, flies); zeros below the actuated stage
     if feet:  # only the exported foot pairs collide; noslip (not ported) off; actuators off below S3
-        s = load(mjcf)
+        s = load(oracle or mjcf)
         if stage == 'contact':
             s.opt.disableflags |= mujoco.mjtDisableBit.mjDSBL_ACTUATION
         s.opt.noslip_iterations = 0
@@ -323,6 +369,9 @@ def check(mjcf, out, stage, count=64, k=0):
         want['qpos_next'] = want.pop('qpos')
     else:
         want = reference(m, fn, fields, q, v)
+    if oracle and 'geom_xpos' in want:  # world geoms are constants: take the engine model's (the heightfield sits elsewhere than its twin plane)
+        w = np.flatnonzero(m.geom_bodyid == 0)
+        want['geom_xpos'].reshape(count, -1, 3)[:, w] = m.geom_pos[w]
     want = {f: v[:, 1:] if f in WORLD_FIRST else v for f, v in want.items()}  # the engine skips body 0, the world
     q.astype(np.float32).T.copy().tofile(out / 'qpos.bin')  # (nq, flies): flies fastest, as the engine reads it
     v.astype(np.float32).T.copy().tofile(out / 'qvel.bin')  # (nv, flies)
@@ -356,4 +405,5 @@ if __name__ == '__main__':
     cmd, args = sys.argv[1], sys.argv[2:]
     if cmd == 'meshes':
         sys.exit(0 if meshes(*args) <= 1e-4 else 'FAIL meshes: decode error above 1e-4 of part size')
-    export(*args) if cmd == 'export' else check(args[0], args[1], args[2], *map(int, args[3:]))
+    import os
+    export(*args) if cmd == 'export' else check(args[0], args[1], args[2], *map(int, args[3:]), oracle=os.environ.get('ORACLE'))
