@@ -129,7 +129,7 @@ def combine(fly, spider, offset=(8.0, 0.0, 0.0), name='world'):
     a, b = mujoco.MjSpec.from_file(str(fly)), mujoco.MjSpec.from_file(str(spider))
     oa, ob = a.compile().opt, b.compile().opt
     diff = [f for f in dir(oa) if not f.startswith('_') and not callable(getattr(oa, f)) and np.any(np.asarray(getattr(oa, f)) != np.asarray(getattr(ob, f)))
-            and f not in ('enableflags', 'noslip_iterations')]  # the fly's win: energy reporting only, noslip not ported
+            and f not in ('enableflags', 'noslip_iterations')]  # the fly's win: energy reporting only, noslip 5
     if diff:
         raise SystemExit(f'FAIL combine: global options differ: {diff}')
     for spec, path in ((a, fly), (b, spider)):  # absolute mesh files: the merged MJCF loads from anywhere
@@ -230,9 +230,9 @@ def feet(m, regex):
            edge list), the edge lists (hull-local vertex ids, -1 ends a vertex), the dof chains (H's row pattern of the
            pair's deepest dof, ascending), their Jacobian signs (+1 geom2's body only, -1 geom1's only, 0 both or
            neither), H's pattern (rowadr, rownnz, colind as hpattern()), M's entry -> H's entry, opt.iterations,
-           opt.ls_iterations
+           opt.ls_iterations, opt.noslip_iterations
     floats per pair: margin, gap, friction 0-1, solref 2, solimp 5, invweight0 translation (both bodies), rbound of
-           geom2 and geom1 (14); then hull vertices in the geom frame; then opt.impratio, opt.tolerance, opt.ls_tolerance
+           geom2 and geom1 (14); then hull vertices in the geom frame; then opt.impratio, opt.tolerance, opt.ls_tolerance, opt.noslip_tolerance, stat.meaninertia
     """
     if m.opt.cone != mujoco.mjtCone.mjCONE_PYRAMIDAL or (m.geom_contype & m.geom_conaffinity).any():
         raise SystemExit('FAIL export: contacts need the pyramidal cone and explicit pairs only')
@@ -283,8 +283,8 @@ def feet(m, regex):
     hadr = list(np.cumsum([0] + hnnz[:-1]))
     hcol = [c for r in hrow for c in r]
     mtoh = [hadr[v] + hrow[v].index(m.M_colind[a]) for v in range(m.nv) for a in range(m.M_rowadr[v], m.M_rowadr[v] + m.M_rownnz[v])]
-    ints = np.array(head + first + edges + chains + signs + hadr + hnnz + hcol + mtoh + [m.opt.iterations, m.opt.ls_iterations])
-    floats = fl + verts + [m.opt.impratio, m.opt.tolerance, m.opt.ls_tolerance]
+    ints = np.array(head + first + edges + chains + signs + hadr + hnnz + hcol + mtoh + [m.opt.iterations, m.opt.ls_iterations, m.opt.noslip_iterations])
+    floats = fl + verts + [m.opt.impratio, m.opt.tolerance, m.opt.ls_tolerance, m.opt.noslip_tolerance, m.stat.meaninertia]
     sizes = {'NCP': len(sel), 'NHV': len(verts) // 3, 'NHE': len(edges), 'NCH': len(chains), 'NH': len(hcol), 'NSLOT': nslot, 'NJE': nje}
     hf = sorted({m.pair_geom1[i] for i in sel if m.geom_type[m.pair_geom1[i]] == mujoco.mjtGeom.mjGEOM_HFIELD})
     if hf:  # terrain: the heightfield is MuJoCo's sample; the engine evaluates world.py's function from its 8 params
@@ -408,11 +408,10 @@ def check(mjcf, out, stage, count=64, k=0, oracle=None):
             else:
                 u[:, i] = rng.uniform(0, 1, count)
     u.astype(np.float32).T.copy().tofile(out / 'ctrl.bin')  # (nu, flies); zeros below the actuated stage
-    if feet:  # only the exported foot pairs collide; noslip (not ported) off; actuators off below S3
+    if feet:  # only the exported pairs collide; actuators off below S3
         s = load(oracle or mjcf)
         if stage == 'contact':
             s.opt.disableflags |= mujoco.mjtDisableBit.mjDSBL_ACTUATION
-        s.opt.noslip_iterations = 0
         on = set(pairs(s, FEET)[0])
         for i in range(s.npair):
             if i not in on:
@@ -424,6 +423,7 @@ def check(mjcf, out, stage, count=64, k=0, oracle=None):
         ambiguous = np.zeros(count, int)  # pairs whose deepest vertex sits within float32 resolution of the margin
         switch = np.zeros(count)  # per state: the constraint row nearest its active-set switch, |J qacc - aref| / max |aref|
         live = [i for i in range(s.npair) if s.pair_margin[i] > -1 and s.geom_type[s.pair_geom1[i]] == mujoco.mjtGeom.mjGEOM_PLANE]
+        noslip, s.opt.noslip_iterations = s.opt.noslip_iterations, 0  # switch: Newton's qacc (noslip moves it off the switch)
         for n in range(count):
             d.qpos[:], d.qvel[:], d.ctrl[:] = q[n], v[n], u[n]
             mujoco.mj_forward(s, d)
@@ -436,6 +436,7 @@ def check(mjcf, out, stage, count=64, k=0, oracle=None):
                 a, c = s.mesh_vertadr[s.geom_dataid[g2]], s.mesh_vertnum[s.geom_dataid[g2]]
                 depth = ((s.mesh_vert[a:a + c] @ d.geom_xmat[g2].reshape(3, 3).T + d.geom_xpos[g2] - d.geom_xpos[g1]) @ d.geom_xmat[g1].reshape(3, 3)[:, 2]).min()
                 ambiguous[n] += abs(depth - s.pair_margin[i]) < 4 * np.spacing(np.float32(np.abs(d.geom_xpos[g2]).max()))
+        s.opt.noslip_iterations = noslip
         # float32 floor: MuJoCo on the float32-rounded state (the engine's actual input) vs MuJoCo on the float64 state.
         # A contact force at solref 2e-4 moves 2.4e-5 of its scale from input rounding alone, so a field's bar is
         # max(REL, FLOOR_X x its floor); every field still has to beat 1e-5 unless float32 inputs cannot.

@@ -76,8 +76,8 @@ comptime HADR = CSIGN + NCH  # H's pattern: rowadr, rownnz, colind (same layout 
 comptime MTOH = HADR + 2 * NV + NH
 comptime CITER = MTOH + NC
 comptime NU = get_defined_int["NU", 0]()
-comptime CACT = CITER + 2  # STAGE 7 (model.py actuators): per actuator trntype, dof or body, ctrllimited, forcelimited, qpos address
-comptime NI = CACT + 5 * NU if STAGE >= 7 else (CITER + 2 if STAGE >= 6 else NI0)
+comptime CACT = CITER + 3  # STAGE 7 (model.py actuators): per actuator trntype, dof or body, ctrllimited, forcelimited, qpos address
+comptime NI = CACT + 5 * NU if STAGE >= 7 else (CITER + 3 if STAGE >= 6 else NI0)
 # mf.bin: body_pos, body_quat, jnt_pos, jnt_axis, qpos0, body_ipos, body_iquat, geom_pos, geom_quat
 comptime BPOS = 0
 comptime BQUAT = 3 * NB
@@ -103,7 +103,7 @@ comptime CPF = NFL0  # STAGE 6: per pair margin, gap, friction 2, solref 2, soli
 comptime CVERT = CPF + 14 * NCP
 comptime COPT = CVERT + 3 * NHV
 comptime HFG = get_defined_int["HFGEOM", -1]()  # heightfield ground geom (model.py feet), else none
-comptime HFO = COPT + 3  # world.mojo params (NP)
+comptime HFO = COPT + 5  # world.mojo params (NP)
 comptime CACF = HFO + (NP if HFG >= 0 else 0)  # STAGE 7: per actuator gain, bias 0-2, ctrlrange 2, forcerange 2, gear
 comptime NFL = CACF + 9 * NU if STAGE >= 7 else (CACF if STAGE >= 6 else NFL0)
 # smooth.bin rows (per animal): xpos, xquat, xipos of bodies 1.., geom_xpos, xanchor, xaxis
@@ -154,7 +154,10 @@ comptime OMV = OSRCH + NV
 comptime OHN = OMV + NV
 comptime OHNI = OHN + NH
 comptime ODIAG = OHNI + NV  # Newton iterations, line-search evaluations (printed by main)
-comptime NROW = ODIAG + 2 if STAGE >= 6 else (OCFRC + 6 * NB if STAGE >= 4 else NOUT)
+comptime OFRC = ODIAG + 2  # noslip: per-row force, z = L^-T J' f, two rows' w = L^-T J'
+comptime OZ = OFRC + NEFC
+comptime OW = OZ + NV
+comptime NROW = OW + 2 * NV if STAGE >= 6 else (OCFRC + 6 * NB if STAGE >= 4 else NOUT)
 comptime LI = row_major[NI]()
 comptime LF = row_major[NFL]()
 comptime LQ = row_major[NQ * F]()
@@ -899,6 +902,113 @@ def newton(mi: TI, mf: TF, res: TO, f: Int):
             break
 
 
+@always_inline
+def ltsolve(mi: TI, res: TO, f: Int, W: Int, jadr: Int, nch: Int, choff: Int):
+    """One constraint row's w = L^-T J' (mj_solveLD's first half on M's factor): nonzero on the row's chain only,
+    which holds every M ancestor of its dofs, so rows W.. outside the chain are neither read nor written."""
+    for c in range(nch):
+        res[(W + Int(mi[CCHAIN + choff + c])) * F + f] = get(res, f, jadr + c)
+    for c in range(nch - 1, -1, -1):
+        var i = Int(mi[CCHAIN + choff + c])
+        var start = Int(mi[MADR + i])
+        var x_i = get(res, f, W + i)
+        for adr in range(start, start + Int(mi[MNNZ + i]) - 1):
+            res[(W + Int(mi[MCOL + adr])) * F + f] -= get(res, f, OLD + adr) * x_i
+
+
+def noslip(mi: TI, mf: TF, res: TO, f: Int):
+    """MuJoCo mj_solNoSlip for pyramidal contacts (no dry friction ported): after Newton, projected Gauss-Seidel over
+    each contact's opposing pyramid-edge row pairs (their sum, what the normal sees, kept), noslip_iterations sweeps
+    or until improvement / (meaninertia nv) < noslip_tolerance; then mj_dualFinish: qfrc_constraint = J' f, qacc =
+    qacc_smooth + M^-1 qfrc_constraint. Matrix-free with M = L'DL: A(k, l) = J_k M^-1 J_l' = w_k' D^-1 w_l, w = L^-T J'
+    on the row's chain, and the residual's J_k M^-1 J' f = w_k' D^-1 z with z = L^-T J' f kept current."""
+    var nit = Int(mi[CITER + 2])
+    if nit == 0:
+        return
+    var imp0: Float32 = 0
+    for r in range(NEFC):  # Newton's forces: -D jar on active rows
+        var fr: Float32 = 0
+        if get(res, f, OVALID + r // 4) != 0 and get(res, f, OST + r) != 0:
+            var D = get(res, f, OD + r)
+            fr = -D * get(res, f, OJAR + r)
+            imp0 += 0.5 * fr * fr / D
+        res[(OFRC + r) * F + f] = fr
+    for v in range(NV):
+        res[(OZ + v) * F + f] = get(res, f, OQFC + v)
+    for i in range(NV - 1, -1, -1):  # z = L^-T J' f
+        var start = Int(mi[MADR + i])
+        var x_i = get(res, f, OZ + i)
+        for adr in range(start, start + Int(mi[MNNZ + i]) - 1):
+            res[(OZ + Int(mi[MCOL + adr])) * F + f] -= get(res, f, OLD + adr) * x_i
+    var scale = 1 / (mf[COPT + 4] * Float32(NV))
+    for it in range(nit):
+        var improvement: Float32 = imp0 if it == 0 else 0
+        for p in range(NCP):
+            var nch = Int(mi[CPH + 11 * p + 6]); var choff = Int(mi[CPH + 11 * p + 7])
+            for sl in range(nslot(mi, p)):
+                if get(res, f, OVALID + sbase(mi, p) + sl) == 0:
+                    continue
+                for t in range(2):
+                    var r0 = 4 * (sbase(mi, p) + sl) + 2 * t
+                    var j0 = OJ + jbase(mi, p) + (4 * sl + 2 * t) * nch
+                    ltsolve(mi, res, f, OW, j0, nch, choff)
+                    ltsolve(mi, res, f, OW + NV, j0 + nch, nch, choff)
+                    var a00: Float32 = 0; var a01: Float32 = 0; var a11: Float32 = 0
+                    var res0 = jdot(mi, res, f, j0, nch, choff, OQACCS) - get(res, f, OAREF + r0)
+                    var res1 = jdot(mi, res, f, j0 + nch, nch, choff, OQACCS) - get(res, f, OAREF + r0 + 1)
+                    for c in range(nch):
+                        var i = Int(mi[CCHAIN + choff + c])
+                        var w0 = get(res, f, OW + i) * get(res, f, OLDI + i); var w1 = get(res, f, OW + NV + i)
+                        a00 += w0 * get(res, f, OW + i); a01 += w0 * w1; a11 += w1 * w1 * get(res, f, OLDI + i)
+                        res0 += w0 * get(res, f, OZ + i); res1 += w1 * get(res, f, OLDI + i) * get(res, f, OZ + i)
+                    a00 = max(a00, Float32(1e-10)); a11 = max(a11, Float32(1e-10))
+                    var o0 = get(res, f, OFRC + r0); var o1 = get(res, f, OFRC + r0 + 1)
+                    var mid = 0.5 * (o0 + o1)
+                    var k1 = a00 + a11 - 2 * a01
+                    var k0 = mid * (a00 - a11) + res0 - (a00 * o0 + a01 * o1) - res1 + (a01 * o0 + a11 * o1)
+                    var n0 = mid; var n1 = mid
+                    if k1 >= 1e-15:
+                        var y = -k0 / k1
+                        if y < -mid:
+                            n0 = 0; n1 = 2 * mid
+                        elif y > mid:
+                            n0 = 2 * mid; n1 = 0
+                        else:
+                            n0 = mid + y; n1 = mid - y
+                    var d0 = n0 - o0; var d1 = n1 - o1
+                    # d1 = -d0 (the pair's sum is kept): the exact form; the general one cancels ulp(f) x |res| ~ 0.2 in float32
+                    var change = 0.5 * k1 * d0 * d0 + d0 * (res0 - res1)
+                    if change > 1e-10:  # no improvement: keep the old forces
+                        continue
+                    improvement -= change
+                    res[(OFRC + r0) * F + f] = n0
+                    res[(OFRC + r0 + 1) * F + f] = n1
+                    for c in range(nch):
+                        var i = Int(mi[CCHAIN + choff + c])
+                        res[(OZ + i) * F + f] += get(res, f, OW + i) * d0 + get(res, f, OW + NV + i) * d1
+        if improvement * scale < mf[COPT + 3]:
+            break
+    for v in range(NV):  # mj_dualFinish as a change on Newton's result: qfrc_constraint += J' (f - f_newton), qacc +=
+        res[(OW + v) * F + f] = 0  # M^-1 of it (qacc_smooth + M^-1 J'f cancels ~140x in float32: qacc_smooth >> qacc)
+    for p in range(NCP):
+        var nch = Int(mi[CPH + 11 * p + 6]); var choff = Int(mi[CPH + 11 * p + 7])
+        for sl in range(nslot(mi, p)):
+            if get(res, f, OVALID + sbase(mi, p) + sl) == 0:
+                continue
+            for k in range(4):
+                var row = 4 * (sbase(mi, p) + sl) + k
+                var df = get(res, f, OFRC + row)
+                if get(res, f, OST + row) != 0:
+                    df += get(res, f, OD + row) * get(res, f, OJAR + row)
+                var jadr = OJ + jbase(mi, p) + (4 * sl + k) * nch
+                for c in range(nch):
+                    res[(OW + Int(mi[CCHAIN + choff + c])) * F + f] += get(res, f, jadr + c) * df
+    for v in range(NV):
+        res[(OQFC + v) * F + f] += get(res, f, OW + v)
+    solveLD(mi, res, f, OW, OLD, OLDI)
+    for v in range(NV):
+        res[(OCQACC + v) * F + f] += get(res, f, OW + v)
+
 def euler(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int):
     """MuJoCo mj_Euler with implicit dof damping (contact-free: qfrc = qfrc_passive - qfrc_bias): qH = M + h diag(damping),
     factor, solve qH qacc = qfrc (mj_solveLD), qvel += h qacc, mj_integratePos. qvel is read, not written back."""
@@ -1157,6 +1267,7 @@ def step(mi: TI, mf: TF, qpos: TQ, qvel: TV, ctrl: TU, res: TO, f: Int):
         comptime if STOP == 5:
             return
         newton(mi, mf, res, f)
+        noslip(mi, mf, res, f)
         comptime if STOP == 6:
             return
     comptime if STAGE >= 5:

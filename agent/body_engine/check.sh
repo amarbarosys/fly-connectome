@@ -36,6 +36,9 @@ if [ "$stage" = groom ]; then  # the 7 sphere-sphere grooming pairs (front-leg r
   # the gate must fail with the sphere-sphere normal reversed
   ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo 's/normal = dif \/ len/normal = -dif \/ len/' -- \
     env STATES=$X/groom.npz $M -m agent.body_engine.model check .work/agent/gpu-body-port/body-v2/body.xml $X/mutant actuated 64 || fail=$((fail+1))
+  # and with noslip skipped (the fly ships noslip 5; MuJoCo runs it)
+  ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo 's/^        noslip(mi, mf, res, f)$/        pass/' -- \
+    env STATES=$X/groom.npz $M -m agent.body_engine.model check .work/agent/gpu-body-port/body-v2/body.xml $X/mutant actuated 64 || fail=$((fail+1))
   [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
   echo "PASS all groom checks"; exit 0
 fi
@@ -55,7 +58,7 @@ import numpy as np, mujoco
 from agent.body_engine.model import load, standing
 W, F, S = '$W', '.work/agent/gpu-body-port/body-v2/body.xml', '.work/agent/body_engine/spider-body/spider.xml'
 w, f, s = load(W), load(F), load(S)
-for m in (w, f, s): m.opt.noslip_iterations = 0  # not ported; the merge takes the fly's 5 for the spider too
+for m in (w, f, s): m.opt.noslip_iterations = 0  # the merge gives the spider the fly's 5; MuJoCo vs MuJoCo here, islands only
 q, v = standing(w, 8)
 dw, df, ds = mujoco.MjData(w), mujoco.MjData(f), mujoco.MjData(s)
 err = 0.0
