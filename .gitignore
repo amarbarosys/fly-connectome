@@ -13,4 +13,5 @@ MUJOCO_LOG.TXT
 codex-session-*.md
 FILE_INDEX.tsv
 INDEX.md
-.claude/
+.claude/*
+!.claude/skills/

@@ -7,11 +7,9 @@ cd "$(dirname "$0")/../.."
 stage=${1:-kinematics}; M=.venv/bin/python; X=.work/agent/body_engine; fail=0
 $M -m agent.body_engine.model check .work/agent/gpu-body-port/body-v2/body.xml $X/fly "$stage" 64 || { echo "FAIL fly $stage"; fail=$((fail+1)); }
 $M -m agent.body_engine.model check agent/body_engine/models/spider_test.xml $X/spider "$stage" 64 || { echo "FAIL spider $stage"; fail=$((fail+1)); }
-if [ "$stage" = kinematics ]; then
-  src=agent/body_engine/kinematics.mojo; cp "$src" $X/kin_orig.mojo; trap 'cp $X/kin_orig.mojo '"$src" EXIT
-  sed -i 's/var h = 0.5 \* (qpos/var h = -0.5 * (qpos/' "$src"
-  if $M -m agent.body_engine.model check .work/agent/gpu-body-port/body-v2/body.xml $X/mutant kinematics 64 >/dev/null 2>&1; then
-    echo "FAIL mutant: flipped hinge sign passed the gate"; fail=$((fail+1)); else echo "PASS mutant caught"; fi
+if [ "$stage" = kinematics ]; then  # the gate must fail with the hinge angle's sign flipped
+  ~/iTools/bin/mutant-check agent/body_engine/kinematics.mojo 's/var h = 0.5 \* (qpos/var h = -0.5 * (qpos/' -- \
+    $M -m agent.body_engine.model check .work/agent/gpu-body-port/body-v2/body.xml $X/mutant kinematics 64 || fail=$((fail+1))
 fi
 [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
 echo "PASS all $stage checks"

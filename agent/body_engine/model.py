@@ -6,9 +6,9 @@ ported stage needs, by their MuJoCo names, concatenated in the order of INTS / F
 sizes.txt as -D flags, so each body type gets its own compiled engine with its loop bounds and array
 offsets as constants (the shiu_worker pattern). A new species is a new MJCF file, not new code.
 
-`check STAGE`: random states (free joint anywhere, any orientation; hinges and slides inside their
-ranges), MuJoCo runs the stage in float64, the engine runs it in float32 on the GPU, and every
-output field must agree to REL x max(1, |value|).
+`check STAGE`: random states from ~/iTools/science/mj-oracle (free joint anywhere, any orientation;
+hinges and slides inside their ranges), MuJoCo runs the stage in float64, the engine runs it in
+float32 on the GPU, and every output field must agree to REL x max(1, |value|).
 
 usage: python -m agent.body_engine.model export MJCF OUT_DIR
        python -m agent.body_engine.model check  MJCF OUT_DIR STAGE [STATES]
@@ -20,10 +20,14 @@ from pathlib import Path
 import mujoco
 import numpy as np
 
+sys.path.insert(0, str(Path.home() / 'iTools/science/mj-oracle'))
+from mj_oracle import compare, reference, states  # noqa: E402  (random states, MuJoCo reference, per-field compare)
+
 INTS = ('body_parentid', 'body_jntadr', 'body_jntnum', 'jnt_type', 'jnt_qposadr', 'geom_bodyid')
 FLOATS = ('body_pos', 'body_quat', 'jnt_pos', 'jnt_axis', 'qpos0', 'body_ipos', 'body_iquat', 'geom_pos', 'geom_quat')
 STAGES = {'kinematics': (mujoco.mj_kinematics, ('xpos', 'xquat', 'xipos', 'geom_xpos', 'xanchor', 'xaxis'))}
 REL = 1e-5
+WORLD_FIRST = ('xpos', 'xquat', 'xipos')  # body-indexed fields whose row 0 is the world
 ENGINE = Path(__file__).parent
 
 
@@ -45,49 +49,23 @@ def export(mjcf, out):
     return m
 
 
-def states(m, count, seed=0):
-    """(count, nq) qpos: free joints anywhere within 5 mm, random unit quaternion; hinges and slides
-    uniform in range (or +-pi when unlimited); ball joints random unit quaternion."""
-    rng, q = np.random.default_rng(seed), np.tile(m.qpos0, (count, 1))
-    for j in range(m.njnt):
-        a, t = m.jnt_qposadr[j], m.jnt_type[j]
-        if t == mujoco.mjtJoint.mjJNT_FREE:
-            q[:, a:a + 3] = rng.uniform(-5, 5, (count, 3))
-        if t in (mujoco.mjtJoint.mjJNT_FREE, mujoco.mjtJoint.mjJNT_BALL):
-            r = rng.normal(size=(count, 4))
-            q[:, a + 3 * (t == mujoco.mjtJoint.mjJNT_FREE):][:, :4] = r / np.linalg.norm(r, axis=1, keepdims=True)
-        else:
-            lo, hi = m.jnt_range[j] if m.jnt_limited[j] else (-np.pi, np.pi)
-            q[:, a] = rng.uniform(lo, hi, count)
-    return q
-
-
 def check(mjcf, out, stage, count=64):
     m, out = export(mjcf, out), Path(out)
     fn, fields = STAGES[stage]
     q = states(m, count)
-    d, want = mujoco.MjData(m), []
-    for row in q:
-        d.qpos[:] = row
-        fn(m, d)
-        want.append(np.concatenate([getattr(d, f)[1 if f in ('xpos', 'xquat', 'xipos') else 0:].ravel() for f in fields]))
-    want = np.array(want)
+    want = reference(m, fn.__name__, fields, q)
+    want = {f: v[:, 1:] if f in WORLD_FIRST else v for f, v in want.items()}  # the engine skips body 0, the world
     q.astype(np.float32).T.copy().tofile(out / 'qpos.bin')  # (nq, flies): flies fastest, as the engine reads it
     binary = out / f'{stage}_{count}'
     flags = (out / 'sizes.txt').read_text().split()
     subprocess.run([str(Path.home() / '.local/bin/mojo'), 'build', *flags, f'-DFLIES={count}', str(ENGINE / f'{stage}.mojo'), '-o', str(binary)], check=True)
     subprocess.run([str(binary), str(out) + '/'], check=True)
-    got = np.fromfile(out / f'{stage}.bin', np.float32).reshape(-1, count).T
-    if got.shape != want.shape:
-        raise SystemExit(f'FAIL {stage}: engine wrote {got.shape}, MuJoCo {want.shape}')
-    err = np.abs(got - want) / np.maximum(1, np.abs(want))
-    bad, start = [], 0
-    for f in fields:
-        size = getattr(d, f)[1 if f in ('xpos', 'xquat', 'xipos') else 0:].size
-        e = float(err[:, start:start + size].max()) if size else 0.
-        print(f'{"PASS" if e <= REL else "FAIL"} {f:10s} max rel err {e:.2e}')
-        bad += [] if e <= REL else [f]
-        start += size
+    rows = np.fromfile(out / f'{stage}.bin', np.float32).reshape(-1, count).T
+    sizes = [want[f][0].size for f in fields]
+    if rows.shape[1] != sum(sizes):
+        raise SystemExit(f'FAIL {stage}: engine wrote {rows.shape[1]} values per fly, MuJoCo {sum(sizes)}')
+    got = np.split(rows, np.cumsum(sizes)[:-1], axis=1)
+    bad = compare({f: (want[f].reshape(count, -1), g) for f, g in zip(fields, got)}, REL)
     if bad:
         print(f'FAIL {len(bad)}/{len(fields)} {stage} fields: {" ".join(bad)}')
         sys.exit(1)
