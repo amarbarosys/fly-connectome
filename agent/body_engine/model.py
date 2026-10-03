@@ -8,7 +8,7 @@ offsets as constants (the shiu_worker pattern). A new species is a new MJCF file
 
 `check STAGE`: random states from ~/iTools/science/mj-oracle (free joint anywhere, any orientation;
 hinges and slides inside their ranges), MuJoCo runs the stage in float64, the engine runs it in
-float32 on the GPU, and every output field must agree to REL x max(1, |value|).
+float32 on the GPU, and every output field must agree to REL of its own scale (mj-oracle compare).
 
 usage: python -m agent.body_engine.model export MJCF OUT_DIR
        python -m agent.body_engine.model check  MJCF OUT_DIR STAGE [STATES]
@@ -23,18 +23,24 @@ import numpy as np
 sys.path.insert(0, str(Path.home() / 'iTools/science/mj-oracle'))
 from mj_oracle import compare, reference, states  # noqa: E402  (random states, MuJoCo reference, per-field compare)
 
-INTS = ('body_parentid', 'body_jntadr', 'body_jntnum', 'jnt_type', 'jnt_qposadr', 'geom_bodyid')
-FLOATS = ('body_pos', 'body_quat', 'jnt_pos', 'jnt_axis', 'qpos0', 'body_ipos', 'body_iquat', 'geom_pos', 'geom_quat')
-STAGES = {'kinematics': (mujoco.mj_kinematics, ('xpos', 'xquat', 'xipos', 'geom_xpos', 'xanchor', 'xaxis'))}
+INTS = ('body_parentid', 'body_jntadr', 'body_jntnum', 'jnt_type', 'jnt_qposadr', 'geom_bodyid',
+        'body_rootid', 'jnt_dofadr', 'dof_parentid', 'dof_bodyid', 'M_rowadr', 'M_rownnz')
+FLOATS = ('body_pos', 'body_quat', 'jnt_pos', 'jnt_axis', 'qpos0', 'body_ipos', 'body_iquat', 'geom_pos', 'geom_quat',
+          'body_mass', 'body_subtreemass', 'body_inertia', 'dof_armature')
+KIN = ('xpos', 'xquat', 'xipos', 'geom_xpos', 'xanchor', 'xaxis')
+STAGES = {  # name: (STAGE number in smooth.mojo, MuJoCo functions run in order, output fields)
+    'kinematics': (1, 'mj_kinematics', KIN),
+    'crb': (2, 'mj_kinematics,mj_comPos,mj_crb', KIN + ('subtree_com', 'cinert', 'cdof', 'crb', 'M')),
+}
 REL = 1e-5
-WORLD_FIRST = ('xpos', 'xquat', 'xipos')  # body-indexed fields whose row 0 is the world
+WORLD_FIRST = ('xpos', 'xquat', 'xipos', 'cinert', 'crb')  # body-indexed fields whose row 0 is the world
 ENGINE = Path(__file__).parent
 
 
 def load(mjcf):
     m = mujoco.MjModel.from_xml_path(str(mjcf))
-    if m.nmocap:
-        raise SystemExit('FAIL export: mocap bodies are not supported')
+    if m.nmocap or m.ntendon or m.dof_simplenum.any():
+        raise SystemExit('FAIL export: mocap bodies, tendons and simple dofs are not ported')
     return m
 
 
@@ -43,7 +49,7 @@ def export(mjcf, out):
     out.mkdir(parents=True, exist_ok=True)
     np.concatenate([getattr(m, f).ravel() for f in INTS]).astype(np.int32).tofile(out / 'mi.bin')
     np.concatenate([getattr(m, f).ravel() for f in FLOATS]).astype(np.float32).tofile(out / 'mf.bin')
-    sizes = {'NBODY': m.nbody, 'NJNT': m.njnt, 'NQ': m.nq, 'NGEOM': m.ngeom}
+    sizes = {'NBODY': m.nbody, 'NJNT': m.njnt, 'NQ': m.nq, 'NGEOM': m.ngeom, 'NV': m.nv, 'NC': m.nC}
     (out / 'sizes.txt').write_text(' '.join(f'-D{k}={v}' for k, v in sizes.items()) + '\n')
     print(f'{mjcf}: {sizes} -> {out}')
     return m
@@ -51,16 +57,16 @@ def export(mjcf, out):
 
 def check(mjcf, out, stage, count=64):
     m, out = export(mjcf, out), Path(out)
-    fn, fields = STAGES[stage]
+    number, fn, fields = STAGES[stage]
     q = states(m, count)
-    want = reference(m, fn.__name__, fields, q)
+    want = reference(m, fn, fields, q)
     want = {f: v[:, 1:] if f in WORLD_FIRST else v for f, v in want.items()}  # the engine skips body 0, the world
     q.astype(np.float32).T.copy().tofile(out / 'qpos.bin')  # (nq, flies): flies fastest, as the engine reads it
     binary = out / f'{stage}_{count}'
     flags = (out / 'sizes.txt').read_text().split()
-    subprocess.run([str(Path.home() / '.local/bin/mojo'), 'build', *flags, f'-DFLIES={count}', str(ENGINE / f'{stage}.mojo'), '-o', str(binary)], check=True)
+    subprocess.run([str(Path.home() / '.local/bin/mojo'), 'build', *flags, f'-DFLIES={count}', f'-DSTAGE={number}', str(ENGINE / 'smooth.mojo'), '-o', str(binary)], check=True)
     subprocess.run([str(binary), str(out) + '/'], check=True)
-    rows = np.fromfile(out / f'{stage}.bin', np.float32).reshape(-1, count).T
+    rows = np.fromfile(out / 'smooth.bin', np.float32).reshape(-1, count).T
     sizes = [want[f][0].size for f in fields]
     if rows.shape[1] != sum(sizes):
         raise SystemExit(f'FAIL {stage}: engine wrote {rows.shape[1]} values per fly, MuJoCo {sum(sizes)}')

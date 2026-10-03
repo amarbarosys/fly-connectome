@@ -8,8 +8,12 @@ stage=${1:-kinematics}; M=.venv/bin/python; X=.work/agent/body_engine; fail=0
 $M -m agent.body_engine.model check .work/agent/gpu-body-port/body-v2/body.xml $X/fly "$stage" 64 || { echo "FAIL fly $stage"; fail=$((fail+1)); }
 $M -m agent.body_engine.model check agent/body_engine/models/spider_test.xml $X/spider "$stage" 64 || { echo "FAIL spider $stage"; fail=$((fail+1)); }
 if [ "$stage" = kinematics ]; then  # the gate must fail with the hinge angle's sign flipped
-  ~/iTools/bin/mutant-check agent/body_engine/kinematics.mojo 's/var h = 0.5 \* (qpos/var h = -0.5 * (qpos/' -- \
+  ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo 's/var h = 0.5 \* (qpos/var h = -0.5 * (qpos/' -- \
     $M -m agent.body_engine.model check .work/agent/gpu-body-port/body-v2/body.xml $X/mutant kinematics 64 || fail=$((fail+1))
+fi
+if [ "$stage" = crb ]; then  # the gate must fail with the hinge cdof lever arm reversed (anchor - com)
+  ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo 's/var off = com - anchor/var off = anchor - com/' -- \
+    $M -m agent.body_engine.model check .work/agent/gpu-body-port/body-v2/body.xml $X/mutant crb 64 || fail=$((fail+1))
 fi
 [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
 echo "PASS all $stage checks"
