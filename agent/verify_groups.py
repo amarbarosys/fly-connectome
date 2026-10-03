@@ -4,7 +4,8 @@ Three variants of the authors' graph (as is; ALLN inhibition x16; APL -> KC x4 w
 of two so the scaled float32 weight is exact either way. Grouped: one graph, 3 x C columns, grp/scale.
 Separate: each variant's own graph with the same columns stimulated, so every Poisson entry
 (column * n + neuron) matches. Pass when GPU counts are identical column for column, and the CPU
-oracle with groups matches the GPU for the first 20 ms.
+oracle with groups matches the GPU for the first 20 ms. Cell groups: in one run, per-group sums
+made on the device equal the host sum of the same run's per-cell readout of every grouped cell.
 """
 import json
 import sys
@@ -16,6 +17,7 @@ from agent.brain_bench import ODORS6
 from agent.neural_connectome import ROOT
 from agent.shiu import ShiuBrain, ShiuGPU, graph_dir
 from agent.shiu_apl import masks, mb_variant
+from agent.shiu_learning import mb_cells
 from agent.shiu_loop import cells
 
 VARIANTS = ((1, 1, 1, 1, 1), (1, 1, 1, 1, 16), (1, 1, 1, 4, 4))  # mb_variant: kckc, dan, apl in, apl out, alln
@@ -61,8 +63,28 @@ def main():
     gpu = run(ShiuGPU, pre, post, w, n, orn, [200], (grp, scale))
     oracle = {'spikes_cpu': int(cpu.sum()), 'spikes_gpu': int(gpu.sum()), 'cells_differing': int((cpu != gpu).any(axis=1).sum())}
     print('cpu vs gpu 20 ms', oracle, flush=True)
-    ok = all(r['cells_differing'] == 0 and r['spikes_grouped'] > 0 for r in rows) and oracle['cells_differing'] == 0
-    out = {'status': 'PASS' if ok else 'FAIL', 'variants': rows, 'cpu_gpu_20ms': oracle}
+    kc, mbon = mb_cells()
+    _, dn = cells('flywire')
+    members = [kc, mbon, np.asarray(dn), np.flatnonzero(apl)]
+    cgrp = np.full(n, -1, np.int32)
+    for k, m in enumerate(members):
+        cgrp[m] = k
+    flies, windows = len(VARIANTS) * COLS, [500, 2000]
+    cell = np.concatenate(members)
+    readout = (np.arange(flies)[:, None] * n + cell[None]).reshape(-1)
+    brain = ShiuGPU(pre, post, w, n=n, flies=flies, seed=71)
+    for c in range(flies):
+        brain.stimulate([i for g in ODORS6[c % COLS // 4] for i in orn[g]], HZ, fly=c)
+    brain.edge_groups(grp, scale)
+    sums, got = brain.run_groups(windows, cgrp, readout)
+    host = np.zeros_like(sums)
+    np.add.at(host, (np.arange(len(windows))[:, None], cgrp[readout % n][None], (readout // n)[None]), got)
+    summed = {'groups_kc_mbon_dn_apl_last_window': sums[-1].sum(1).tolist(), 'equal_to_host_sum': bool(np.array_equal(sums, host)),
+              'bytes_sums': int(sums.nbytes), 'bytes_full_counts': len(windows) * flies * n * 4}
+    print('group sums', summed, flush=True)
+    ok = (all(r['cells_differing'] == 0 and r['spikes_grouped'] > 0 for r in rows) and oracle['cells_differing'] == 0
+          and summed['equal_to_host_sum'] and sums[-1, 0].sum() > 0)
+    out = {'status': 'PASS' if ok else 'FAIL', 'variants': rows, 'cpu_gpu_20ms': oracle, 'group_sums': summed}
     (ROOT / '.work/agent/shiu/verify-groups.json').write_text(json.dumps(out, indent=2) + '\n')
     print(out['status'])
     return ok

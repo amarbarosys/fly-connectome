@@ -8,6 +8,9 @@ poisson kick); counts.bin (int32, windows x C x N) is written there. Optional ed
 grp.bin (uint8 group per edge) and scale.bin (float32 C x G); an edge delivers weight x scale of its
 group in the spiking cell's column, so weight variants of one topology run as columns of one graph.
 Without them every edge is group 0 at scale 1.0, which leaves each weight bit-identical.
+Optional cell groups: cgrp.bin (int32 group per neuron, -1 none) makes a one-shot run write sums.bin
+(int32 windows x G x C, spikes per group and column) instead of counts.bin, plus gather.bin for the
+cells in readout.bin when that file is there.
 
 resident: the graph stays on the device and each stdin line "sniff" resets the state, rereads
 stim_p.bin, runs to the last window and writes counts at every window for the entries in
@@ -148,6 +151,21 @@ def gather(
         dst[Int(offset) + k] = counts[Int(idx[k])]
 
 
+def group_sum(
+    counts: TileTensor[DType.int32, type_of(LS), MutAnyOrigin],
+    cgrp: TileTensor[DType.int32, type_of(LR), MutAnyOrigin],
+    sums: TileTensor[DType.int32, type_of(LS), MutAnyOrigin],
+    offset: Int32,
+):
+    var i = block_idx.x * block_dim.x + thread_idx.x
+    if i >= S:
+        return
+    var group = Int(cgrp[i % N])
+    var spikes = counts[i]
+    if group >= 0 and spikes != 0:
+        _ = Atomic.fetch_add(sums.ptr.unsafe_offset(Int(offset) + group * C + i // N), spikes)
+
+
 def load(path: String, size: Int) raises -> List[UInt8]:
     """Raw little-endian file, length checked; device copies read it in place, no host copy."""
     var raw = open(path, "r").read_bytes()
@@ -248,17 +266,34 @@ def main() raises:
     var fill_t = TileTensor(fill_b, LSLOT)
 
     var step_gather = ctx.compile_function[gather]()
-    var readout_raw = load(work + "readout.bin", -1) if resident else List[UInt8]()
+    var step_group_sum = ctx.compile_function[group_sum]()
+    var summed = not resident and exists(work + "cgrp.bin")
+    var gathered = resident or (summed and exists(work + "readout.bin"))
+    var readout_raw = load(work + "readout.bin", -1) if gathered else List[UInt8]()
     var readout_count = len(readout_raw) // 4
     if readout_count * window_count > S:
         raise Error("readout too large")
+    var cgrp_raw = load(work + "cgrp.bin", N) if summed else List[UInt8]()
+    var group_count = 0
+    for n in range(N if summed else 0):
+        group_count = max(group_count, Int(cgrp_raw.unsafe_ptr().unsafe_bitcast[Int32]().unsafe_offset(n)[]) + 1)
+    if group_count * C * window_count > S:
+        raise Error("group sums too large")
+    var cgrp_b = ctx.enqueue_create_buffer[DType.int32](N + 1)
+    var sums_b = ctx.enqueue_create_buffer[DType.int32](S)
+    if summed:
+        ctx.enqueue_copy(cgrp_b.create_sub_buffer[DType.int32](0, N), cgrp_raw.unsafe_ptr().unsafe_bitcast[Int32]())
+        sums_b.enqueue_fill(0)
+    var cgrp_t = TileTensor(cgrp_b, LR)
+    var sums_t = TileTensor(sums_b, LS)
     var idx_b = ctx.enqueue_create_buffer[DType.int32](S)
     var got_b = ctx.enqueue_create_buffer[DType.int32](S)
-    if resident and readout_count > 0:
+    if gathered and readout_count > 0:
         ctx.enqueue_copy(idx_b.create_sub_buffer[DType.int32](0, readout_count), readout_raw.unsafe_ptr().unsafe_bitcast[Int32]())
     var idx_t = TileTensor(idx_b, LS)
     var got_t = TileTensor(got_b, LS)
-    var out = List[Int32](length=(window_count * readout_count) if resident else (window_count * S), fill=0)
+    var out = List[Int32](length=(window_count * readout_count) if gathered else (0 if summed else window_count * S), fill=0)
+    var sums_out = List[Int32](length=window_count * group_count * C, fill=0)
     var kick_grid = max((Int(stim_count) + BLOCK - 1) // BLOCK, 1)
     var sniff = 0
     while True:
@@ -287,21 +322,30 @@ def main() raises:
                 ctx.enqueue_function(step_kick, stim_t, p_t, u_t, last_t, fill_t, Int32(stim_count), seed + UInt32(sniff), Int32(t),
                     due, k.unsafe_offset(4)[], grid_dim=kick_grid, block_dim=BLOCK)
                 t += 1
-            if resident:
+            if gathered:
                 ctx.enqueue_function(step_gather, counts_t, idx_t, got_t, Int32(readout_count), Int32(window * readout_count),
                     grid_dim=max((readout_count + BLOCK - 1) // BLOCK, 1), block_dim=BLOCK)
-            else:
+            if summed:
+                ctx.enqueue_function(step_group_sum, counts_t, cgrp_t, sums_t, Int32(window * group_count * C),
+                    grid_dim=(S + BLOCK - 1) // BLOCK, block_dim=BLOCK)
+            elif not resident:
                 ctx.enqueue_copy(out.unsafe_ptr().unsafe_offset(window * S), counts_b)
             window += 1
-        if resident:
+        if gathered and len(out) > 0:
             ctx.enqueue_copy(out.unsafe_ptr(), got_b.create_sub_buffer[DType.int32](0, len(out)))
+        if summed:
+            ctx.enqueue_copy(sums_out.unsafe_ptr(), sums_b.create_sub_buffer[DType.int32](0, len(sums_out)))
         var overflow = List[Int32](length=SLOTS + 1, fill=0)
         ctx.enqueue_copy(overflow.unsafe_ptr(), fill_b)
         ctx.synchronize()
         if overflow[SLOTS] != 0:
             raise Error("spike ring overflow: " + String(overflow[SLOTS]) + " spikes over capacity")
-        with open(work + ("gather.bin" if resident else "counts.bin"), "w") as f:
-            f.write_bytes(Span(unsafe_ptr=out.unsafe_ptr().unsafe_bitcast[UInt8](), length=len(out) * 4))
+        if summed:
+            with open(work + "sums.bin", "w") as f:
+                f.write_bytes(Span(unsafe_ptr=sums_out.unsafe_ptr().unsafe_bitcast[UInt8](), length=len(sums_out) * 4))
+        if gathered or not summed:
+            with open(work + ("gather.bin" if gathered else "counts.bin"), "w") as f:
+                f.write_bytes(Span(unsafe_ptr=out.unsafe_ptr().unsafe_bitcast[UInt8](), length=len(out) * 4))
         if not resident:
             break
         print("ok", flush=True)

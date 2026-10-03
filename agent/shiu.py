@@ -177,8 +177,28 @@ class ShiuGPU(ShiuBrain):
         raise NotImplementedError('ShiuGPU runs whole windows from t = 0: use run()')
 
     def run(self, windows):
+        counts = self._launch(windows).reshape(len(windows), self.flies, self.n)
+        self.t, self.counts = int(windows[-1]), counts[-1].reshape(-1).copy()
+        return [c.T.copy() for c in counts]
+
+    def run_groups(self, windows, cgrp, readout=()):
+        """Spikes summed per cell group on the device: (windows, G, flies) int32 for cgrp (group per
+        neuron, -1 none), and per-cell counts (windows, len(readout)) for readout entries
+        (column * n + neuron); the full N x C counts never leave the device."""
+        cgrp = np.asarray(cgrp, np.int32)
+        groups = int(cgrp.max()) + 1
+        sums, got = self._launch(windows, cgrp, np.asarray(readout, np.int32))
+        return sums.reshape(len(windows), groups, self.flies), got.reshape(len(windows), -1)
+
+    def _launch(self, windows, cgrp=None, readout=None):
         work = ROOT / '.work/agent/shiu/run'
         work.mkdir(parents=True, exist_ok=True)
+        for name in ('cgrp.bin', 'readout.bin', 'sums.bin', 'gather.bin', 'counts.bin'):
+            (work / name).unlink(missing_ok=True)
+        if cgrp is not None:
+            cgrp.tofile(work / 'cgrp.bin')
+            if len(readout):
+                readout.tofile(work / 'readout.bin')
         entries, p = self._stim_arrays()
         entries.astype(np.int32).tofile(work / 'stim_index.bin')
         p.tofile(work / 'stim_p.bin')
@@ -187,9 +207,10 @@ class ShiuGPU(ShiuBrain):
         np.asarray([self.em, self.eg, self.c, V_TH, W_SYN * F_POI], np.float32).tofile(work / 'consts.bin')
         subprocess.run([str(worker_binary(self.n, len(self.col), self.flies)), str(self.graph) + '/', str(work) + '/',
                         str(self.seed), str(self.delay), str(self.refractory)], check=True, env=worker_env(self.n, len(self.col), self.flies))
-        counts = np.fromfile(work / 'counts.bin', np.int32).reshape(len(windows), self.flies, self.n)
-        self.t, self.counts = int(windows[-1]), counts[-1].reshape(-1).copy()
-        return [c.T.copy() for c in counts]
+        if cgrp is None:
+            return np.fromfile(work / 'counts.bin', np.int32)
+        got = np.fromfile(work / 'gather.bin', np.int32) if len(readout) else np.zeros(0, np.int32)
+        return np.fromfile(work / 'sums.bin', np.int32), got
 
 
 def worker_binary(n, edges, flies):
