@@ -21,7 +21,7 @@ Correction 2026-10-02: p-values recomputed with seed clusters (mirrored layouts 
 Key areas: five multi-omics data layers, embodied agent system
 with checkpoint/restore, and a Rust/Mojo screening rebuild. The compound
 screening engine and chemoinformatics database now live in the separate
-`fly-pharma` repository. GPU physics on RX 7900 XTX is closed: correct physics was reached after three ROCm-fork fixes, but it did not beat six CPU workers, so CPU MuJoCo remains the backend. See [GPU body port status](docs/plans/GPU_BODY_PORT.md) and the
+`fly-pharma` repository. GPU physics on RX 7900 XTX is closed: correct physics was reached after three ROCm-fork fixes, but it did not beat six CPU workers, so CPU MuJoCo remains the backend; our own MuJoCo port is in progress ([body engine](docs/plans/BODY_ENGINE.md)). See [GPU body port status](docs/plans/GPU_BODY_PORT.md) and the
 [master plan](docs/plans/FLY_WORLD_MASTER_PLAN.md) for the full program.
 
 ## Screening build (Rust/Mojo)

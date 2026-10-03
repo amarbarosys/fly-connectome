@@ -8,6 +8,7 @@ Status describes the cited implementation and gate only. It does not imply biolo
 |---|---|---:|---|---|
 | CPU embodied floor and wall gate | PASS | 20/20 floor trials upright; 19/20 wall escapes | `docs/plans/GPU_BODY_PORT.md`; `.work/agent/p1-body-gate/full-verification-cpu-ui.json` | `./.venv/bin/python -m agent.verify_body_gate` (supply receipt paths) |
 | RX 7900 XTX GPU body physics | UNVERIFIED | 1 diagnostic step finite; diagnostic qpos NaN by 1,000 steps | `docs/plans/GPU_BODY_PORT.md`; `.work/agent/gfx1100-probe/result.json` | Probe in progress; no validated runtime entrypoint |
+| Own GPU body engine (MuJoCo 3.9.0 port, any MJCF) | PARTIAL (S1 2/7 stages) | kinematics, comPos, crb match MuJoCo within 1.3e-06 of field scale on fly and spider test body, mutants caught; 65,536 animals 6.37 ms per launch | `docs/plans/BODY_ENGINE.md`; commits `ccd9695`, `019783a` | `gpu-wait run --timeout 1800 -- agent/body_engine/check.sh crb` |
 
 ## SENSES
 
@@ -39,6 +40,8 @@ Status describes the cited implementation and gate only. It does not imply biolo
 | Male CNS eye map (viewing direction per visual neuron) | WORKS | 3,251/4,108 photoreceptors placed by flyverse's column method (MIT); eyes about 125 x 145 deg; LC4 / LPLC2 fields from inputs alone land on their soma side's eye for 100% / 97% of cells; LC9 1/219 (inputs carry no column) | `.work/agent/shiu/eye-map-mcns.npz`; `agent/eye_map.py` | `./.venv/bin/python -m agent.eye_map` |
 | FlyGym 2.x body (CPU MuJoCo 3.9, imported) | WORKS (CPU) | CPG fly walks 13.10 mm per simulated second at 0.41x real time. GPU path blocked on versions: FlyGym pins warp-lang 1.14 / mujoco_warp 3.9; ROCm forks are 1.13 / 3.8.1, gfx942 only | `tools/flygym_smoke.py`; venv `.work/flygym-venv` | `.work/flygym-venv/bin/python tools/flygym_smoke.py` |
 | Plastic KC factors + reward (learning on the device) | WORKS | CPU oracle and resident GPU agree exactly over sniff, reward, sniff; reward on VM2+DM1+VA2 drops its avoid-MBON spikes 176.8 -> 7.1 and lifts valence 0.24 -> 0.96, partner 0.84 -> 0.88 | `.work/agent/shiu/verify-plastic.json`; `agent/verify_plastic.py` | `./.venv/bin/python -m agent.verify_plastic` |
+| Punishment plane (KC -> approach MBONs) | WORKS | Punished A: approach-MBON 38.4 vs 288.1 twins, valence +0.24 -> -0.56, B 0.84 -> 0.89; CPU = GPU exact, reward factors untouched | `agent/verify_pain.py`; commit `b49c92f` | `./.venv/bin/python -m agent.verify_pain` |
+| Sugar reaches PAM under hunger gain | FAIL | 0 PAM spikes at hunger 0, 0.5, 1 with sugar output and PAM input x3; octopamine VPM3/4 give PAM 29 of 109,448 excitatory synapses | `.work/agent/shiu/presets/hunger.json`; commit `06232c3` | `./.venv/bin/python -m agent.presets hunger` |
 | Degree structure versus in-degree-only random graphs | PASS | Real advantage +18.75 percentage points, seed-cluster pooled p=0.001472 | `.work/agent/paired-significance/significance-corrected-seedcluster.json`; `docs/plans/CONNECTOME_BENEFIT.md` | See cited comparison receipt; no standalone verifier |
 
 Correction 2026-10-02: p-values recomputed with seed clusters (mirrored layouts are not independent); old pooled values 0.6990 (shuffles) and 0.000489 (random) are now 0.7551 and 0.001472; conclusions unchanged: specific wiring does not beat degree-preserving shuffles, while the real graph remains ahead of the random-column family.
@@ -58,6 +61,7 @@ Correction 2026-10-02: p-values recomputed with seed clusters (mirrored layouts 
 | Dopamine-gated KC to MBON plasticity (isolated rule) | PASS | Hand-set traces, one LTD event: exactly the eligible edges move, all down, for both the KC x MBON and KC-only rules | `.work/agent/mb-plasticity/verification.json` | `./.venv/bin/python -m agent.verify_mb_plasticity` |
 | Dopamine-gated KC to MBON plasticity (through the odour chain) | FAIL | At the P1d point (gain 35, MBON x5, DN x80), KC-only eligibility, reward as depression: A-active KC edges change 23.9x more than B-active; MBONs fire 15/19/4; but MBON response after reward moves more for B (0.187) than A (0.034) | `.work/agent/sparse-learning/result.json` | `./.venv/bin/python -m agent.verify_sparse_learning` |
 | Biological learning in the connectome | UNVERIFIED | Not measured | `docs/plans/CONNECTOME_BENEFIT.md`; `docs/plans/FLY_WORLD_MASTER_PLAN.md` | No biological-learning implementation |
+| Pain learning in the closed loop (trap avoidance) | PASS | Late trap contacts 1.59 vs twins 11.22, 30/32 pairs, p=1.1e-08 (relief arm 1.02, p=9.3e-10) | `docs/plans/LEARNING_LOOP.md`; `.work/agent/shiu/pain-loop-tmaze.json` | `gpu-wait run --timeout 3600 -- ./.venv/bin/python -m agent.pain_loop` |
 | Parallel arena experience collection | PASS | 4.60 to 4.67x faster collection; equal experience 29/30 for both policies | `docs/plans/SPECTATOR_PARALLEL_LEARNING.md`; `.work/agent/spectator-learning/learning/comparison.json` | `./.venv/bin/python -m agent.verify_parallel_learning_trial` |
 
 ## TASKS
@@ -84,6 +88,7 @@ Correction 2026-10-02: p-values recomputed with seed clusters (mirrored layouts 
 | Rust/Mojo screening parity and throughput | PASS | 48 manifest rows match Python reference; 24.44x in paired benchmark | `docs/plans/SCREENING_REBUILD_PLAN.md`; `.work/runs/155567-1790771553562845391/receipt.json`; `.work/benchmarks/rebuild_20260930/paired_benchmark_receipt.json` | `fly-screen-rs/target/release/fly-screen` |
 | Screening biological predictive validity | UNVERIFIED | Not established by parity or speed | `docs/plans/SCREENING_REBUILD_PLAN.md` | No biological-validation entrypoint |
 | GPU neural worker tick | PASS | 3.1 to 4.4x faster per tick, bit-identical to the previous kernel; CPU/GPU parity error 0.0 | commits `d065ff9`, `1eebbd2` | `.work/fly-research/arena-venv/bin/python -m agent.verify_neural` |
+| Shiu resident sniff (96 columns, 1,000 steps) | PASS | 675 -> 453 ms, exact parity kept: rest skip, int16/uint8 state, deliver without refractory reads | commits `84af113`, `22932f8`, `95d2e0c`; `agent/profile_sniff.py` | `gpu-wait run ... rocprofv3 --kernel-trace --stats ... -m agent.profile_sniff` |
 | GPU worker at 64 flies and alternate graphs | PASS | 64-fly build and 2-fly block-s7 graph (FLY_DATA_DIR) within 9.5e-7 of CPUBrain; spike words uint16 up to 16 flies, uint64 above | commit `704becb` | `.work/fly-research/arena-venv/bin/python -m agent.verify_worker_wide` |
 | Body-free brain bench on GPU (WorkerBrain) | PASS | Odour drive, normalised and class gains, plasticity edits run on the GPU worker; ever sets identical to CPUBrain; P1d point 2.16 s CPU to 0.19 s GPU, 162-point grid 34 s; 161/162 rows identical to the CPU receipt (one flooded row differs 0.24%, same verdict) | `.work/neural-flies/verify-worker-brain.json`; `.work/agent/brain-bench/sweep-p1d-gpu.json` | `.work/fly-research/arena-venv/bin/python -m agent.verify_worker_brain` |
 | Ten-fly full-loop capacity | PASS | Optimized aggregate 0.861 fly-seconds/wall-second; per-fly full loop 0.0873x real time | `docs/plans/TEN_FLY_CAPACITY.md`; `.work/agent/ten-fly/independent-verification.json` | `./.venv/bin/python -m agent.verify_batch_capacity` |
@@ -92,7 +97,7 @@ Correction 2026-10-02: p-values recomputed with seed clusters (mirrored layouts 
 
 - Compare wiring on harder tasks where it could matter: odor memory, vision, and looming.
 - Lesion mapping is scoped to dependence under tested conditions; anatomical necessity remains unverified.
-- GPU physics track closed; CPU MuJoCo stays the backend (`docs/plans/GPU_BODY_PORT.md`).
+- GPU physics track closed; CPU MuJoCo stays the backend (`docs/plans/GPU_BODY_PORT.md`). Own engine (MuJoCo port) in progress: `docs/plans/BODY_ENGINE.md`.
 - Engage MBON output at sparse gain (KC-trace eligibility rule, per-class gain), then the reversal task.
 - Fix the dim-light vision response so the stripe can trigger spikes.
 - Preserve continuous neural state across calcium replay windows.
