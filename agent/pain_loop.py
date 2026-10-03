@@ -1,6 +1,6 @@
 """A Shiu fly that learns to stay out of a trap: punishment on trap contact, in the closed loop.
 
-Graph, walker and map as agent/learning_loop.py, with the decoy (odour B) as the trap: it is never
+Graph, walker (tropotaxis on per-odour valence, re-sniffed only after learning) and map as agent/learning_loop.py, with the decoy (odour B) as the trap: it is never
 used up, and each step a fly is within EAT of it is a contact. Three arms of PAIRS flies share starts,
 mirrors and tumbles: pain (punishment PUN on contact, the KC -> approach plane, agent/verify_pain.py),
 relief (pain plus reward RELIEF on each step that takes it further from the trap within ESCAPE steps
@@ -22,7 +22,7 @@ import numpy as np
 
 from agent import maps
 from agent.fly_checkpoint import pack
-from agent.learning_loop import HZ, STEP, STEPS, TRIALS, WINDOW, setup
+from agent.learning_loop import NOISE, STEP, STEPS, TRIALS, WINDOW, odour_valence, setup
 from agent.neural_connectome import ROOT
 from agent.paired_significance import _exact_sign_flip
 from agent.shiu import ShiuLive
@@ -39,16 +39,11 @@ def main(map_name='tmaze'):
     mbon = np.concatenate([approach, avoid])
     live.start([WINDOW], (np.arange(flies)[None] * n + mbon[:, None]).reshape(-1))
     entries, p0 = live._stim_arrays()
-    column, kind = entries // n, np.where(np.isin(entries % n, odour[0]), 0, 1)
+    kind = np.where(np.isin(entries % n, odour[0]), 0, 1)
     only = [np.where(kind == k, p0, 0).astype(np.float32) for k in (0, 1)]
     sign = np.tile(np.where(np.arange(PAIRS) % 2, 1., -1.), 3)
     arm = np.repeat(np.arange(3), PAIRS)  # 0 pain, 1 relief, 2 twin
     learner = arm < 2
-
-    def valence(p):
-        x = live.sniff(p)[-1].reshape(len(mbon), flies).astype(float)
-        app, avo = x[:len(approach)].sum(0), x[len(approach):].sum(0)
-        return np.where(app + avo > 0, (app - avo) / np.maximum(app + avo, 1), -1.)
 
     contacts, food, probes, started = [], [], [], time.perf_counter()
     for trial in range(TRIALS):
@@ -57,15 +52,11 @@ def main(map_name='tmaze'):
         pos, head = maps.starts(m, sign[:PAIRS], rng)
         pos, head = np.tile(pos, (3, 1)), np.tile(head, 3)
         tumble = np.tile(rng.uniform(-np.pi, np.pi, (STEPS + 1, PAIRS)), (1, 3))
-        touch, bites, last, since = np.zeros(flies), np.zeros(flies), np.full(flies, -2.), np.full(flies, ESCAPE + 1)
+        touch, bites, since, sniffs = np.zeros(flies), np.zeros(flies), np.full(flies, ESCAPE + 1), 2
+        valence = odour_valence(live, only, len(approach), flies)
         gap = lambda: np.where(trap, np.linalg.norm(pos[:, None] - sources[..., :2], axis=2), np.inf).min(1)
         for t in range(STEPS):
-            conc = maps.concentration(m, pos, sources, sign)
-            strongest = conc.max(1, keepdims=True)
-            conc = np.where(strongest > 1e-3, conc / np.maximum(strongest, 1e-12), 0)
-            v = valence((HZ * live.dt * conc[column, kind]).astype(np.float32))
-            head = np.where(v <= last, head + tumble[t], head)
-            last = v
+            head = maps.steer(m, pos, head, sources, sign, valence) + NOISE * tumble[t]
             before = gap()
             pos, blocked = maps.move(pos, head, STEP, walls)
             head = np.where(blocked, head + tumble[t + 1], head)
@@ -80,12 +71,13 @@ def main(map_name='tmaze'):
             rel = np.where((arm == 1) & ~hit & (since <= ESCAPE) & (gap() > before), RELIEF, 0).astype(np.float32)
             if pun.any() or rel.any():
                 live.reward(rel, pun)
-        probes.append([valence(only[0]), valence(only[1])])
+                valence, sniffs = odour_valence(live, only, len(approach), flies), sniffs + 2
+        probes.append(odour_valence(live, only, len(approach), flies).T)
         contacts.append(touch)
         food.append(bites)
         print(f"trial {trial}: trap contacts pain {touch[arm == 0].mean():.2f} relief {touch[arm == 1].mean():.2f} twin {touch[arm == 2].mean():.2f}  "
               f"valence B pain {probes[-1][1][arm == 0].mean():+.2f} relief {probes[-1][1][arm == 1].mean():+.2f} twin {probes[-1][1][arm == 2].mean():+.2f}  "
-              f"{time.perf_counter() - started:.0f} s", flush=True)
+              f"sniffs {sniffs}  {time.perf_counter() - started:.0f} s", flush=True)
     factor = live.factors()
     live.close()
     contacts, food, probes = np.array(contacts), np.array(food), np.array(probes)  # (trial, fly), (trial, odour, fly)

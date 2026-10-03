@@ -119,6 +119,16 @@ def concentration(m, pos, sources, sign):
     return np.stack([(c * (kind == 0)).sum(1), (c * (kind == 1)).sum(1)], 1)
 
 
+def steer(m, pos, head, sources, sign, valence, turn=.3, antenna=.1):
+    """Tropotaxis: each antenna (antenna to the left and right of the head) weighs the food and decoy
+    odour it smells by the fly's valence for that odour (F, 2); turn by `turn` toward the antenna with
+    the higher sum, keep the heading on a tie (no odour, or equal sides)."""
+    side = antenna * np.stack([-np.sin(head), np.cos(head)], 1)  # unit left of heading
+    left, right = (concentration(m, pos + k * side, sources, sign) for k in (1, -1))
+    drive = ((left - right) * valence).sum(1)
+    return head + turn * np.sign(drive)
+
+
 def move(pos, head, step, walls):
     """Advance unless the path crosses a wall; returns new positions and the blocked mask."""
     new = pos + step * np.stack([np.cos(head), np.sin(head)], 1)

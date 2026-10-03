@@ -3,8 +3,13 @@
 Graph: ALLN inhibition x LN (no flood), KC -> MBON x GAIN, KC -> avoid-MBON edges plastic (one
 factor per KC per fly, agent/verify_plastic.py). Every step the fly sniffs (food and decoy ORNs at
 HZ x the map's concentration, strongest = HZ) and reads the valence index (approach - avoid) /
-(approach + avoid) of the labelled MBONs (agent/mb_valence.py) at 100 ms; it keeps its heading while
-valence rises and tumbles otherwise (shiu_loop's walker). A bite releases dopamine LR x hunger;
+(approach + avoid) of the labelled MBONs (agent/mb_valence.py) at 100 ms. The fly sniffs each odour
+alone (odour_valence) at the start of a trial and after every step that changed its factors, never
+otherwise: the valence of a mixture is taken as the concentration-weighted sum, which costs about 2
+sniffs per learning event instead of one per step. It steers by tropotaxis (maps.steer: two antennae,
+turn toward the side whose odours are worth more), with a small random turn per step. The first
+walker (keep heading while the mixture's valence rises, else tumble) let learning change valence
+(pure-odour probes, agent/pain_loop.py, c869304) without changing behaviour. A bite releases dopamine LR x hunger;
 hunger rises 1/STEPS per step and drops BITE per bite. Learners and twins (dopamine 0) share
 starts, mirrors and tumbles; factors persist over TRIALS, positions reset. Food VM2+DM1+VA2 vs decoy
 DA1+VA1d+DL3: the naive fly prefers the decoy (valence +0.26 vs +0.55 in mbon_floor).
@@ -27,7 +32,7 @@ from agent.verify_shiu import _reference_graph
 
 FOOD, DECOY = ODORS6[1], ODORS6[0]
 LN, GAIN, HZ, SEED = 12, 4, 200., 91
-PAIRS, STEPS, TRIALS, STEP, LR, BITE, WINDOW = 48, 100, 6, .15, .5, .3, 1000
+PAIRS, STEPS, TRIALS, STEP, LR, BITE, WINDOW, NOISE = 48, 100, 6, .15, .5, .3, 1000, .2
 
 
 def setup():
@@ -56,14 +61,25 @@ def brain(engine, pre, post, w, n, grp, kc, odour, flies):
     return b
 
 
+def odour_valence(live, only, n_approach, flies):
+    """(F, 2) valence of each odour sniffed alone; `only` = per-odour Poisson probabilities."""
+    out = []
+    for p in only:
+        x = live.sniff(p)[-1].reshape(-1, flies).astype(float)
+        app, avo = x[:n_approach].sum(0), x[n_approach:].sum(0)
+        out.append(np.where(app + avo > 0, (app - avo) / np.maximum(app + avo, 1), 0.))
+    return np.stack(out, 1)
+
+
 def main(map_name='tmaze'):
     pre, post, w, n, grp, kc, approach, avoid, odour = setup()
     flies, m, rng = 2 * PAIRS, maps.build(map_name), np.random.default_rng(20261003)
     live = brain(ShiuLive, pre, post, w, n, grp, kc, odour, flies)
     mbon = np.concatenate([approach, avoid])
     live.start([WINDOW], (np.arange(flies)[None] * n + mbon[:, None]).reshape(-1))
-    entries, _ = live._stim_arrays()
-    column, kind = entries // n, np.where(np.isin(entries % n, odour[0]), 0, 1)
+    entries, p0 = live._stim_arrays()
+    kind = np.where(np.isin(entries % n, odour[0]), 0, 1)
+    only = [np.where(kind == k, p0, 0).astype(np.float32) for k in (0, 1)]
     sign = np.tile(np.where(np.arange(PAIRS) % 2, 1., -1.), 2)
     learner = np.arange(flies) < PAIRS
     hunger, scores, started = np.ones(flies), [], time.perf_counter()
@@ -72,16 +88,10 @@ def main(map_name='tmaze'):
         pos, head = maps.starts(m, sign[:PAIRS], rng)
         pos, head = np.tile(pos, (2, 1)), np.tile(head, 2)
         tumble = np.tile(rng.uniform(-np.pi, np.pi, (STEPS + 1, PAIRS)), (1, 2))
-        bites, last = np.zeros((flies, 2)), np.full(flies, -2.)
+        bites, sniffs = np.zeros((flies, 2)), 2
+        valence = odour_valence(live, only, len(approach), flies)
         for t in range(STEPS):
-            conc = maps.concentration(m, pos, sources, sign)
-            strongest = conc.max(1, keepdims=True)
-            conc = np.where(strongest > 1e-3, conc / np.maximum(strongest, 1e-12), 0)
-            x = live.sniff((HZ * live.dt * conc[column, kind]).astype(np.float32))[-1].reshape(len(mbon), flies).astype(float)
-            app, avo = x[:len(approach)].sum(0), x[len(approach):].sum(0)
-            valence = np.where(app + avo > 0, (app - avo) / np.maximum(app + avo, 1), -1.)
-            head = np.where(valence <= last, head + tumble[t], head)
-            last = valence
+            head = maps.steer(m, pos, head, sources, sign, valence) + NOISE * tumble[t]
             pos, blocked = maps.move(pos, head, STEP, walls)
             head = np.where(blocked, head + tumble[t + 1], head)
             bite = maps.eat(pos, sources)
@@ -90,10 +100,11 @@ def main(map_name='tmaze'):
             fed = bite[:, 0] > 0
             if (fed & learner).any():
                 live.reward(np.where(fed & learner, LR * hunger, 0).astype(np.float32))
+                valence, sniffs = odour_valence(live, only, len(approach), flies), sniffs + 2
             hunger = np.where(fed, np.maximum(0, hunger - BITE), hunger)
         scores.append(bites[:, 0] - bites[:, 1])
         print(f"trial {trial}: learners {scores[-1][learner].mean():+.2f}  twins {scores[-1][~learner].mean():+.2f}  "
-              f"food bites {bites[learner, 0].sum():.0f}/{bites[~learner, 0].sum():.0f}  {time.perf_counter() - started:.0f} s", flush=True)
+              f"food bites {bites[learner, 0].sum():.0f}/{bites[~learner, 0].sum():.0f}  sniffs {sniffs}  {time.perf_counter() - started:.0f} s", flush=True)
     live.close()
     scores = np.array(scores)  # (trial, fly)
     late = scores[-max(1, TRIALS // 3):].mean(0)
