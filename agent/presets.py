@@ -8,7 +8,7 @@ floor one spike per K repeats), and the side contrast (cells with |z| > 4 agains
 stimulus). A preset = a stimulus that fires at least one readout cell at z > 4: {cells, ids hash,
 spikes, signature (mean counts of its z > 4 cells, strongest first), side cells}. check replays every
 preset with a fresh seed: PASS when cosine >= 0.9 to the stored signature and the strongest cell is
-the same; check writes each preset's result into the file ('verified'), and only verified presets
+the same (smell: valence within 0.15, since its single MBON cells do not reproduce); check writes each preset's result into the file ('verified'), and only verified presets
 are skills to use: a preset that does not reproduce under a fresh seed is noise, not a skill.
 
   vision  visual_projection types -> descending neurons
@@ -19,6 +19,9 @@ are skills to use: a preset that does not reproduce under a fresh seed is noise,
           taste readout
   motion  visual_centrifugal types (HS/VS among them) -> descending neurons
   ascending  ascending neuron types (the nerve cord reporting to the brain) -> the taste readout
+  smell   ORN glomerulus per side on the learning graph (ALLN inhibition x12, KC -> MBON x4, the
+          setup of agent/learning_loop.py) -> labelled MBONs (agent/mb_valence.py) and descending
+          neurons at 100 ms; each preset also carries its valence (approach - avoid) / (approach + avoid)
   trace   CPU only: hops over excitatory edges from the sugar GRNs to every PAM type, and the
           synapses into that type from cells at the previous hop
 
@@ -54,32 +57,42 @@ def by_type(c, mask, min_cells):
 
 
 def sense(name, c):
-    """(stimuli: name -> cell ids, readout cell ids)."""
+    """(stimuli: name -> cell ids, readout cell ids, run options for Experiment and valence)."""
     lr = np.isin(c.side, ('left', 'right'))
     dn = (c.super == 'descending') & lr
     if name == 'vision':
-        return by_type(c, c.super == 'visual_projection', MIN_CELLS), np.flatnonzero(dn)
+        return by_type(c, c.super == 'visual_projection', MIN_CELLS), np.flatnonzero(dn), {}
+    if name == 'smell':
+        from agent.learning_loop import GAIN, LN
+        from agent.mb_valence import mbons
+        approach, avoid = mbons(c)
+        kc, mb = c.klass == 'Kenyon_Cell', np.isin(np.arange(len(c.klass)), np.concatenate([approach, avoid]))
+        orn = (c.klass == 'olfactory') & np.char.startswith(c.type.astype(str), 'ORN_')
+        return by_type(c, orn, 3), np.concatenate([approach, avoid, np.flatnonzero(dn)]), {
+            'edges': {'alln': lambda pre, post, w: (c.klass[pre] == 'ALLN') & (w < 0), 'kc_mbon': lambda pre, post, w: kc[pre] & mb[post]},
+            'variants': [{'alln': LN, 'kc_mbon': GAIN}], 'windows': (1000,), 'valence': (len(approach), len(avoid))}
     dan = np.char.startswith(c.type.astype(str), 'PAM') | np.char.startswith(c.type.astype(str), 'PPL')
     wide = np.flatnonzero(dn | (c.super == 'motor') | dan)
     if name == 'taste':
         stim = by_type(c, c.klass == 'gustatory', 3)
         stim['sugar-both'] = sugar()
-        return stim, wide
+        return stim, wide, {}
     if name == 'sensory':
-        return by_type(c, np.isin(c.klass, ('mechanosensory', 'hygrosensory', 'thermosensory', 'unknown_sensory', 'ocellar')), 3), wide
+        return by_type(c, np.isin(c.klass, ('mechanosensory', 'hygrosensory', 'thermosensory', 'unknown_sensory', 'ocellar')), 3), wide, {}
     if name == 'motion':
-        return by_type(c, c.super == 'visual_centrifugal', 3), np.flatnonzero(dn)
+        return by_type(c, c.super == 'visual_centrifugal', 3), np.flatnonzero(dn), {}
     if name == 'ascending':
-        return by_type(c, c.super == 'ascending', 3), wide
+        return by_type(c, c.super == 'ascending', 3), wide, {}
     raise SystemExit(f'unknown sense {name}')
 
 
-def counts(stim, readout, seed):
-    """Mean and variance over K repeats of readout counts at 0-200 ms: (S, R) each, and cell names."""
+def counts(stim, readout, seed, opt):
+    """Mean and variance over K repeats of readout counts in the sense's window: (S, R) each, and cell names."""
     c = cells()
     pre, post, w, _ = _reference_graph()
-    res = Experiment([(pre, post, w)], len(c.klass), {k: (ids, HZ) for k, ids in stim.items()}, WINDOWS,
-                     {'out': readout}, repeats=K, per_cell=('out',), seed=seed).run()
+    res = Experiment([(pre, post, w)], len(c.klass), {k: (ids, HZ) for k, ids in stim.items()}, opt.get('windows', WINDOWS),
+                     {'out': readout}, edges=opt.get('edges', {}), variants=opt.get('variants', [{}]),
+                     repeats=K, per_cell=('out',), seed=seed).run()
     x = res['cells']['out'][-1, :, 0, 0].reshape(len(readout), len(stim), K).astype(float)
     side = np.array([s[:1] or '-' for s in c.side[readout]])
     names = np.array([f'{t or k}-{s}' for t, k, s in zip(c.type[readout], c.klass[readout], side)])
@@ -95,10 +108,10 @@ def path(name):
 
 
 def map_presets(name):
-    stim, readout = sense(name, cells())
-    mean, var, names = counts(stim, readout, seed=71)
+    stim, readout, opt = sense(name, cells())
+    mean, var, names = counts(stim, readout, 71, opt)
     keys = list(stim)
-    out = {'sense': name, 'hz': HZ, 'K': K, 'window_ms': 200, 'stimuli': len(stim), 'readout': len(readout), 'presets': {}, 'silent': []}
+    out = {'sense': name, 'hz': HZ, 'K': K, 'window_ms': opt.get('windows', WINDOWS)[-1] // 10, 'stimuli': len(stim), 'readout': len(readout), 'presets': {}, 'silent': []}
     for i, k in enumerate(keys):
         z = mean[i] / np.sqrt(var[i] / K + 1 / K)
         base = k.rsplit('-', 1)
@@ -112,6 +125,10 @@ def map_presets(name):
         out['presets'][k] = {'cells': len(stim[k]), 'ids_sha': ids_hash(stim[k]), 'spikes': round(float(mean[i].sum()), 1),
                              'signature': {str(names[d]): round(float(mean[i, d]), 2) for d in hit},
                              'side_cells': int((np.abs(zs) > 4).sum())}
+        if 'valence' in opt:
+            a, v = opt['valence']
+            ap, av = mean[i, :a].sum(), mean[i, a:a + v].sum()
+            out['presets'][k]['valence'] = round(float((ap - av) / max(ap + av, 1)), 3)
     path(name).parent.mkdir(parents=True, exist_ok=True)
     path(name).write_text(json.dumps(out, indent=1) + '\n')
     print(f"{len(out['presets'])} presets, {len(out['silent'])} silent of {len(keys)} stimuli -> {path(name)}")
@@ -121,9 +138,9 @@ def map_presets(name):
 
 def check(name):
     saved = json.loads(path(name).read_text())
-    stim, readout = sense(name, cells())
+    stim, readout, opt = sense(name, cells())
     stim = {k: v for k, v in stim.items() if k in saved['presets']}
-    mean, _, names = counts(stim, readout, seed=72)
+    mean, _, names = counts(stim, readout, 72, opt)
     bad = []
     for i, k in enumerate(stim):
         p = saved['presets'][k]
@@ -131,6 +148,11 @@ def check(name):
         cos = float(mean[i] @ ref / (np.linalg.norm(mean[i]) * np.linalg.norm(ref) + 1e-9))
         top, stored = str(names[np.argmax(mean[i])]), next(iter(p['signature']))
         ok = ids_hash(stim[k]) == p['ids_sha'] and cos >= .9 and top == stored
+        if 'valence' in opt:  # smell: single MBON cells do not reproduce (median cosine 0.71); the loop reads valence
+            a_, v_ = opt['valence']
+            ap, av = mean[i, :a_].sum(), mean[i, a_:a_ + v_].sum()
+            p['replay_valence'] = round(float((ap - av) / max(ap + av, 1)), 3)
+            ok = ids_hash(stim[k]) == p['ids_sha'] and abs(p['replay_valence'] - p['valence']) <= .15
         p['verified'], p['replay_cos'] = ok, round(cos, 3)
         print('PASS' if ok else 'FAIL', f'{k:16s} cos {cos:.3f} top {top} (stored {stored})')
         bad += [] if ok else [k]
