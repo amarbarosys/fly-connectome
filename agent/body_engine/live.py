@@ -24,6 +24,7 @@ import numpy as np
 from agent.body_engine.model import ENGINE, FEET, cube, export, load, meshes, standing
 from agent.body_engine.render_check import DIST, MJCF, MOJO
 from agent.body_engine.verify_render_leak import sample
+from agent.body_engine.world import height_grad
 
 OUT = Path('.work/agent/body_engine/live')
 W, H = 960, 540
@@ -109,6 +110,54 @@ def stand(out, binary, cam, frames, video):
     return float((first & last).sum() / max((first | last).sum(), 1)), float(np.mean(motion[-frames // 3:]))
 
 
+def upright(out, m, cam, frames=300, flip=False):
+    """(cos of the root's tilt from the upright start pose, lowest thorax vertex above the terrain) after `frames`
+    frames; flip starts the animal upside down (rolled 180 deg about its root's x axis, the gate's negative control)."""
+    q0 = np.fromfile(out / 'qpos.bin', np.float32)
+    if flip:
+        r = np.zeros(4)
+        mujoco.mju_mulQuat(r, q0[3:7].astype(float), np.array([0., 1, 0, 0]))
+        q1 = q0.copy()
+        q1[3:7], q1[2] = r, q1[2] + 1.0
+        q1.tofile(out / 'qpos.bin')
+    subprocess.run([str(build(out, m, 10)), str(out) + '/', str(frames), *cam, str(out / 'last.rgba')], check=True, stderr=subprocess.DEVNULL)
+    q = np.fromfile(out / 'last.rgba.qpos', np.float32).astype(float)
+    d = mujoco.MjData(m)
+    d.qpos[:] = q
+    mujoco.mj_kinematics(m, d)
+    r0 = np.zeros(9)
+    mujoco.mju_quat2Mat(r0, q0[3:7].astype(float))
+    t = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_NUMERIC, 'terrain')
+    p = m.numeric_data[m.numeric_adr[t]:m.numeric_adr[t] + 8] if t >= 0 else (0, 0, 0, 1, 0, 0, 2, 0.5)
+    low = np.inf
+    for g in range(m.ngeom):
+        if 'thorax' in (mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_GEOM, g) or '') and m.geom_type[g] == mujoco.mjtGeom.mjGEOM_MESH:
+            k = m.geom_dataid[g]
+            v = m.mesh_vert[m.mesh_vertadr[k]:m.mesh_vertadr[k] + m.mesh_vertnum[k]] @ d.geom_xmat[g].reshape(3, 3).T + d.geom_xpos[g]
+            low = min(low, float((v[:, 2] - height_grad(v[:, 0], v[:, 1], p)[0]).min()))
+    return float(r0[2::3] @ d.xmat[1].reshape(3, 3)[:, 2]), low  # body z axes of start and end
+
+
+def upright_check(terrain_mjcf, flat=MJCF):
+    """Stands on terrain: dropped from the lifted flat pose, after 300 frames (3000 steps) the root has tilted under
+    30 deg from its start pose (the standing thorax frame is itself pitched, up z 0.42) and the thorax clears the
+    ground by at least half its flat standing clearance (flat 0.48 mm; a fly lying on its belly, feet down or not,
+    is at 0: 0.3 mm bumps measured 0.002). The same gate must PASS on the flat floor and FAIL started upside down.
+    (ctrl 0 is no negative control: angle 0 is near the standing pose, the fly stood with it.)"""
+    res, ref = {}, None
+    for name, mjcf, off in (('flat', flat, False), ('terrain', terrain_mjcf, False), ('terrain flipped (must fail)', terrain_mjcf, True)):
+        out = OUT.parent / ('upright-' + name.split()[0] + ('-flipped' if off else ''))
+        cam, m = prepare(out, mjcf=mjcf, flat=None if mjcf == flat else flat)
+        tilt, clear = upright(out, m, cam, flip=off)
+        ref = clear if ref is None else ref
+        res[name] = {'cos_tilt': tilt, 'thorax_clearance': clear, 'flat_clearance': ref,
+                     'pass': bool(tilt > np.cos(np.radians(30)) and clear > 0.5 * ref)}
+        print(('PASS' if res[name]['pass'] else 'FAIL'), name, json.dumps(res[name]))
+    good = res['flat']['pass'] and res['terrain']['pass'] and not res['terrain flipped (must fail)']['pass']
+    print('PASS upright on terrain' if good else 'FAIL upright on terrain')
+    return good
+
+
 def stand_check(out, m, cam):
     iou, settle = stand(out, build(out, m, 10), cam, 300, out / 'held.mkv')
     ctrl_out = out.parent / 'live-feet'
@@ -152,6 +201,8 @@ def main(cmd, *args):
         subprocess.run(['mpv', '--demuxer=rawvideo', f'--demuxer-rawvideo-w={W}', f'--demuxer-rawvideo-h={H}',
                         '--demuxer-rawvideo-mp-format=rgba', '-'], stdin=live.stdout)
         return
+    if cmd == 'upright':  # live.py upright TERRAIN_MJCF
+        sys.exit(0 if upright_check(args[0]) else 1)
     cam, m = prepare()
     result = {'frame': frame_check(OUT, m, cam)}
     result['stand'] = stand_check(OUT, m, cam)

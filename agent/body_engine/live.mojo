@@ -8,6 +8,7 @@ build: mojo build $(cat DIR/sizes.txt) $(cat DIR/rsizes.txt) -DFLIES=1 -DSTAGE=7
 usage: live DIR/ FRAMES ex ey ez tx ty tz fovy_deg [OUT]
        DIR holds the engine files (mi.bin, mf.bin, qpos.bin, qvel.bin, ctrl.bin) and the mesh tables (rmi.bin ...);
        FRAMES 0 = until the reader closes the pipe; OUT = a .rgba file gets frame FRAMES-1 instead of the stream
+       and OUT.qpos the state after it
        (the check's path); stderr gets ms per frame and simulated time.
        live DIR/ 0 ... | mpv --demuxer=rawvideo --demuxer-rawvideo-w=W --demuxer-rawvideo-h=H
                              --demuxer-rawvideo-mp-format=rgba -
@@ -118,4 +119,9 @@ def main() raises:
     if to_file:
         with open(String(a[10]), "w") as file:
             file.write_bytes(Span(unsafe_ptr=out_h.unsafe_ptr().unsafe_bitcast[UInt8](), length=ren.W * ren.H * 4))
+        var qh = ctx.enqueue_create_host_buffer[DType.float32](eng.NQ * eng.F)  # the final state, for the stand gate
+        ctx.enqueue_copy(qh, q_b)
+        ctx.synchronize()
+        with open(String(a[10]) + ".qpos", "w") as file:
+            file.write_bytes(Span(unsafe_ptr=qh.unsafe_ptr().unsafe_bitcast[UInt8](), length=eng.NQ * eng.F * 4))
         print(fr, "frames,", Float64(perf_counter_ns() - t0) / Float64(fr) / 1e6, "ms per frame (K", max(eng.K, 1), "steps + render)")
