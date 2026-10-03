@@ -12,8 +12,10 @@ Optional plastic.bin (int32: plastic edge group, then KC neuron ids) gives every
 per KC, initially 1, multiplying that KC's plastic-group edges; resident "reward" reads dopamine.bin
 (float32 per column) and scales the factor of every KC that spiked in the last sniff by 1 - d.
 Factors persist across sniffs (the learned state); without plastic.bin nothing changes.
-Optional factor.bin (float32 C x KMAX) sets the starting factors (a saved fly); resident "save"
-writes the current ones to factor.bin and prints "ok".
+Optional punish.bin (int32: a second plastic group, KC -> approach MBONs) adds a second factor
+plane at offset C x KMAX; dopamine.bin then holds 2 x C floats (reward, then punishment per column).
+Optional factor.bin (float32 P x C x KMAX, P planes) sets the starting factors (a saved fly);
+resident "save" writes the current ones to factor.bin and prints "ok".
 Optional stim_key.bin (int32 per stimulus entry) names the entry whose Poisson draws an entry uses
 (default itself), so columns of different weight variants can see the same input events.
 Optional cell groups: cgrp.bin (int32 group per neuron, -1 none) makes a one-shot run write sums.bin
@@ -52,9 +54,9 @@ comptime LS = row_major[S]()
 comptime LR = row_major[N + 1]()
 comptime LE = row_major[E]()
 comptime LSCALE = row_major[C * GROUPS]()
-comptime LF = row_major[C * KMAX]()
+comptime LF = row_major[2 * C * KMAX]()
 comptime LK = row_major[KMAX]()
-comptime LC = row_major[C]()
+comptime LC = row_major[2 * C]()
 comptime LRING = row_major[SLOTS * CAP]()
 comptime LSLOT = row_major[SLOTS + 1]()  # last entry counts overflowed spikes
 
@@ -106,7 +108,7 @@ def deliver(
     rfc: TileTensor[DType.int32, type_of(LS), MutAnyOrigin],
     ring: TileTensor[DType.int32, type_of(LRING), MutAnyOrigin],
     fill: TileTensor[DType.int32, type_of(LSLOT), MutAnyOrigin],
-    t: Int32, slot: Int32, groups: Int32, plastic: Int32,
+    t: Int32, slot: Int32, groups: Int32, plastic: Int32, punish: Int32,
 ):
     # LANES threads per spike stride over its out-edges; groups stride over the spikes. One thread
     # per spike serialised hub neurons' thousands of edges: deliver was 96% of a sniff.
@@ -127,6 +129,8 @@ def deliver(
                 var wt = weights[e] * scale[own + Int(group)]
                 if group == plastic:
                     wt *= factor[learned]
+                elif group == punish:
+                    wt *= factor[C * KMAX + learned]
                 _ = Atomic.fetch_add(g.ptr.unsafe_offset(j), wt)
 
 
@@ -191,7 +195,7 @@ def reward(
     kc: TileTensor[DType.int32, type_of(LK), MutAnyOrigin],
     factor: TileTensor[DType.float32, type_of(LF), MutAnyOrigin],
     dopamine: TileTensor[DType.float32, type_of(LC), MutAnyOrigin],
-    kcs: Int32,
+    kcs: Int32, planes: Int32,
 ):
     var k = block_idx.x * block_dim.x + thread_idx.x
     if k >= Int(kcs) * C:
@@ -199,7 +203,9 @@ def reward(
     var c = k // Int(kcs)
     var n = k % Int(kcs)
     if counts[c * N + Int(kc[n])] > 0:
-        factor[c * KMAX + n] = factor[c * KMAX + n] * (1.0 - dopamine[c])
+        for p in range(Int(planes)):
+            var f = p * C * KMAX + c * KMAX + n
+            factor[f] = factor[f] * (1.0 - dopamine[p * C + c])
 
 
 def load(path: String, size: Int) raises -> List[UInt8]:
@@ -245,6 +251,12 @@ def main() raises:
             raise Error("plastic.bin: group out of range or more than KMAX KCs")
         for n in range(kcs):
             rank[Int(words.unsafe_offset(n + 1)[])] = Int32(n)
+    var punish = Int32(-1)
+    if exists(work + "punish.bin"):
+        punish = load(work + "punish.bin", 1).unsafe_ptr().unsafe_bitcast[Int32]()[]
+        if plastic < 0 or punish < 0 or Int(punish) >= groups or punish == plastic:
+            raise Error("punish.bin: needs plastic.bin and a different group in range")
+    var planes = 2 if punish >= 0 else 1
     var stim_raw = load(work + "stim_index.bin", -1)
     var p_raw = load(work + "stim_p.bin", len(stim_raw) // 4)
     var windows_raw = load(work + "windows.bin", -1)
@@ -274,13 +286,14 @@ def main() raises:
     var grp_b = ctx.enqueue_create_buffer[DType.uint8](E)
     var scale_b = ctx.enqueue_create_buffer[DType.float32](C * GROUPS)
     var rank_b = ctx.enqueue_create_buffer[DType.int32](N + 1)
-    var factor_b = ctx.enqueue_create_buffer[DType.float32](C * KMAX)
+    var factor_b = ctx.enqueue_create_buffer[DType.float32](2 * C * KMAX)
     var kc_b = ctx.enqueue_create_buffer[DType.int32](KMAX)
-    var dopamine_b = ctx.enqueue_create_buffer[DType.float32](C)
+    var dopamine_b = ctx.enqueue_create_buffer[DType.float32](2 * C)
     ctx.enqueue_copy(rank_b, rank.unsafe_ptr())
     if exists(work + "factor.bin"):
-        var saved = load(work + "factor.bin", C * KMAX)
-        ctx.enqueue_copy(factor_b, saved.unsafe_ptr().unsafe_bitcast[Float32]())
+        factor_b.enqueue_fill(1.0)
+        var saved = load(work + "factor.bin", planes * C * KMAX)
+        ctx.enqueue_copy(factor_b.create_sub_buffer[DType.float32](0, planes * C * KMAX), saved.unsafe_ptr().unsafe_bitcast[Float32]())
         ctx.synchronize()  # saved is freed at the end of this block
     else:
         factor_b.enqueue_fill(1.0)
@@ -373,17 +386,17 @@ def main() raises:
             if line == "q":
                 break
             if line == "save":
-                var host = List[Float32](length=C * KMAX, fill=0)
-                ctx.enqueue_copy(host.unsafe_ptr(), factor_b)
+                var host = List[Float32](length=planes * C * KMAX, fill=0)
+                ctx.enqueue_copy(host.unsafe_ptr(), factor_b.create_sub_buffer[DType.float32](0, planes * C * KMAX))
                 ctx.synchronize()
                 with open(work + "factor.bin", "w") as f:
                     f.write_bytes(Span(unsafe_ptr=host.unsafe_ptr().unsafe_bitcast[UInt8](), length=len(host) * 4))
                 print("ok", flush=True)
                 continue
             if line == "reward":
-                var d = load(work + "dopamine.bin", C)
-                ctx.enqueue_copy(dopamine_b, d.unsafe_ptr().unsafe_bitcast[Float32]())
-                ctx.enqueue_function(step_reward, counts_t, kc_t, factor_t, dopamine_t, Int32(kcs),
+                var d = load(work + "dopamine.bin", planes * C)
+                ctx.enqueue_copy(dopamine_b.create_sub_buffer[DType.float32](0, planes * C), d.unsafe_ptr().unsafe_bitcast[Float32]())
+                ctx.enqueue_function(step_reward, counts_t, kc_t, factor_t, dopamine_t, Int32(kcs), Int32(planes),
                     grid_dim=max((kcs * C + BLOCK - 1) // BLOCK, 1), block_dim=BLOCK)
                 ctx.synchronize()
                 print("ok", flush=True)
@@ -405,7 +418,7 @@ def main() raises:
                 ctx.enqueue_function(step_integrate, u_t, g_t, last_t, rfc_t, counts_t, ring_t, fill_t,
                     k.unsafe_offset(0)[], k.unsafe_offset(1)[], k.unsafe_offset(2)[], k.unsafe_offset(3)[], Int32(t), slot, grid_dim=(S + BLOCK - 1) // BLOCK, block_dim=BLOCK)
                 ctx.enqueue_function(step_deliver, rows_t, cols_t, w_t, grp_t, scale_t, rank_t, factor_t, g_t, last_t, rfc_t, ring_t, fill_t,
-                    Int32(t), due, Int32(groups), plastic, grid_dim=DGRID, block_dim=BLOCK)
+                    Int32(t), due, Int32(groups), plastic, punish, grid_dim=DGRID, block_dim=BLOCK)
                 ctx.enqueue_function(step_kick, stim_t, key_t, p_t, u_t, last_t, fill_t, Int32(stim_count), seed + UInt32(sniff), Int32(t),
                     due, k.unsafe_offset(4)[], grid_dim=kick_grid, block_dim=BLOCK)
                 t += 1

@@ -95,7 +95,7 @@ class ShiuBrain:
         self.delay, self.refractory = round(T_DLY / dt), round(T_RFC / dt)
         self.stim = {}  # entry (column * n + neuron) -> Poisson probability per step
         self.key = {}  # entry -> entry whose Poisson draws it uses (common random numbers)
-        self.grp, self.scale, self.plastic_group = None, None, None
+        self.grp, self.scale, self.plastic_groups = None, None, []
         self.reset()
 
     def edge_groups(self, grp, scale):
@@ -104,29 +104,37 @@ class ShiuBrain:
         self.grp, self.scale = np.asarray(grp, np.uint8), np.asarray(scale, np.float32).reshape(self.flies, -1)
         assert len(self.grp) == len(self.col) and int(self.grp.max(initial=0)) < self.scale.shape[1] <= 256
 
-    def plastic(self, group, kcs):
+    def plastic(self, group, kcs, punish=None):
         """Learnable edges: every edge of edge group `group` (pre always one of `kcs`) is scaled by its
-        column's factor for that KC, initially 1, changed only by reward(); factors survive reset()."""
-        self.plastic_group, self.kcs = int(group), np.asarray(kcs, np.int64)
+        column's factor for that KC, initially 1, changed only by reward(); factors survive reset().
+        `punish` names a second group (KC -> approach MBONs) with its own factors, the second plane:
+        factor is (flies, P x KCs), plane p in columns p x KCs onward."""
+        self.plastic_groups, self.kcs = [int(group)] + ([] if punish is None else [int(punish)]), np.asarray(kcs, np.int64)
         self.rank = np.zeros(self.n, np.int64)
         self.rank[self.kcs] = np.arange(len(self.kcs))
-        self.factor = np.ones((self.flies, len(self.kcs)), np.float32)
+        self.factor = np.ones((self.flies, len(self.plastic_groups) * len(self.kcs)), np.float32)
 
-    def reward(self, dopamine):
-        """Scale the factor of every KC that spiked since the last reset by 1 - dopamine[column]."""
-        spiked = self.spikes[self.kcs].T > 0
-        self.factor[spiked] *= np.repeat(1 - np.asarray(dopamine, np.float32), spiked.sum(1))
+    def reward(self, dopamine, punishment=None):
+        """Scale the factor of every KC that spiked since the last reset by 1 - dopamine[column] (reward
+        plane) and by 1 - punishment[column] (punish plane)."""
+        spiked, k = self.spikes[self.kcs].T > 0, len(self.kcs)
+        for plane, d in enumerate([dopamine] + ([] if punishment is None else [punishment])):
+            f = self.factor[:, plane * k:(plane + 1) * k]
+            f[spiked] *= np.repeat(1 - np.asarray(d, np.float32), spiked.sum(1))
 
     def _write_groups(self, work):
-        for name in ('grp.bin', 'scale.bin', 'plastic.bin', 'factor.bin'):
+        for name in ('grp.bin', 'scale.bin', 'plastic.bin', 'punish.bin', 'factor.bin'):
             (work / name).unlink(missing_ok=True)
         if self.grp is not None:
             self.grp.tofile(work / 'grp.bin')
             self.scale.tofile(work / 'scale.bin')
-        if self.plastic_group is not None:
-            np.concatenate([[self.plastic_group], self.kcs]).astype(np.int32).tofile(work / 'plastic.bin')
-            padded = np.ones((self.flies, KMAX), np.float32)
-            padded[:, :len(self.kcs)] = self.factor
+        if self.plastic_groups:
+            np.concatenate([self.plastic_groups[:1], self.kcs]).astype(np.int32).tofile(work / 'plastic.bin')
+            if len(self.plastic_groups) > 1:
+                np.int32(self.plastic_groups[1:]).tofile(work / 'punish.bin')
+            P, k = len(self.plastic_groups), len(self.kcs)
+            padded = np.ones((P, self.flies, KMAX), np.float32)
+            padded[:, :, :k] = self.factor.reshape(self.flies, P, k).transpose(1, 0, 2)
             padded.tofile(work / 'factor.bin')
 
     def reset(self):
@@ -174,9 +182,9 @@ class ShiuBrain:
                 w = self.w[edges]
                 if self.grp is not None:
                     w = w * self.scale[np.repeat(column, end - start), self.grp[edges]]
-                if self.plastic_group is not None:
-                    learn = self.grp[edges] == self.plastic_group
-                    w[learn] *= self.factor[np.repeat(column, end - start)[learn], self.rank[np.repeat(pre, end - start)[learn]]]
+                for plane, group in enumerate(self.plastic_groups):
+                    learn = self.grp[edges] == group
+                    w[learn] *= self.factor[np.repeat(column, end - start)[learn], plane * len(self.kcs) + self.rank[np.repeat(pre, end - start)[learn]]]
                 self.g += np.bincount(target[keep], w[keep], minlength=self.g.size).astype(np.float32)
             self.ring[t % self.delay] = spike
             hit = entries[(uniform(self.seed, t, keys) < p) & (self.last[entries] != t)]
@@ -281,7 +289,8 @@ class ShiuLive(ShiuGPU):
     def factors(self):
         """The learned per-KC factors (flies, KCs), read back from the device."""
         self._command('save')
-        self.factor = np.fromfile(self.work / 'factor.bin', np.float32).reshape(self.flies, KMAX)[:, :len(self.kcs)].copy()
+        P, k = len(self.plastic_groups), len(self.kcs)
+        self.factor = np.fromfile(self.work / 'factor.bin', np.float32).reshape(P, self.flies, KMAX)[:, :, :k].transpose(1, 0, 2).reshape(self.flies, P * k).copy()
         return self.factor
 
     def _command(self, line):
@@ -290,9 +299,9 @@ class ShiuLive(ShiuGPU):
         if self.proc.stdout.readline().strip() != 'ok':
             raise RuntimeError(f'FAIL shiu_worker resident exited {self.proc.wait()}')
 
-    def reward(self, dopamine):
+    def reward(self, dopamine, punishment=None):
         """Device twin of ShiuBrain.reward for the last sniff; the factors stay on the device."""
-        np.asarray(dopamine, np.float32).tofile(self.work / 'dopamine.bin')
+        np.concatenate([dopamine] + ([] if punishment is None else [punishment])).astype(np.float32).tofile(self.work / 'dopamine.bin')
         self.proc.stdin.write('reward\n')
         self.proc.stdin.flush()
         if self.proc.stdout.readline().strip() != 'ok':
