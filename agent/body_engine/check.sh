@@ -6,8 +6,8 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 stage=${1:-kinematics}; M=.venv/bin/python; X=.work/agent/body_engine; fail=0
 if [ "$stage" = cube ]; then  # closed 40 mm cube of planes (floor, 4 walls, ceiling; 330 pairs), states on every face
-  C=$($M -c "from agent.body_engine.model import cube; print(cube('.work/agent/gpu-body-port/body-v2/body.xml'))")
-  $M -m agent.body_engine.model check $C $X/cube actuated 64 || { echo "FAIL cube"; fail=$((fail+1)); }
+  C=$($M -c "from agent.body_engine.model import cube; print(cube('${BODY:-.work/agent/gpu-body-port/body-v2/body.xml}'))")
+  $M -m agent.body_engine.model check $C $X/cube-$(basename ${BODY:-body.xml} .xml) actuated 64 || { echo "FAIL cube"; fail=$((fail+1)); }
   # the gate must fail when the bounding-sphere skip drops pairs that touch (rbound added instead of subtracted)
   ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo 's/(pos2 - pos1)).reduce_add() - mf\[pf + 12\] > margin/(pos2 - pos1)).reduce_add() + mf[pf + 12] > margin/' -- \
     $M -m agent.body_engine.model check $C $X/mutant actuated 64 || fail=$((fail+1))
@@ -29,7 +29,7 @@ if [ "$stage" = loop ]; then  # K steps per launch, state kept on the card. K=1 
   echo "PASS all loop checks"; exit 0
 fi
 B=${BODY:-.work/agent/gpu-body-port/body-v2/body.xml}  # BODY=path checks another MJCF (e.g. the spider from models/spider.py)
-$M -m agent.body_engine.model check $B $X/$(basename $B .xml) "$stage" 64 || { echo "FAIL $(basename $B .xml) $stage"; fail=$((fail+1)); }
+$M -m agent.body_engine.model check $B $X/body-$(basename $B .xml) "$stage" 64 || { echo "FAIL $(basename $B .xml) $stage"; fail=$((fail+1)); }
 if [ "$stage" = contact ] || [ "$stage" = actuated ]; then  # plane-mesh foot pairs; the spider test body has none
   echo "spider: no plane-mesh contact pairs or actuators, $stage stage is fly-only"
 else

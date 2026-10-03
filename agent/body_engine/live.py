@@ -8,7 +8,8 @@ check (under gpu-wait):
          100 frames is < 0.02 (settled). Control arm: the same fly with only the 6 feet colliding (FEET 'tarsus5',
          which sinks through the floor in MuJoCo too) must fail
   leak   10,000 streamed frames, verify_render_leak's sampler at 100 and 10,000: fds equal, VRAM not up, RSS < +1 MB
-watch: live.py watch [K] [cube]  -> mpv window (cube: inside the closed 40 mm cube of model.cube, walls drawn) (slow motion: the engine is ~140x slower than real time at one fly)
+watch: live.py watch [K] [cube] [spider]  -> mpv window (cube: inside the closed 40 mm cube of model.cube, walls
+       drawn; spider: the body from models/spider.py instead of the fly) (slow motion: the engine is ~140x slower than real time at one fly)
 
 usage: gpu-wait run --priority 90 --timeout 1800 -- .venv/bin/python -m agent.body_engine.live check
 """
@@ -29,7 +30,7 @@ W, H = 960, 540
 STATS = Path.home() / 'iTools/video/frame-stats/frame-stats'
 
 
-def prepare(out=OUT, pairs=FEET, mjcf=MJCF):
+def prepare(out=OUT, pairs=FEET, mjcf=MJCF, dist=DIST):
     """Engine + mesh files for one fly standing still: state from model.standing, servos holding its joint angles,
     adhesion on. Returns the camera args (eye, target, fovy) and the model."""
     out.mkdir(parents=True, exist_ok=True)
@@ -46,7 +47,7 @@ def prepare(out=OUT, pairs=FEET, mjcf=MJCF):
     mujoco.mj_forward(m, d)
     look = d.xpos[1]
     a, e = np.radians(90), np.radians(-20)
-    eye = look - DIST * np.array([np.cos(e) * np.cos(a), np.cos(e) * np.sin(a), np.sin(e)])
+    eye = look - dist * np.array([np.cos(e) * np.cos(a), np.cos(e) * np.sin(a), np.sin(e)])
     return [*map(str, eye), *map(str, look), str(m.vis.global_.fovy)], m
 
 
@@ -130,11 +131,15 @@ def main(cmd, *args):
     if cmd == 'watch':
         k = int(args[0]) if args else 10
         box = 40 if 'cube' in args else 0
-        out = OUT.parent / 'live-cube' if box else OUT
-        cam, m = prepare(out, mjcf=cube(MJCF, box) if box else MJCF)
-        if box:  # from inside a corner of the cube, looking at the fly
+        body = MJCF
+        if 'spider' in args:
+            from agent.body_engine.models.spider import build as spider
+            body = str(spider())
+        out = OUT.parent / ('live' + ('-cube' if box else '') + ('-spider' if 'spider' in args else ''))
+        cam, m = prepare(out, mjcf=cube(body, box) if box else body, dist=15.0 if 'spider' in args else DIST)
+        if box:  # from inside a corner of the cube, looking at the animal
             look = np.array(cam[3:6], float)
-            cam = [*map(str, look + np.array([12., -12., 8.])), *cam[3:]]
+            cam = [*map(str, look + np.array([12., -12., 8.]) * (1.6 if 'spider' in args else 1)), *cam[3:]]
         live = subprocess.Popen([str(build(out, m, k, box)), str(out) + '/', '0', *cam], stdout=subprocess.PIPE)
         subprocess.run(['mpv', '--demuxer=rawvideo', f'--demuxer-rawvideo-w={W}', f'--demuxer-rawvideo-h={H}',
                         '--demuxer-rawvideo-mp-format=rgba', '-'], stdin=live.stdout)
