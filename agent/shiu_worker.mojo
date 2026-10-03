@@ -12,6 +12,8 @@ Optional plastic.bin (int32: plastic edge group, then KC neuron ids) gives every
 per KC, initially 1, multiplying that KC's plastic-group edges; resident "reward" reads dopamine.bin
 (float32 per column) and scales the factor of every KC that spiked in the last sniff by 1 - d.
 Factors persist across sniffs (the learned state); without plastic.bin nothing changes.
+Optional factor.bin (float32 C x KMAX) sets the starting factors (a saved fly); resident "save"
+writes the current ones to factor.bin and prints "ok".
 Optional stim_key.bin (int32 per stimulus entry) names the entry whose Poisson draws an entry uses
 (default itself), so columns of different weight variants can see the same input events.
 Optional cell groups: cgrp.bin (int32 group per neuron, -1 none) makes a one-shot run write sums.bin
@@ -276,7 +278,12 @@ def main() raises:
     var kc_b = ctx.enqueue_create_buffer[DType.int32](KMAX)
     var dopamine_b = ctx.enqueue_create_buffer[DType.float32](C)
     ctx.enqueue_copy(rank_b, rank.unsafe_ptr())
-    factor_b.enqueue_fill(1.0)
+    if exists(work + "factor.bin"):
+        var saved = load(work + "factor.bin", C * KMAX)
+        ctx.enqueue_copy(factor_b, saved.unsafe_ptr().unsafe_bitcast[Float32]())
+        ctx.synchronize()  # saved is freed at the end of this block
+    else:
+        factor_b.enqueue_fill(1.0)
     if kcs > 0:
         ctx.enqueue_copy(kc_b.create_sub_buffer[DType.int32](0, kcs), plastic_raw.unsafe_ptr().unsafe_bitcast[Int32]().unsafe_offset(1))
     var u_b = ctx.enqueue_create_buffer[DType.float32](S)
@@ -365,6 +372,14 @@ def main() raises:
             var line = input()
             if line == "q":
                 break
+            if line == "save":
+                var host = List[Float32](length=C * KMAX, fill=0)
+                ctx.enqueue_copy(host.unsafe_ptr(), factor_b)
+                ctx.synchronize()
+                with open(work + "factor.bin", "w") as f:
+                    f.write_bytes(Span(unsafe_ptr=host.unsafe_ptr().unsafe_bitcast[UInt8](), length=len(host) * 4))
+                print("ok", flush=True)
+                continue
             if line == "reward":
                 var d = load(work + "dopamine.bin", C)
                 ctx.enqueue_copy(dopamine_b, d.unsafe_ptr().unsafe_bitcast[Float32]())

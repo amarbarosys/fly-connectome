@@ -30,6 +30,7 @@ import numpy as np
 V_TH, T_MBR, TAU, T_RFC, T_DLY, W_SYN, F_POI = 7.0, 20e-3, 5e-3, 2.2e-3, 1.8e-3, 0.275, 250
 ROOT = Path(__file__).resolve().parents[1]
 GRAPHS = ROOT / '.work/agent/shiu/graphs'
+KMAX = 8192  # plastic KCs per column, shiu_worker's SHIU_K
 KEY = 'MODULAR_DEVICE_CONTEXT_MEMORY_MANAGER_SIZE_PERCENT'
 
 
@@ -117,13 +118,16 @@ class ShiuBrain:
         self.factor[spiked] *= np.repeat(1 - np.asarray(dopamine, np.float32), spiked.sum(1))
 
     def _write_groups(self, work):
-        for name in ('grp.bin', 'scale.bin', 'plastic.bin'):
+        for name in ('grp.bin', 'scale.bin', 'plastic.bin', 'factor.bin'):
             (work / name).unlink(missing_ok=True)
         if self.grp is not None:
             self.grp.tofile(work / 'grp.bin')
             self.scale.tofile(work / 'scale.bin')
         if self.plastic_group is not None:
             np.concatenate([[self.plastic_group], self.kcs]).astype(np.int32).tofile(work / 'plastic.bin')
+            padded = np.ones((self.flies, KMAX), np.float32)
+            padded[:, :len(self.kcs)] = self.factor
+            padded.tofile(work / 'factor.bin')
 
     def reset(self):
         size = self.n * self.flies
@@ -239,10 +243,11 @@ class ShiuGPU(ShiuBrain):
         return np.fromfile(work / 'sums.bin', np.int32), got
 
 
-def worker_binary(n, edges, flies):
-    """shiu_worker built for this graph size and column count; rebuilt when the source is newer."""
-    source = ROOT / 'agent/shiu_worker.mojo'
-    binary = ROOT / f'.work/agent/shiu/build/shiu_worker_{n}_{edges}_c{flies}'
+def worker_binary(n, edges, flies, source=ROOT / 'agent/shiu_worker.mojo'):
+    """shiu_worker built for this graph size and column count; rebuilt when the source is newer.
+    Another source (a checkpoint's own kernel) builds beside itself."""
+    out = ROOT / '.work/agent/shiu/build' if source == ROOT / 'agent/shiu_worker.mojo' else source.parent / 'build'
+    binary = out / f'shiu_worker_{n}_{edges}_c{flies}'
     if not binary.is_file() or binary.stat().st_mtime < source.stat().st_mtime:
         binary.parent.mkdir(parents=True, exist_ok=True)
         subprocess.run([str(Path.home() / '.local/bin/mojo'), 'build', f'-DSHIU_N={n}', f'-DSHIU_E={edges}',
@@ -266,10 +271,24 @@ class ShiuLive(ShiuGPU):
         self.readout.tofile(self.work / 'readout.bin')
         self._write_groups(self.work)
         np.asarray([self.em, self.eg, self.c, V_TH, W_SYN * F_POI], np.float32).tofile(self.work / 'consts.bin')
-        self.proc = subprocess.Popen([str(worker_binary(self.n, len(self.col), self.flies)), str(self.graph) + '/',
+        self.proc = subprocess.Popen([str(worker_binary(self.n, len(self.col), self.flies, *self.source)), str(self.graph) + '/',
                                       str(self.work) + '/', str(self.seed), str(self.delay), str(self.refractory), 'resident'],
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1, env=worker_env(self.n, len(self.col), self.flies))
         return self
+
+    source = ()  # (path,) builds the worker from that kernel source instead of agent/
+
+    def factors(self):
+        """The learned per-KC factors (flies, KCs), read back from the device."""
+        self._command('save')
+        self.factor = np.fromfile(self.work / 'factor.bin', np.float32).reshape(self.flies, KMAX)[:, :len(self.kcs)].copy()
+        return self.factor
+
+    def _command(self, line):
+        self.proc.stdin.write(line + '\n')
+        self.proc.stdin.flush()
+        if self.proc.stdout.readline().strip() != 'ok':
+            raise RuntimeError(f'FAIL shiu_worker resident exited {self.proc.wait()}')
 
     def reward(self, dopamine):
         """Device twin of ShiuBrain.reward for the last sniff; the factors stay on the device."""
