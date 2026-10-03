@@ -36,6 +36,7 @@ def main(out):
     q, v = q[:1], v[:1]
     q.astype(np.float32).T.copy().tofile(out / 'qpos.bin')
     v.astype(np.float32).T.copy().tofile(out / 'qvel.bin')
+    np.zeros((m.nu, 1), np.float32).tofile(out / 'ctrl.bin')
     build('smooth.mojo', out / 'pose1', (out / 'sizes.txt').read_text().split() + ['-DFLIES=1', '-DSTAGE=1'])
     subprocess.run([str(out / 'pose1'), str(out) + '/'], check=True, capture_output=True)
     prows = (out / 'smooth.bin').stat().st_size // 4

@@ -44,6 +44,9 @@ STAGES['step'] = (5, 'mj_step', STAGES['rne'][2] + ('qH', 'qHDiagInv', 'qacc_eul
 # 'contact' (S2 probe): plane-mesh pairs whose mesh geom matches FEET, pyramidal cone, Newton solver, then the
 # implicit Euler step. States come from an actuated MuJoCo rollout (feet on the floor), not random poses.
 STAGES['contact'] = (6, 'mj_step', STAGES['step'][2] + ('ncon', 'qacc', 'qfrc_constraint'))
+# 'actuated' (S3): + mj_transmission (hinge/slide joints, adhesion bodies) and mj_fwdActuation (fixed gain, affine
+# or no bias, no activation dynamics), random controls, actuators on.
+STAGES['actuated'] = (7, 'mj_step', STAGES['contact'][2] + ('actuator_force', 'qfrc_actuator'))
 FEET = 'tarsus5'
 VSCALE = 10  # random qvel in +-10 per dof: velocity terms well above float32 noise; qpos moves ~1e-3 per fly step
 REL = 1e-5
@@ -109,15 +112,37 @@ def feet(m, regex):
     return ints, floats, sizes
 
 
-def export(mjcf, out, regex=None):
+def actuators(m):
+    """S3 tables: ints per actuator (transmission type, dof or body, ctrllimited, forcelimited, qpos address or -1),
+    floats per actuator
+    (gain, bias 0-2, ctrlrange 2, forcerange 2, gear)."""
+    T = mujoco.mjtTrn
+    for i in range(m.nu):
+        joint = m.actuator_trntype[i] == T.mjTRN_JOINT and m.jnt_type[m.actuator_trnid[i, 0]] in (mujoco.mjtJoint.mjJNT_HINGE, mujoco.mjtJoint.mjJNT_SLIDE)
+        if (not (joint or m.actuator_trntype[i] == T.mjTRN_BODY) or m.actuator_gaintype[i] != mujoco.mjtGain.mjGAIN_FIXED
+                or m.actuator_biastype[i] not in (mujoco.mjtBias.mjBIAS_NONE, mujoco.mjtBias.mjBIAS_AFFINE)
+                or m.actuator_dyntype[i] != mujoco.mjtDyn.mjDYN_NONE or m.actuator_actearly[i] or m.actuator_delay[i]):
+            raise SystemExit(f'FAIL export: actuator {i} is not a ported kind (hinge/slide joint or adhesion body, fixed gain, no dynamics)')
+    ints = np.array([[m.actuator_trntype[i], m.jnt_dofadr[m.actuator_trnid[i, 0]] if m.actuator_trntype[i] == T.mjTRN_JOINT else m.actuator_trnid[i, 0],
+                      m.actuator_ctrllimited[i], m.actuator_forcelimited[i],
+                      m.jnt_qposadr[m.actuator_trnid[i, 0]] if m.actuator_trntype[i] == T.mjTRN_JOINT else -1] for i in range(m.nu)])
+    bias = np.where((m.actuator_biastype == mujoco.mjtBias.mjBIAS_AFFINE)[:, None], m.actuator_biasprm[:, :3], 0)
+    floats = np.concatenate([m.actuator_gainprm[:, :1], bias, m.actuator_ctrlrange, m.actuator_forcerange, m.actuator_gear[:, :1]], axis=1)
+    return ints.ravel(), floats.ravel()
+
+
+def export(mjcf, out, regex=None, act=False):
     m, out = load(mjcf), Path(out)
     out.mkdir(parents=True, exist_ok=True)
     ints = [getattr(m, f).ravel() for f in INTS]
     floats = [np.ravel(getattr(m.opt, f[4:]) if f.startswith('opt.') else getattr(m, f)) for f in FLOATS]
-    sizes = {'NBODY': m.nbody, 'NJNT': m.njnt, 'NQ': m.nq, 'NGEOM': m.ngeom, 'NV': m.nv, 'NC': m.nC}
+    sizes = {'NBODY': m.nbody, 'NJNT': m.njnt, 'NQ': m.nq, 'NGEOM': m.ngeom, 'NV': m.nv, 'NC': m.nC, 'NU': m.nu}
     if regex:
         ci, cf, cs = feet(m, regex)
         ints, floats, sizes = ints + [ci], floats + [cf], sizes | cs
+    if act:
+        ai, af = actuators(m)
+        ints, floats = ints + [ai], floats + [af]
     np.concatenate(ints).astype(np.int32).tofile(out / 'mi.bin')
     np.concatenate(floats).astype(np.float32).tofile(out / 'mf.bin')
     (out / 'sizes.txt').write_text(' '.join(f'-D{k}={v}' for k, v in sizes.items()) + '\n')
@@ -178,30 +203,41 @@ def standing(m, count, seed=0):
 
 
 def check(mjcf, out, stage, count=64):
-    m, out = export(mjcf, out, FEET if stage == 'contact' else None), Path(out)
+    feet = stage in ('contact', 'actuated')
+    m, out = export(mjcf, out, FEET if feet else None, stage == 'actuated'), Path(out)
     number, fn, fields = STAGES[stage]
-    q, v = standing(m, count) if stage == 'contact' else (states(m, count), velocities(m, count, scale=VSCALE))
-    if stage == 'contact':  # only the exported foot pairs collide; actuators and noslip (not ported) off
+    q, v = standing(m, count) if feet else (states(m, count), velocities(m, count, scale=VSCALE))
+    u = np.zeros((count, m.nu))
+    if stage == 'actuated':  # servos within 0.3 rad of the current joint angle, adhesion anywhere in [0, 1]
+        rng = np.random.default_rng(2)
+        for i in range(m.nu):
+            if m.actuator_trntype[i] == mujoco.mjtTrn.mjTRN_JOINT:
+                u[:, i] = q[:, m.jnt_qposadr[m.actuator_trnid[i, 0]]] + rng.uniform(-0.3, 0.3, count)
+            else:
+                u[:, i] = rng.uniform(0, 1, count)
+    u.astype(np.float32).T.copy().tofile(out / 'ctrl.bin')  # (nu, flies); zeros below the actuated stage
+    if feet:  # only the exported foot pairs collide; noslip (not ported) off; actuators off below S3
         s = load(mjcf)
-        s.opt.disableflags |= mujoco.mjtDisableBit.mjDSBL_ACTUATION
+        if stage == 'contact':
+            s.opt.disableflags |= mujoco.mjtDisableBit.mjDSBL_ACTUATION
         s.opt.noslip_iterations = 0
         import re
         for i in range(s.npair):
             if not re.search(FEET, mujoco.mj_id2name(s, mujoco.mjtObj.mjOBJ_GEOM, s.pair_geom2[i])):
                 s.pair_margin[i] = -1e10
-        want = reference(s, fn, tuple(f for f in fields if f not in ('qacc_euler', 'qpos_next')) + ('qpos', 'qvel'), q, v)
+        want = reference(s, fn, tuple(f for f in fields if f not in ('qacc_euler', 'qpos_next')) + ('qpos', 'qvel'), q, v, u)
         want['qacc_euler'] = (want.pop('qvel') - v) / m.opt.timestep
         want['qpos_next'] = want.pop('qpos')
         d = mujoco.MjData(s)  # ncon: contacts that carry constraint rows (MuJoCo also lists excluded ones)
         for n in range(count):
-            d.qpos[:], d.qvel[:] = q[n], v[n]
+            d.qpos[:], d.qvel[:], d.ctrl[:] = q[n], v[n], u[n]
             mujoco.mj_forward(s, d)
             want['ncon'][n] = sum(c.efc_address >= 0 for c in d.contact[:d.ncon])
         # float32 floor: MuJoCo on the float32-rounded state (the engine's actual input) vs MuJoCo on the float64 state.
         # A contact force at solref 2e-4 moves 2.4e-5 of its scale from input rounding alone, so a field's bar is
         # max(REL, FLOOR_X x its floor); every field still has to beat 1e-5 unless float32 inputs cannot.
         r32 = lambda x: x.astype(np.float32).astype(np.float64)
-        alt = reference(s, fn, ('qacc', 'qfrc_constraint'), r32(q), r32(v))
+        alt = reference(s, fn, ('qacc', 'qfrc_constraint'), r32(q), r32(v), r32(u))
         floor = {f: float(np.abs(alt[f] - want[f]).max() / np.abs(want[f]).max()) for f in alt}
         print('float32 input floor: ' + ', '.join(f'{f} {e:.2e}' for f, e in floor.items()))
     elif stage == 'step':

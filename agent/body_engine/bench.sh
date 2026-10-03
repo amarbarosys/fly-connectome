@@ -14,12 +14,17 @@ for n in 1024 16384 65536; do
 import sys, numpy as np
 from agent.body_engine.model import export, standing, FEET, VSCALE
 from mj_oracle import states, velocities
-m = export('$mjcf', '$d', FEET if $stage == 6 else None)
+m = export('$mjcf', '$d', FEET if $stage >= 6 else None, $stage >= 7)
 import os
-if not os.path.exists('$d/qvel.bin'):  # states are seeded: reuse them, the export is always fresh
-    q, v = standing(m, $n) if $stage == 6 else (states(m, $n), velocities(m, $n, scale=VSCALE))
+if not os.path.exists('$d/ctrl.bin'):  # states are seeded: reuse them, the export is always fresh
+    q, v = standing(m, $n) if $stage >= 6 else (states(m, $n), velocities(m, $n, scale=VSCALE))
     q.astype(np.float32).T.copy().tofile('$d/qpos.bin')
-    v.astype(np.float32).T.copy().tofile('$d/qvel.bin')" >/dev/null || { echo "FAIL export $n"; fail=$((fail+1)); continue; }
+    v.astype(np.float32).T.copy().tofile('$d/qvel.bin')
+    u = np.zeros((m.nu, $n))  # actuated bench: servos hold the state's own joint angles, adhesion on
+    if $stage >= 7:
+        for i in range(m.nu):
+            u[i] = q[:, m.jnt_qposadr[m.actuator_trnid[i, 0]]] if m.actuator_trntype[i] == 0 else 1.0
+    u.astype(np.float32).tofile('$d/ctrl.bin')" >/dev/null || { echo "FAIL export $n"; fail=$((fail+1)); continue; }
     ~/.local/bin/mojo build $(cat "$d/sizes.txt") -DFLIES=$n -DSTAGE=$stage agent/body_engine/smooth.mojo -o "$d/step" 2>&1 | grep -v warning | grep . && { echo "FAIL build $n"; fail=$((fail+1)); } || true
   else
     "$d/step" "$d/" || { echo "FAIL run $n"; fail=$((fail+1)); }

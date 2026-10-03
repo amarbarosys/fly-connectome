@@ -6,8 +6,8 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 stage=${1:-kinematics}; M=.venv/bin/python; X=.work/agent/body_engine; fail=0
 $M -m agent.body_engine.model check .work/agent/gpu-body-port/body-v2/body.xml $X/fly "$stage" 64 || { echo "FAIL fly $stage"; fail=$((fail+1)); }
-if [ "$stage" = contact ]; then  # S2 probe: plane-mesh foot pairs; the spider test body has none
-  echo "spider: no plane-mesh contact pairs, contact stage is fly-only"
+if [ "$stage" = contact ] || [ "$stage" = actuated ]; then  # plane-mesh foot pairs; the spider test body has none
+  echo "spider: no plane-mesh contact pairs or actuators, $stage stage is fly-only"
 else
   $M -m agent.body_engine.model check agent/body_engine/models/spider_test.xml $X/spider "$stage" 64 || { echo "FAIL spider $stage"; fail=$((fail+1)); }
 fi
@@ -34,6 +34,10 @@ fi
 if [ "$stage" = contact ]; then  # the gate must fail with the contact spring pushing the wrong way
   ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo 's/- K \* imp \* (dist - imargin)/+ K * imp * (dist - imargin)/' -- \
     $M -m agent.body_engine.model check .work/agent/gpu-body-port/body-v2/body.xml $X/mutant contact 64 || fail=$((fail+1))
+fi
+if [ "$stage" = actuated ]; then  # the gate must fail with the servo bias (-kp q) dropped
+  ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo 's/mf\[af\] \* c + mf\[af + 1\] + mf\[af + 2\] \* length/mf[af] * c + mf[af + 1]/' -- \
+    $M -m agent.body_engine.model check .work/agent/gpu-body-port/body-v2/body.xml $X/mutant actuated 64 || fail=$((fail+1))
 fi
 [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
 echo "PASS all $stage checks"

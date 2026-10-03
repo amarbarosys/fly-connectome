@@ -4,6 +4,8 @@ STAGE 2: + mj_comPos (subtree_com, cinert, cdof) + mj_crb (sparse M in MuJoCo's 
 STAGE 3: + mj_factorM (mj_factorI: sparse L'DL of M in place, qLD, qLDiagInv).
 STAGE 4: + mj_comVel (cvel, cdof_dot), mj_passive (joint springs, dof dampers), mj_rne without qacc (qfrc_bias).
 STAGE 5: + mj_Euler, contact-free: implicit dof damping (qH = M + h diag(damping)), qacc, mj_integratePos.
+STAGE 6: + plane-mesh foot contacts, pyramidal cone, mj_solPrimal (Newton); STAGE 7: + actuators (joint servos,
+adhesion bodies) from ctrl.bin (NU x FLIES).
 
 Model arrays come from agent/body_engine/model.py export (mi.bin int32, mf.bin float32, field order
 INTS / FLOATS there); sizes are -D constants, so any MJCF body (fly, spider) builds its own binary.
@@ -35,6 +37,7 @@ comptime NC = get_defined_int["NC"]()
 comptime F = get_defined_int["FLIES"]()
 comptime STAGE = get_defined_int["STAGE", 1]()
 comptime STOP = get_defined_int["STOP", 99]()
+comptime STEPTOL = Float32(get_defined_int["STEPTOL_E7", 10]()) * 1e-7  # Newton stops when a step moves qacc less than this
 comptime LSFLOOR = Float32(get_defined_int["LSFLOOR_E7", 10]()) * 1e-7  # line-search slope floor, relative to alpha = 0  # phase timing (phases.sh): return after phase STOP
 # mi.bin: body_parentid, body_jntadr, body_jntnum, jnt_type, jnt_qposadr, geom_bodyid
 comptime PARENT = 0
@@ -64,7 +67,9 @@ comptime CFIRST = CPH + 8 * NCP
 comptime CEDGE = CFIRST + NHV
 comptime CCHAIN = CEDGE + NHE
 comptime CITER = CCHAIN + NCH
-comptime NI = CITER + 2 if STAGE >= 6 else NI0
+comptime NU = get_defined_int["NU", 0]()
+comptime CACT = CITER + 2  # STAGE 7 (model.py actuators): per actuator trntype, dof or body, ctrllimited, forcelimited, qpos address
+comptime NI = CACT + 5 * NU if STAGE >= 7 else (CITER + 2 if STAGE >= 6 else NI0)
 # mf.bin: body_pos, body_quat, jnt_pos, jnt_axis, qpos0, body_ipos, body_iquat, geom_pos, geom_quat
 comptime BPOS = 0
 comptime BQUAT = 3 * NB
@@ -89,7 +94,8 @@ comptime NFL0 = TSTEP + 1
 comptime CPF = NFL0  # STAGE 6: per pair margin, gap, friction 2, solref 2, solimp 5, invweight, rbound; hull verts; 3 opts
 comptime CVERT = CPF + 13 * NCP
 comptime COPT = CVERT + 3 * NHV
-comptime NFL = COPT + 3 if STAGE >= 6 else NFL0
+comptime CACF = COPT + 3  # STAGE 7: per actuator gain, bias 0-2, ctrlrange 2, forcerange 2, gear
+comptime NFL = CACF + 9 * NU if STAGE >= 7 else (COPT + 3 if STAGE >= 6 else NFL0)
 # smooth.bin rows (per animal): xpos, xquat, xipos of bodies 1.., geom_xpos, xanchor, xaxis
 comptime OXQ = 3 * (NB - 1)
 comptime OXI = 7 * (NB - 1)
@@ -114,7 +120,9 @@ comptime OQPOS = OQACC + NV
 comptime ONCON = OQPOS + NQ  # STAGE 6: ncon, qacc (constrained), qfrc_constraint
 comptime OCQACC = ONCON + 1
 comptime OQFC = OCQACC + NV
-comptime NOUT = OSC if STAGE == 1 else (OM + NC if STAGE == 2 else (OLDI + NV if STAGE == 3 else (OQH if STAGE == 4 else (OQPOS + NQ if STAGE == 5 else OQFC + NV))))
+comptime OAF = OQFC + NV  # STAGE 7: actuator_force, qfrc_actuator
+comptime OQACT = OAF + NU
+comptime NOUT = OSC if STAGE == 1 else (OM + NC if STAGE == 2 else (OLDI + NV if STAGE == 3 else (OQH if STAGE == 4 else (OQPOS + NQ if STAGE == 5 else (OQFC + NV if STAGE == 6 else OQACT + NV)))))
 comptime OCACC = NOUT  # scratch rows after the output: cacc, cfrc_body per body (world included)
 comptime OCFRC = OCACC + 6 * NB
 comptime NSLOT = 3 * NCP  # up to 3 contacts per plane-mesh pair (MuJoCo maxplanemesh)
@@ -173,6 +181,8 @@ comptime TI = TileTensor[DType.int32, type_of(LI), MutAnyOrigin]
 comptime TF = TileTensor[DType.float32, type_of(LF), MutAnyOrigin]
 comptime TQ = TileTensor[DType.float32, type_of(LQ), MutAnyOrigin]
 comptime TV = TileTensor[DType.float32, type_of(LV), MutAnyOrigin]
+comptime LU = row_major[max(NU, 1) * F]()
+comptime TU = TileTensor[DType.float32, type_of(LU), MutAnyOrigin]
 comptime TO = TileTensor[DType.float32, type_of(LO), MutAnyOrigin]
 
 
@@ -529,6 +539,57 @@ def contacts(mi: TI, mf: TF, qvel: TV, res: TO, f: Int):
             res[(OVALID + 3 * p + c) * F + f] = 0
 
 
+def actuation(mi: TI, mf: TF, qpos: TQ, qvel: TV, ctrl: TU, res: TO, f: Int):
+    """MuJoCo mj_transmission + mj_fwdActuation for the ported kinds. Joint (hinge, slide): moment = gear on the
+    joint's dof, length = qpos gear. Body (adhesion): moment = -(mean contact normal Jacobian) over the body's
+    contacts (pyramid rows weighted 0.5 / (dim - 1), which sums to the normal row), length 0. Force = gain ctrl
+    (ctrl clamped to ctrlrange) + bias0 + bias1 length + bias2 velocity, clamped to forcerange; qfrc = moment' force."""
+    for v in range(NV):
+        res[(OQACT + v) * F + f] = 0
+    for u in range(NU):
+        var a = CACT + 5 * u
+        var af = CACF + 9 * u
+        var c = ctrl[u * F + f]
+        if mi[a + 2] != 0:
+            c = min(max(c, mf[af + 4]), mf[af + 5])
+        var gear = mf[af + 8]
+        if mi[a] == 0:  # joint
+            var dof = Int(mi[a + 1])
+            var length = qpos[Int(mi[a + 4]) * F + f] * gear
+            var vel = gear * qvel[dof * F + f]
+            var force = mf[af] * c + mf[af + 1] + mf[af + 2] * length + mf[af + 3] * vel
+            if mi[a + 3] != 0:
+                force = min(max(force, mf[af + 6]), mf[af + 7])
+            res[(OAF + u) * F + f] = force
+            res[(OQACT + dof) * F + f] += gear * force
+        else:  # body: adhesion over the body's contacts
+            var body = Int(mi[a + 1])
+            var counter = 0
+            for p in range(NCP):
+                if Int(mi[CPH + 8 * p + 2]) != body:
+                    continue
+                for sl in range(3):
+                    counter += 1 if get(res, f, OVALID + 3 * p + sl) != 0 else 0
+            var force = mf[af] * c + mf[af + 1]  # length and velocity of a body transmission are 0
+            if mi[a + 3] != 0:
+                force = min(max(force, mf[af + 6]), mf[af + 7])
+            res[(OAF + u) * F + f] = force
+            if counter == 0:
+                continue
+            var scale = -force / Float32(counter)
+            for p in range(NCP):
+                if Int(mi[CPH + 8 * p + 2]) != body:
+                    continue
+                var nch = Int(mi[CPH + 8 * p + 6]); var choff = Int(mi[CPH + 8 * p + 7])
+                for sl in range(3):
+                    if get(res, f, OVALID + 3 * p + sl) == 0:
+                        continue
+                    var jadr = OJ + 12 * choff + 4 * sl * nch
+                    for k in range(nch):  # normal row = mean of the pyramid's first pair
+                        var jn = 0.5 * (get(res, f, jadr + k) + get(res, f, jadr + nch + k))
+                        res[(OQACT + Int(mi[CCHAIN + choff + k])) * F + f] += scale * jn
+
+
 def update(mi: TI, res: TO, f: Int) -> Float32:
     """MuJoCo PrimalUpdateConstraint, pyramidal rows: state = jar < 0, force = -D jar, qfrc_constraint = J' force,
     returns cost = sum 0.5 D jar^2 over active rows + Gauss."""
@@ -702,6 +763,8 @@ def newton(mi: TI, mf: TF, res: TO, f: Int):
     active set changes (MuJoCo updates it incrementally; same matrix)."""
     for v in range(NV):
         res[(OQSM + v) * F + f] = get(res, f, OPAS + v) - get(res, f, OBIAS + v)
+        comptime if STAGE >= 7:
+            res[(OQSM + v) * F + f] += get(res, f, OQACT + v)
         res[(OQACCS + v) * F + f] = get(res, f, OQSM + v)
     solveLD(mi, res, f, OQACCS, OLD, OLDI)
     var scale: Float32 = 0
@@ -751,9 +814,15 @@ def newton(mi: TI, mf: TF, res: TO, f: Int):
         if scale * (oldcost - cost) < tol or scale * sqrt(gn) < tol:
             break
         # float32 stop: MuJoCo's 1e-8 tests sit below float32 noise, so a few animals ran all 100 iterations and
-        # held their wave. A full Newton step that leaves the active set unchanged lands on the minimum of that
-        # quadratic piece, which is the optimum.
-        if not changed and abs(alpha - 1) < 1e-3:
+        # held their wave. Stop once a step moves qacc by under 1e-6 of its size (max norms): further steps only
+        # move it within float32 rounding. (Stopping when a full step kept the active set was wrong: with stiff
+        # contacts H is ill-conditioned, so one float32 Newton step is not exact.)
+        var dq: Float32 = 0
+        var qa: Float32 = 0
+        for v in range(NV):
+            dq = max(dq, abs(alpha * get(res, f, OSRCH + v)))
+            qa = max(qa, abs(get(res, f, OCQACC + v)))
+        if dq <= STEPTOL * qa:
             break
 
 
@@ -770,6 +839,8 @@ def euler(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int):
         res[(OQACC + v) * F + f] = get(res, f, OPAS + v) - get(res, f, OBIAS + v)
         comptime if STAGE >= 6:
             res[(OQACC + v) * F + f] += get(res, f, OQFC + v)
+        comptime if STAGE >= 7:
+            res[(OQACC + v) * F + f] += get(res, f, OQACT + v)
     solveLD(mi, res, f, OQACC, OQH, OQHI)
     for a in range(NQ):
         res[(OQPOS + a) * F + f] = qpos[a * F + f]
@@ -796,7 +867,7 @@ def euler(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int):
             res[(OQPOS + a) * F + f] += h * (qvel[da * F + f] + h * get(res, f, OQACC + da))
 
 
-def smooth(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO):
+def smooth(mi: TI, mf: TF, qpos: TQ, qvel: TV, ctrl: TU, res: TO):
     var f = block_idx.x * block_dim.x + thread_idx.x
     if f >= F:
         return
@@ -963,6 +1034,8 @@ def smooth(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO):
         return
     comptime if STAGE >= 6:
         contacts(mi, mf, qvel, res, f)
+        comptime if STAGE >= 7:
+            actuation(mi, mf, qpos, qvel, ctrl, res, f)
         comptime if STOP == 5:
             return
         newton(mi, mf, res, f)
@@ -987,22 +1060,25 @@ def main() raises:
     var mf_b = ctx.enqueue_create_buffer[DType.float32](NFL)
     var q_b = ctx.enqueue_create_buffer[DType.float32](NQ * F)
     var v_b = ctx.enqueue_create_buffer[DType.float32](NV * F)
+    var u_b = ctx.enqueue_create_buffer[DType.float32](max(NU, 1) * F)
     var o_b = ctx.enqueue_create_buffer[DType.float32](NROW * F)
     var mi = load(dir + "mi.bin", NI)
     var mf = load(dir + "mf.bin", NFL)
     var qp = load(dir + "qpos.bin", NQ * F)
     var qv = load(dir + "qvel.bin", NV * F)
+    var uv = load(dir + "ctrl.bin", NU * F) if NU > 0 else List[UInt8](length=4 * F, fill=0)
     ctx.enqueue_copy(mi_b, mi.unsafe_ptr().unsafe_bitcast[Int32]())
     ctx.enqueue_copy(mf_b, mf.unsafe_ptr().unsafe_bitcast[Float32]())
     ctx.enqueue_copy(q_b, qp.unsafe_ptr().unsafe_bitcast[Float32]())
     ctx.enqueue_copy(v_b, qv.unsafe_ptr().unsafe_bitcast[Float32]())
+    ctx.enqueue_copy(u_b, uv.unsafe_ptr().unsafe_bitcast[Float32]())
     var kernel = ctx.compile_function[smooth]()
     var grid = (F + 63) // 64
-    ctx.enqueue_function(kernel, TileTensor(mi_b, LI), TileTensor(mf_b, LF), TileTensor(q_b, LQ), TileTensor(v_b, LV), TileTensor(o_b, LO), grid_dim=grid, block_dim=64)
+    ctx.enqueue_function(kernel, TileTensor(mi_b, LI), TileTensor(mf_b, LF), TileTensor(q_b, LQ), TileTensor(v_b, LV), TileTensor(u_b, LU), TileTensor(o_b, LO), grid_dim=grid, block_dim=64)
     ctx.synchronize()
     var t0 = perf_counter_ns()
     for _ in range(100):
-        ctx.enqueue_function(kernel, TileTensor(mi_b, LI), TileTensor(mf_b, LF), TileTensor(q_b, LQ), TileTensor(v_b, LV), TileTensor(o_b, LO), grid_dim=grid, block_dim=64)
+        ctx.enqueue_function(kernel, TileTensor(mi_b, LI), TileTensor(mf_b, LF), TileTensor(q_b, LQ), TileTensor(v_b, LV), TileTensor(u_b, LU), TileTensor(o_b, LO), grid_dim=grid, block_dim=64)
     ctx.synchronize()
     var us = Float64(perf_counter_ns() - t0) / 100 / 1000
     var host = List[Float32](length=NROW * F, fill=0)
