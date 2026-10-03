@@ -452,6 +452,10 @@ def contacts(mi: TI, mf: TF, qvel: TV, res: TO, f: Int):
         var q2 = mul(b2[1], m4(mf, GQUAT + 4 * g2))
         var pos2 = V3(get(res, f, OG + 3 * g2), get(res, f, OG + 3 * g2 + 1), get(res, f, OG + 3 * g2 + 2), 0)
         var normal = rot(q1, basis(2))
+        if (normal * (pos2 - pos1)).reduce_add() - mf[pf + 12] > margin:  # bounding sphere clear of the plane: the
+            for c in range(3):                                          # support vertex would be too (no contact)
+                res[(OVALID + 3 * p + c) * F + f] = 0
+            continue
         var locdir = rot(Q4(q2[0], -q2[1], -q2[2], -q2[3]), -normal)
         var best = 0
         var bdot: Float32 = -3.4e38
@@ -870,12 +874,41 @@ def euler(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int):
             res[(OQPOS + a) * F + f] += h * (qvel[da * F + f] + h * get(res, f, OQACC + da))
 
 
+def origin(mi: TI, qpos: TQ, f: Int) -> V3:
+    """Floating origin: the position of the first free joint (the animal's root), else 0. The step computes every
+    position relative to it, so differences of nearby points stay exact in float32 however far the animal is from
+    the world origin (at 40 mm a float32 position resolves 4e-6 mm, enough to move cinert by 1e-5)."""
+    for i in range(1, NB):
+        var ja = Int(mi[JNTADR + i])
+        if Int(mi[JNTNUM + i]) >= 1 and mi[JTYPE + ja] == 0:
+            var a = Int(mi[QADR + ja])
+            return V3(qpos[a * F + f], qpos[(a + 1) * F + f], qpos[(a + 2) * F + f], 0)
+    return V3(0)
+
+
+def absolute(res: TO, f: Int, o: V3):
+    """Back to world positions, once per step, in the rows a later reader takes as world: xpos, xipos, geom_xpos,
+    xanchor, subtree_com (STAGE >= 2)."""
+    for i in range(NB - 1):
+        put(res, f, 3 * i, V3(get(res, f, 3 * i), get(res, f, 3 * i + 1), get(res, f, 3 * i + 2), 0) + o, 3)
+        put(res, f, OXI + 3 * i, V3(get(res, f, OXI + 3 * i), get(res, f, OXI + 3 * i + 1), get(res, f, OXI + 3 * i + 2), 0) + o, 3)
+    for g in range(NG):
+        put(res, f, OG + 3 * g, V3(get(res, f, OG + 3 * g), get(res, f, OG + 3 * g + 1), get(res, f, OG + 3 * g + 2), 0) + o, 3)
+    for j in range(NJ):
+        put(res, f, OA + 3 * j, V3(get(res, f, OA + 3 * j), get(res, f, OA + 3 * j + 1), get(res, f, OA + 3 * j + 2), 0) + o, 3)
+    comptime if STAGE >= 2:
+        for i in range(NB):
+            put(res, f, OSC + 3 * i, V3(get(res, f, OSC + 3 * i), get(res, f, OSC + 3 * i + 1), get(res, f, OSC + 3 * i + 2), 0) + o, 3)
+
+
 def smooth(mi: TI, mf: TF, qpos: TQ, qvel: TV, ctrl: TU, res: TO):
     var f = block_idx.x * block_dim.x + thread_idx.x
     if f >= F:
         return
     for _ in range(max(K, 1)):
-        step(mi, mf, qpos, qvel, ctrl, res, f)
+        var o = origin(mi, qpos, f)
+        step(mi, mf, qpos, qvel, ctrl, res, f, o)
+        absolute(res, f, o)
         comptime if K > 0:  # mj_Euler's write-back: qvel += h qacc, qpos = integrated qpos
             for v in range(NV):
                 qvel[v * F + f] += mf[TSTEP] * get(res, f, OQACC + v)
@@ -883,7 +916,7 @@ def smooth(mi: TI, mf: TF, qpos: TQ, qvel: TV, ctrl: TU, res: TO):
                 qpos[a * F + f] = get(res, f, OQPOS + a)
 
 
-def step(mi: TI, mf: TF, qpos: TQ, qvel: TV, ctrl: TU, res: TO, f: Int):
+def step(mi: TI, mf: TF, qpos: TQ, qvel: TV, ctrl: TU, res: TO, f: Int, o: V3):
 
     for i in range(1, NB):
         var ja = Int(mi[JNTADR + i])
@@ -892,14 +925,14 @@ def step(mi: TI, mf: TF, qpos: TQ, qvel: TV, ctrl: TU, res: TO, f: Int):
         var xquat: Q4
         if jn == 1 and mi[JTYPE + ja] == 0:  # free joint: pose straight from qpos
             var a = Int(mi[QADR + ja])
-            xpos = V3(qpos[a * F + f], qpos[(a + 1) * F + f], qpos[(a + 2) * F + f], 0)
+            xpos = V3(qpos[a * F + f], qpos[(a + 1) * F + f], qpos[(a + 2) * F + f], 0) - o
             xquat = unit(Q4(qpos[(a + 3) * F + f], qpos[(a + 4) * F + f], qpos[(a + 5) * F + f], qpos[(a + 6) * F + f]))
             put(res, f, OA + 3 * ja, xpos, 3)
             put(res, f, OX + 3 * ja, m3(mf, JAXIS + 3 * ja), 3)
         else:
             var pid = Int(mi[PARENT + i])
             var p = body(res, f, pid)
-            xpos = rot(p[1], m3(mf, BPOS + 3 * i)) + p[0] if pid else m3(mf, BPOS + 3 * i)
+            xpos = rot(p[1], m3(mf, BPOS + 3 * i)) + p[0] if pid else m3(mf, BPOS + 3 * i) - o
             xquat = mul(p[1], m4(mf, BQUAT + 4 * i)) if pid else m4(mf, BQUAT + 4 * i)
             for j in range(ja, ja + jn):
                 var a = Int(mi[QADR + j])
@@ -926,7 +959,7 @@ def step(mi: TI, mf: TF, qpos: TQ, qvel: TV, ctrl: TU, res: TO, f: Int):
         put(res, f, OXI + 3 * (i - 1), rot(xquat, m3(mf, IPOS + 3 * i)) + xpos, 3)
     for g in range(NG):
         var b = body(res, f, Int(mi[GBODY + g]))
-        put(res, f, OG + 3 * g, rot(b[1], m3(mf, GPOS + 3 * g)) + b[0], 3)
+        put(res, f, OG + 3 * g, rot(b[1], m3(mf, GPOS + 3 * g)) + b[0] - (o if mi[GBODY + g] == 0 else V3(0)), 3)
     comptime if STOP == 1:
         return
     comptime if STAGE >= 2:
