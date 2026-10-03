@@ -22,7 +22,7 @@ import numpy as np
 
 from agent import maps
 from agent.fly_checkpoint import pack
-from agent.learning_loop import NOISE, STEP, STEPS, TRIALS, WINDOW, odour_valence, setup
+from agent.learning_loop import NOISE, RESNIFF, STEP, STEPS, TRIALS, WINDOW, odour_valence, setup
 from agent.neural_connectome import ROOT
 from agent.paired_significance import _exact_sign_flip
 from agent.shiu import ShiuLive
@@ -52,7 +52,7 @@ def main(map_name='tmaze'):
         pos, head = maps.starts(m, sign[:PAIRS], rng)
         pos, head = np.tile(pos, (3, 1)), np.tile(head, 3)
         tumble = np.tile(rng.uniform(-np.pi, np.pi, (STEPS + 1, PAIRS)), (1, 3))
-        touch, bites, since, sniffs = np.zeros(flies), np.zeros(flies), np.full(flies, ESCAPE + 1), 2
+        touch, bites, since, sniffs, stale = np.zeros(flies), np.zeros(flies), np.full(flies, ESCAPE + 1), 2, False
         valence = odour_valence(live, only, len(approach), flies)
         gap = lambda: np.where(trap, np.linalg.norm(pos[:, None] - sources[..., :2], axis=2), np.inf).min(1)
         for t in range(STEPS):
@@ -71,7 +71,9 @@ def main(map_name='tmaze'):
             rel = np.where((arm == 1) & ~hit & (since <= ESCAPE) & (gap() > before), RELIEF, 0).astype(np.float32)
             if pun.any() or rel.any():
                 live.reward(rel, pun)
-                valence, sniffs = odour_valence(live, only, len(approach), flies), sniffs + 2
+                stale = True
+            if stale and t % RESNIFF == RESNIFF - 1:
+                valence, sniffs, stale = odour_valence(live, only, len(approach), flies), sniffs + 2, False
         probes.append(odour_valence(live, only, len(approach), flies).T)
         contacts.append(touch)
         food.append(bites)

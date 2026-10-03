@@ -4,9 +4,11 @@ Graph: ALLN inhibition x LN (no flood), KC -> MBON x GAIN, KC -> avoid-MBON edge
 factor per KC per fly, agent/verify_plastic.py). Every step the fly sniffs (food and decoy ORNs at
 HZ x the map's concentration, strongest = HZ) and reads the valence index (approach - avoid) /
 (approach + avoid) of the labelled MBONs (agent/mb_valence.py) at 100 ms. The fly sniffs each odour
-alone (odour_valence) at the start of a trial and after every step that changed its factors, never
-otherwise: the valence of a mixture is taken as the concentration-weighted sum, which costs about 2
-sniffs per learning event instead of one per step. It steers by tropotaxis (maps.steer: two antennae,
+alone (odour_valence) at the start of a trial and at most every RESNIFF steps after its factors
+changed (learning itself applies at once; the walker sees it up to RESNIFF steps late): the valence of
+a mixture is taken as the concentration-weighted sum. Re-sniffing after every learning step cost 150
+to 160 sniffs per trial in the pain loop (some fly is punished nearly every step), more than the 100
+of the old walker. It steers by tropotaxis (maps.steer: two antennae,
 turn toward the side whose odours are worth more), with a small random turn per step. The first
 walker (keep heading while the mixture's valence rises, else tumble) let learning change valence
 (pure-odour probes, agent/pain_loop.py, c869304) without changing behaviour. A bite releases dopamine LR x hunger;
@@ -32,7 +34,7 @@ from agent.verify_shiu import _reference_graph
 
 FOOD, DECOY = ODORS6[1], ODORS6[0]
 LN, GAIN, HZ, SEED = 12, 4, 200., 91
-PAIRS, STEPS, TRIALS, STEP, LR, BITE, WINDOW, NOISE = 48, 100, 6, .15, .5, .3, 1000, .2
+PAIRS, STEPS, TRIALS, STEP, LR, BITE, WINDOW, NOISE, RESNIFF = 48, 100, 6, .15, .5, .3, 1000, .2, 10
 
 
 def setup():
@@ -88,7 +90,7 @@ def main(map_name='tmaze'):
         pos, head = maps.starts(m, sign[:PAIRS], rng)
         pos, head = np.tile(pos, (2, 1)), np.tile(head, 2)
         tumble = np.tile(rng.uniform(-np.pi, np.pi, (STEPS + 1, PAIRS)), (1, 2))
-        bites, sniffs = np.zeros((flies, 2)), 2
+        bites, sniffs, stale = np.zeros((flies, 2)), 2, False
         valence = odour_valence(live, only, len(approach), flies)
         for t in range(STEPS):
             head = maps.steer(m, pos, head, sources, sign, valence) + NOISE * tumble[t]
@@ -100,7 +102,9 @@ def main(map_name='tmaze'):
             fed = bite[:, 0] > 0
             if (fed & learner).any():
                 live.reward(np.where(fed & learner, LR * hunger, 0).astype(np.float32))
-                valence, sniffs = odour_valence(live, only, len(approach), flies), sniffs + 2
+                stale = True
+            if stale and t % RESNIFF == RESNIFF - 1:
+                valence, sniffs, stale = odour_valence(live, only, len(approach), flies), sniffs + 2, False
             hunger = np.where(fed, np.maximum(0, hunger - BITE), hunger)
         scores.append(bites[:, 0] - bites[:, 1])
         print(f"trial {trial}: learners {scores[-1][learner].mean():+.2f}  twins {scores[-1][~learner].mean():+.2f}  "
