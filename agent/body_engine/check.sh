@@ -6,7 +6,11 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 stage=${1:-kinematics}; M=.venv/bin/python; X=.work/agent/body_engine; fail=0
 $M -m agent.body_engine.model check .work/agent/gpu-body-port/body-v2/body.xml $X/fly "$stage" 64 || { echo "FAIL fly $stage"; fail=$((fail+1)); }
-$M -m agent.body_engine.model check agent/body_engine/models/spider_test.xml $X/spider "$stage" 64 || { echo "FAIL spider $stage"; fail=$((fail+1)); }
+if [ "$stage" = contact ]; then  # S2 probe: plane-mesh foot pairs; the spider test body has none
+  echo "spider: no plane-mesh contact pairs, contact stage is fly-only"
+else
+  $M -m agent.body_engine.model check agent/body_engine/models/spider_test.xml $X/spider "$stage" 64 || { echo "FAIL spider $stage"; fail=$((fail+1)); }
+fi
 if [ "$stage" = kinematics ]; then  # the gate must fail with the hinge angle's sign flipped
   ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo 's/var h = 0.5 \* (qpos/var h = -0.5 * (qpos/' -- \
     $M -m agent.body_engine.model check .work/agent/gpu-body-port/body-v2/body.xml $X/mutant kinematics 64 || fail=$((fail+1))
@@ -26,6 +30,10 @@ fi
 if [ "$stage" = step ]; then  # the gate must fail with the body-frame angular velocity integrated as world-frame
   ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo 's/mul(q, Q4(cos(half), axis\[0\] \* s, axis\[1\] \* s, axis\[2\] \* s))/mul(Q4(cos(half), axis[0] * s, axis[1] * s, axis[2] * s), q)/' -- \
     $M -m agent.body_engine.model check .work/agent/gpu-body-port/body-v2/body.xml $X/mutant step 64 || fail=$((fail+1))
+fi
+if [ "$stage" = contact ]; then  # the gate must fail with the contact spring pushing the wrong way
+  ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo 's/- K \* imp \* (dist - imargin)/+ K * imp * (dist - imargin)/' -- \
+    $M -m agent.body_engine.model check .work/agent/gpu-body-port/body-v2/body.xml $X/mutant contact 64 || fail=$((fail+1))
 fi
 [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
 echo "PASS all $stage checks"

@@ -40,8 +40,13 @@ STAGES = {  # name: (STAGE number in smooth.mojo, MuJoCo functions run in order,
 # 'step': one mj_step with contacts, constraints and actuators off (S1 is contact-free): mj_Euler with implicit
 # dof damping. qacc_euler = (qvel after - qvel) / dt and qpos_next are derived from MuJoCo's own step.
 STAGES['step'] = (5, 'mj_step', STAGES['rne'][2] + ('qH', 'qHDiagInv', 'qacc_euler', 'qpos_next'))
+# 'contact' (S2 probe): plane-mesh pairs whose mesh geom matches FEET, pyramidal cone, Newton solver, then the
+# implicit Euler step. States come from an actuated MuJoCo rollout (feet on the floor), not random poses.
+STAGES['contact'] = (6, 'mj_step', STAGES['step'][2] + ('ncon', 'qacc', 'qfrc_constraint'))
+FEET = 'tarsus5'
 VSCALE = 10  # random qvel in +-10 per dof: velocity terms well above float32 noise; qpos moves ~1e-3 per fly step
 REL = 1e-5
+FLOOR_X = 3  # contact stage: bar = max(REL, 3 x the field's float32 input floor), see check()
 WORLD_FIRST = ('xpos', 'xquat', 'xipos', 'cinert', 'crb', 'cvel')  # body-indexed fields whose row 0 is the world
 ENGINE = Path(__file__).parent
 
@@ -57,22 +62,112 @@ def load(mjcf):
     return m
 
 
-def export(mjcf, out):
+def feet(m, regex):
+    """Contact pairs (plane geom1, mesh geom2 named by regex): ints, floats and -D sizes for smooth.mojo STAGE 6.
+
+    ints   per pair: plane geom, mesh geom, mesh body, hull vertex count, hull vertex offset, edge-address offset,
+           chain length, chain offset (8); then every hull vertex's first edge (absolute, into the edge list), the
+           edge lists (hull-local vertex ids, -1 ends a vertex), the dof chains (ancestor dofs of the body, ascending)
+           and opt.iterations, opt.ls_iterations
+    floats per pair: margin, gap, friction 0-1, solref 2, solimp 5, invweight0 translation (both bodies), rbound (13);
+           then hull vertices in the geom frame; then opt.impratio, opt.tolerance, opt.ls_tolerance
+    """
+    import re
+    if m.opt.cone != mujoco.mjtCone.mjCONE_PYRAMIDAL or (m.geom_contype & m.geom_conaffinity).any():
+        raise SystemExit('FAIL export: contacts need the pyramidal cone and explicit pairs only')
+    pairs = [i for i in range(m.npair) if m.geom_type[m.pair_geom1[i]] == mujoco.mjtGeom.mjGEOM_PLANE
+             and m.geom_type[m.pair_geom2[i]] == mujoco.mjtGeom.mjGEOM_MESH and re.search(regex, mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_GEOM, m.pair_geom2[i]))]
+    if any(m.pair_dim[i] != 3 for i in pairs):
+        raise SystemExit('FAIL export: only condim 3 contacts are ported')
+    head, first, edges, chains, fl, verts = [], [], [], [], [], []
+    for i in pairs:
+        g1, g2 = m.pair_geom1[i], m.pair_geom2[i]
+        mesh, b = m.geom_dataid[g2], m.geom_bodyid[g2]
+        ga = m.mesh_graphadr[mesh]
+        nv = m.mesh_graph[ga]
+        edgeadr = m.mesh_graph[ga + 2:ga + 2 + nv]
+        gid = m.mesh_graph[ga + 2 + nv:ga + 2 + 2 * nv]
+        local = m.mesh_graph[ga + 2 + 2 * nv:]
+        local = local[:edgeadr.max() + list(local[edgeadr.max():]).index(-1) + 1]  # through the last vertex's -1
+        chain, bb = [], b
+        while bb > 0:
+            chain = list(range(m.body_dofadr[bb], m.body_dofadr[bb] + m.body_dofnum[bb])) + chain
+            bb = m.body_parentid[bb]
+        if any(m.M_rownnz[c] != k + 1 for k, c in enumerate(chain)) or m.pair_solimp[i][4] != int(m.pair_solimp[i][4]):
+            raise SystemExit('FAIL export: a foot dof chain is not its own M row pattern, or solimp power is not whole')
+        head += [g1, g2, b, nv, len(verts) // 3, len(first), len(chain), len(chains)]
+        first += list(len(edges) + edgeadr)
+        edges += list(local)
+        chains += chain
+        verts += list(m.mesh_vert[m.mesh_vertadr[mesh] + gid].ravel())
+        fl += [m.pair_margin[i], m.pair_gap[i], *m.pair_friction[i][:2], *m.pair_solref[i], *m.pair_solimp[i],
+               m.body_invweight0[m.geom_bodyid[g1], 0] + m.body_invweight0[b, 0], m.geom_rbound[g2]]
+    ints = np.array(head + first + edges + chains + [m.opt.iterations, m.opt.ls_iterations])
+    floats = np.array(fl + verts + [m.opt.impratio, m.opt.tolerance, m.opt.ls_tolerance])
+    sizes = {'NCP': len(pairs), 'NHV': len(verts) // 3, 'NHE': len(edges), 'NCH': len(chains)}
+    return ints, floats, sizes
+
+
+def export(mjcf, out, regex=None):
     m, out = load(mjcf), Path(out)
     out.mkdir(parents=True, exist_ok=True)
-    np.concatenate([getattr(m, f).ravel() for f in INTS]).astype(np.int32).tofile(out / 'mi.bin')
-    np.concatenate([np.ravel(getattr(m.opt, f[4:]) if f.startswith('opt.') else getattr(m, f)) for f in FLOATS]).astype(np.float32).tofile(out / 'mf.bin')
+    ints = [getattr(m, f).ravel() for f in INTS]
+    floats = [np.ravel(getattr(m.opt, f[4:]) if f.startswith('opt.') else getattr(m, f)) for f in FLOATS]
     sizes = {'NBODY': m.nbody, 'NJNT': m.njnt, 'NQ': m.nq, 'NGEOM': m.ngeom, 'NV': m.nv, 'NC': m.nC}
+    if regex:
+        ci, cf, cs = feet(m, regex)
+        ints, floats, sizes = ints + [ci], floats + [cf], sizes | cs
+    np.concatenate(ints).astype(np.int32).tofile(out / 'mi.bin')
+    np.concatenate(floats).astype(np.float32).tofile(out / 'mf.bin')
     (out / 'sizes.txt').write_text(' '.join(f'-D{k}={v}' for k, v in sizes.items()) + '\n')
     print(f'{mjcf}: {sizes} -> {out}')
     return m
 
 
+def standing(m, count, seed=0):
+    """(qpos, qvel) of count states from actuated rollouts of the full model, adhesion on, one state every 2 ms after
+    0.2 s of settling: half standing still (all 6 feet down), half with servos jittered +-0.2 rad every 50 ms
+    (1 to 5 feet down)."""
+    rng, q, v = np.random.default_rng(seed), [], []
+    for jitter, n in ((0.0, count // 2), (0.2, count - count // 2)):
+        d = mujoco.MjData(m)
+        for k in range(2000 + 20 * n):
+            if k % 500 == 0:
+                d.ctrl[:] = np.where(m.actuator_trntype == mujoco.mjtTrn.mjTRN_BODY, 1.0, rng.uniform(-jitter, jitter, m.nu))
+            mujoco.mj_step(m, d)
+            if k >= 2000 and k % 20 == 0:
+                q.append(d.qpos.copy()); v.append(d.qvel.copy())
+    return np.array(q), np.array(v)
+
+
 def check(mjcf, out, stage, count=64):
-    m, out = export(mjcf, out), Path(out)
+    m, out = export(mjcf, out, FEET if stage == 'contact' else None), Path(out)
     number, fn, fields = STAGES[stage]
-    q, v = states(m, count), velocities(m, count, scale=VSCALE)
-    if stage == 'step':
+    q, v = standing(m, count) if stage == 'contact' else (states(m, count), velocities(m, count, scale=VSCALE))
+    if stage == 'contact':  # only the exported foot pairs collide; actuators and noslip (not ported) off
+        s = load(mjcf)
+        s.opt.disableflags |= mujoco.mjtDisableBit.mjDSBL_ACTUATION
+        s.opt.noslip_iterations = 0
+        import re
+        for i in range(s.npair):
+            if not re.search(FEET, mujoco.mj_id2name(s, mujoco.mjtObj.mjOBJ_GEOM, s.pair_geom2[i])):
+                s.pair_margin[i] = -1e10
+        want = reference(s, fn, tuple(f for f in fields if f not in ('qacc_euler', 'qpos_next')) + ('qpos', 'qvel'), q, v)
+        want['qacc_euler'] = (want.pop('qvel') - v) / m.opt.timestep
+        want['qpos_next'] = want.pop('qpos')
+        d = mujoco.MjData(s)  # ncon: contacts that carry constraint rows (MuJoCo also lists excluded ones)
+        for n in range(count):
+            d.qpos[:], d.qvel[:] = q[n], v[n]
+            mujoco.mj_forward(s, d)
+            want['ncon'][n] = sum(c.efc_address >= 0 for c in d.contact[:d.ncon])
+        # float32 floor: MuJoCo on the float32-rounded state (the engine's actual input) vs MuJoCo on the float64 state.
+        # A contact force at solref 2e-4 moves 2.4e-5 of its scale from input rounding alone, so a field's bar is
+        # max(REL, FLOOR_X x its floor); every field still has to beat 1e-5 unless float32 inputs cannot.
+        r32 = lambda x: x.astype(np.float32).astype(np.float64)
+        alt = reference(s, fn, ('qacc', 'qfrc_constraint'), r32(q), r32(v))
+        floor = {f: float(np.abs(alt[f] - want[f]).max() / np.abs(want[f]).max()) for f in alt}
+        print('float32 input floor: ' + ', '.join(f'{f} {e:.2e}' for f, e in floor.items()))
+    elif stage == 'step':
         s = load(mjcf)
         s.opt.disableflags |= mujoco.mjtDisableBit.mjDSBL_CONTACT | mujoco.mjtDisableBit.mjDSBL_CONSTRAINT | mujoco.mjtDisableBit.mjDSBL_ACTUATION
         want = reference(s, fn, fields[:-2] + ('qpos', 'qvel'), q, v)
@@ -92,11 +187,13 @@ def check(mjcf, out, stage, count=64):
     if rows.shape[1] != sum(sizes):
         raise SystemExit(f'FAIL {stage}: engine wrote {rows.shape[1]} values per fly, MuJoCo {sum(sizes)}')
     got = np.split(rows, np.cumsum(sizes)[:-1], axis=1)
-    bad = compare({f: (want[f].reshape(count, -1), g) for f, g in zip(fields, got)}, REL)
+    floor = locals().get('floor', {})
+    bad = [b for f, g in zip(fields, got) for b in compare({f: (want[f].reshape(count, -1), g)}, max(REL, FLOOR_X * floor.get(f, 0)))]
     if bad:
         print(f'FAIL {len(bad)}/{len(fields)} {stage} fields: {" ".join(bad)}')
         sys.exit(1)
-    print(f'PASS {stage}: {len(fields)} fields x {count} random states within {REL:g}')
+    lifted = ', '.join(f'{f} {FLOOR_X * e:.1e}' for f, e in floor.items() if FLOOR_X * e > REL)
+    print(f'PASS {stage}: {len(fields)} fields x {count} states within {REL:g}' + (f' (float32-floor bars: {lifted})' if lifted else ''))
 
 
 if __name__ == '__main__':
