@@ -157,7 +157,9 @@ comptime ODIAG = OHNI + NV  # Newton iterations, line-search evaluations (printe
 comptime OFRC = ODIAG + 2  # noslip: per-row force, z = L^-T J' f, two rows' w = L^-T J'
 comptime OZ = OFRC + NEFC
 comptime OW = OZ + NV
-comptime NROW = OW + 2 * NV if STAGE >= 6 else (OCFRC + 6 * NB if STAGE >= 4 else NOUT)
+comptime OWC = OW + 2 * NV  # noslip per step: w of every valid row (laid out as J), then per row pair A 00 01 11, base 0 1
+comptime OAC = OWC + NJE
+comptime NROW = OAC + 10 * NSLOT if STAGE >= 6 else (OCFRC + 6 * NB if STAGE >= 4 else NOUT)
 comptime LI = row_major[NI]()
 comptime LF = row_major[NFL]()
 comptime LQ = row_major[NQ * F]()
@@ -940,6 +942,29 @@ def noslip(mi: TI, mf: TF, res: TO, f: Int):
         var x_i = get(res, f, OZ + i)
         for adr in range(start, start + Int(mi[MNNZ + i]) - 1):
             res[(OZ + Int(mi[MCOL + adr])) * F + f] -= get(res, f, OLD + adr) * x_i
+    for p in range(NCP):  # w, A and J qacc_smooth - aref are fixed during the sweeps: once per step
+        var nch = Int(mi[CPH + 11 * p + 6]); var choff = Int(mi[CPH + 11 * p + 7])
+        for sl in range(nslot(mi, p)):
+            if get(res, f, OVALID + sbase(mi, p) + sl) == 0:
+                continue
+            for t in range(2):
+                var r0 = 4 * (sbase(mi, p) + sl) + 2 * t
+                var jo = jbase(mi, p) + (4 * sl + 2 * t) * nch
+                ltsolve(mi, res, f, OW, OJ + jo, nch, choff)
+                ltsolve(mi, res, f, OW + NV, OJ + jo + nch, nch, choff)
+                var a00: Float32 = 0; var a01: Float32 = 0; var a11: Float32 = 0
+                for c in range(nch):
+                    var i = Int(mi[CCHAIN + choff + c])
+                    var w0 = get(res, f, OW + i); var w1 = get(res, f, OW + NV + i); var di = get(res, f, OLDI + i)
+                    a00 += w0 * w0 * di; a01 += w0 * w1 * di; a11 += w1 * w1 * di
+                    res[(OWC + jo + c) * F + f] = w0
+                    res[(OWC + jo + nch + c) * F + f] = w1
+                var ac = OAC + 5 * (r0 // 2)
+                res[ac * F + f] = max(a00, Float32(1e-10))
+                res[(ac + 1) * F + f] = a01
+                res[(ac + 2) * F + f] = max(a11, Float32(1e-10))
+                res[(ac + 3) * F + f] = jdot(mi, res, f, OJ + jo, nch, choff, OQACCS) - get(res, f, OAREF + r0)
+                res[(ac + 4) * F + f] = jdot(mi, res, f, OJ + jo + nch, nch, choff, OQACCS) - get(res, f, OAREF + r0 + 1)
     var scale = 1 / (mf[COPT + 4] * Float32(NV))
     for it in range(nit):
         var improvement: Float32 = imp0 if it == 0 else 0
@@ -950,18 +975,14 @@ def noslip(mi: TI, mf: TF, res: TO, f: Int):
                     continue
                 for t in range(2):
                     var r0 = 4 * (sbase(mi, p) + sl) + 2 * t
-                    var j0 = OJ + jbase(mi, p) + (4 * sl + 2 * t) * nch
-                    ltsolve(mi, res, f, OW, j0, nch, choff)
-                    ltsolve(mi, res, f, OW + NV, j0 + nch, nch, choff)
-                    var a00: Float32 = 0; var a01: Float32 = 0; var a11: Float32 = 0
-                    var res0 = jdot(mi, res, f, j0, nch, choff, OQACCS) - get(res, f, OAREF + r0)
-                    var res1 = jdot(mi, res, f, j0 + nch, nch, choff, OQACCS) - get(res, f, OAREF + r0 + 1)
+                    var w = OWC + jbase(mi, p) + (4 * sl + 2 * t) * nch
+                    var ac = OAC + 5 * (r0 // 2)
+                    var a00 = get(res, f, ac); var a01 = get(res, f, ac + 1); var a11 = get(res, f, ac + 2)
+                    var res0 = get(res, f, ac + 3); var res1 = get(res, f, ac + 4)
                     for c in range(nch):
                         var i = Int(mi[CCHAIN + choff + c])
-                        var w0 = get(res, f, OW + i) * get(res, f, OLDI + i); var w1 = get(res, f, OW + NV + i)
-                        a00 += w0 * get(res, f, OW + i); a01 += w0 * w1; a11 += w1 * w1 * get(res, f, OLDI + i)
-                        res0 += w0 * get(res, f, OZ + i); res1 += w1 * get(res, f, OLDI + i) * get(res, f, OZ + i)
-                    a00 = max(a00, Float32(1e-10)); a11 = max(a11, Float32(1e-10))
+                        var zd = get(res, f, OZ + i) * get(res, f, OLDI + i)
+                        res0 += get(res, f, w + c) * zd; res1 += get(res, f, w + nch + c) * zd
                     var o0 = get(res, f, OFRC + r0); var o1 = get(res, f, OFRC + r0 + 1)
                     var mid = 0.5 * (o0 + o1)
                     var k1 = a00 + a11 - 2 * a01
@@ -985,7 +1006,7 @@ def noslip(mi: TI, mf: TF, res: TO, f: Int):
                     res[(OFRC + r0 + 1) * F + f] = n1
                     for c in range(nch):
                         var i = Int(mi[CCHAIN + choff + c])
-                        res[(OZ + i) * F + f] += get(res, f, OW + i) * d0 + get(res, f, OW + NV + i) * d1
+                        res[(OZ + i) * F + f] += get(res, f, w + c) * d0 + get(res, f, w + nch + c) * d1
         if improvement * scale < mf[COPT + 3]:
             break
     for v in range(NV):  # mj_dualFinish as a change on Newton's result: qfrc_constraint += J' (f - f_newton), qacc +=
