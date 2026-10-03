@@ -94,6 +94,7 @@ class ShiuBrain:
         self.stim = {}  # entry (column * n + neuron) -> Poisson probability per step
         self.key = {}  # entry -> entry whose Poisson draws it uses (common random numbers)
         self.grp, self.scale, self.plastic_groups = None, None, []
+        self.modp = None
         self.reset()
 
     def edge_groups(self, grp, scale):
@@ -101,6 +102,30 @@ class ShiuBrain:
         grp uint8 per edge, scale float32 (flies, G); unset = every weight unchanged."""
         self.grp, self.scale = np.asarray(grp, np.uint8), np.asarray(scale, np.float32).reshape(self.flies, -1)
         assert len(self.grp) == len(self.col) and int(self.grp.max(initial=0)) < self.scale.shape[1] <= 256
+
+    def modulate(self, plane, tau, k):
+        """Slow neuromodulation: edges of group g with plane[g] >= 0 (a dopamine, octopamine or serotonin pre)
+        add to the target's level m[plane] instead of its conductance; m decays with tau[plane] seconds and the
+        target integrates g x c x max(0, 1 + sum k m). plane: int per edge group (len G, -1 = fast); <= 3 planes."""
+        assert self.grp is not None and len(plane) == self.scale.shape[1] and max(plane) < 3
+        self.modp = np.asarray(plane, np.int32)
+        P = int(self.modp.max()) + 1
+        self.mdecay = np.float32(np.exp(-self.dt / np.asarray(tau, np.float64)))[:P].astype(np.float32)
+        self.mk = np.asarray(k, np.float32)[:P]
+        self.reset()
+
+    def modulators(self, nt, tau=(0.5, 1.0, 2.0), k=(0.0, 0.0, 0.0)):
+        """Route every edge whose pre neuron's predicted transmitter (FlyWire top_nt, experiment.cells().nt) is
+        dopamine, octopamine or serotonin into planes 0, 1, 2 (three new edge groups, scale 1, appended after the
+        existing ones), then modulate(). tau in seconds per plane, k the gain per unit level."""
+        pre = np.repeat(np.arange(self.n), np.diff(self.row))
+        q = np.select([nt == 'dopamine', nt == 'octopamine', nt == 'serotonin'], [0, 1, 2], -1)[pre]
+        grp = np.zeros(len(self.col), np.uint8) if self.grp is None else self.grp
+        scale = np.ones((self.flies, 1), np.float32) if self.scale is None else self.scale
+        G = scale.shape[1]
+        self.edge_groups(np.where(q >= 0, G + q, grp), np.hstack([scale, np.ones((self.flies, 3), np.float32)]))
+        self.modulate(np.r_[np.full(G, -1), 0, 1, 2], tau, k)
+        return q
 
     def plastic(self, group, kcs, punish=None):
         """Learnable edges: every edge of edge group `group` (pre always one of `kcs`) is scaled by its
@@ -121,8 +146,13 @@ class ShiuBrain:
             f[spiked] *= np.repeat(1 - np.asarray(d, np.float32), spiked.sum(1))
 
     def _write_groups(self, work):
-        for name in ('grp.bin', 'scale.bin', 'plastic.bin', 'punish.bin', 'factor.bin'):
+        for name in ('grp.bin', 'scale.bin', 'plastic.bin', 'punish.bin', 'factor.bin', 'modp.bin', 'modk.bin'):
             (work / name).unlink(missing_ok=True)
+        if self.modp is not None:
+            self.modp.tofile(work / 'modp.bin')
+            mk = np.zeros(6, np.float32)
+            mk[:len(self.mk)], mk[3:3 + len(self.mk)] = self.mdecay, self.mk
+            mk.tofile(work / 'modk.bin')
         if self.grp is not None:
             self.grp.tofile(work / 'grp.bin')
             self.scale.tofile(work / 'scale.bin')
@@ -141,6 +171,7 @@ class ShiuBrain:
         self.last = np.full(size, -10**9, np.int64)
         self.ring = [np.zeros(0, np.int64)] * self.delay
         self.t, self.counts = 0, np.zeros(size, np.int32)
+        self.m = np.zeros((0 if self.modp is None else len(self.mk), size), np.float32)
 
     def stimulate(self, cells, rate, fly=None, key=None):
         """Poisson input at `rate` Hz on `cells` (all flies unless one is named); with `key`, the
@@ -165,7 +196,15 @@ class ShiuBrain:
         for _ in range(steps):
             t = self.t
             moving = t - 1 - self.last >= refractory
-            self.u = np.where(moving, self.u * self.em + self.g * self.c, self.u)
+            if len(self.m):  # the worker's order: gain from the levels before this step's decay
+                acc = np.zeros(self.u.size, np.float32)
+                for q in range(len(self.m)):
+                    acc += self.mk[q] * self.m[q]
+                    self.m[q] *= self.mdecay[q]
+                gain = np.maximum(np.float32(1) + acc, np.float32(0))
+                self.u = np.where(moving, self.u * self.em + self.g * self.c * gain, self.u)
+            else:
+                self.u = np.where(moving, self.u * self.em + self.g * self.c, self.u)
             self.g = np.where(moving, self.g * self.eg, self.g)
             spike = np.flatnonzero((t - self.last >= refractory) & (self.u > V_TH))
             self.u[spike], self.g[spike], self.last[spike] = 0, 0, t
@@ -183,6 +222,11 @@ class ShiuBrain:
                 for plane, group in enumerate(self.plastic_groups):
                     learn = self.grp[edges] == group
                     w[learn] *= self.factor[np.repeat(column, end - start)[learn], plane * len(self.kcs) + self.rank[np.repeat(pre, end - start)[learn]]]
+                if len(self.m):  # modulatory edges feed the slow levels (every arrival, refractory or not)
+                    q = self.modp[self.grp[edges]]
+                    for plane in range(len(self.m)):
+                        self.m[plane] += np.bincount(target[q == plane], w[q == plane], minlength=self.g.size).astype(np.float32)
+                    keep &= q < 0
                 self.g += np.bincount(target[keep], w[keep], minlength=self.g.size).astype(np.float32)
             self.ring[t % self.delay] = spike
             hit = entries[(uniform(self.seed, t, keys) < p) & (self.last[entries] != t)]

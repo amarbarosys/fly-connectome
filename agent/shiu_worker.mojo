@@ -25,7 +25,10 @@ cells in readout.bin when that file is there.
 resident: the graph stays on the device and each stdin line "sniff" resets the state, rereads
 stim_p.bin, runs to the last window and writes counts at every window for the entries in
 readout.bin only (gather.bin, int32 windows x R), then prints "ok"; "q" ends. Sniff k uses
-seed + k, so repeated sniffs draw fresh Poisson events. FLY_RECORD=path appends every neuron's count at every
+seed + k, so repeated sniffs draw fresh Poisson events.
+Slow modulation (modp.bin + modk.bin, ShiuBrain.modulate): edges of a modulatory group add to the target's level
+m[plane] instead of g; every step m decays by its plane's factor and the target integrates g x c x max(0, 1 + sum
+k m). Levels reset with each sniff; off (no modp.bin) the arithmetic is the unmodulated model's, bit for bit. FLY_RECORD=path appends every neuron's count at every
 window of every sniff to path (int32 sniffs x windows x C x N, counts since the sniff began): the full brain.
 
 Per step t, three launches in ShiuBrain's order: integrate + threshold + reset, push delivery
@@ -64,6 +67,10 @@ comptime LK = row_major[KMAX]()
 comptime LC = row_major[2 * C]()
 comptime LRING = row_major[SLOTS * CAP]()
 comptime LSLOT = row_major[SLOTS + 1]()  # last entry counts overflowed spikes
+comptime MP = 3  # slow modulator planes (dopamine, octopamine, serotonin)
+comptime LM = row_major[MP * S]()
+comptime LMP = row_major[GROUPS]()
+comptime LMK = row_major[2 * MP]()
 
 
 def integrate(
@@ -74,11 +81,21 @@ def integrate(
     counts: TileTensor[DType.int32, type_of(LS), MutAnyOrigin],
     ring: TileTensor[DType.int32, type_of(LRING), MutAnyOrigin],
     fill: TileTensor[DType.int32, type_of(LSLOT), MutAnyOrigin],
-    em: Float32, eg: Float32, c: Float32, v_th: Float32, t: Int32, slot: Int32,
+    m: TileTensor[DType.float32, type_of(LM), MutAnyOrigin],
+    mk: TileTensor[DType.float32, type_of(LMK), MutAnyOrigin],
+    em: Float32, eg: Float32, c: Float32, v_th: Float32, t: Int32, slot: Int32, mplanes: Int32,
 ):
     var i = block_idx.x * block_dim.x + thread_idx.x
     if i >= S:
         return
+    var gain: Float32 = 1.0  # slow modulation: gain from the levels before this step's decay
+    if mplanes > 0:
+        var acc: Float32 = 0.0
+        for q in range(Int(mplanes)):
+            var level = m[q * S + i]
+            acc += mk[MP + q] * level
+            m[q * S + i] = level * mk[q]
+        gain = max(1.0 + acc, 0.0)
     var uu = u[i]
     var gg = g[i]
     if uu == 0.0 and gg == 0.0:  # at rest: stays exactly 0 and cannot spike (v_th > 0); skip 16 B of state
@@ -88,7 +105,10 @@ def integrate(
     if since - 1 < r or since == 1:  # refractory, or spiked last step: the oracle drops these arrivals
         gg = 0.0                      # (deliver adds unconditionally; g is 0 here in the oracle)
     if since - 1 >= r:
-        uu = uu * em + gg * c
+        if mplanes > 0:
+            uu = uu * em + gg * c * gain
+        else:
+            uu = uu * em + gg * c
         gg = gg * eg
     if since >= r and uu > v_th:
         uu = 0.0
@@ -115,7 +135,9 @@ def deliver(
     g: TileTensor[DType.float32, type_of(LS), MutAnyOrigin],
     ring: TileTensor[DType.int32, type_of(LRING), MutAnyOrigin],
     fill: TileTensor[DType.int32, type_of(LSLOT), MutAnyOrigin],
-    t: Int32, slot: Int32, groups: Int32, plastic: Int32, punish: Int32,
+    m: TileTensor[DType.float32, type_of(LM), MutAnyOrigin],
+    modp: TileTensor[DType.int32, type_of(LMP), MutAnyOrigin],
+    t: Int32, slot: Int32, groups: Int32, plastic: Int32, punish: Int32, mplanes: Int32,
 ):
     # LANES threads per spike stride over its out-edges; groups stride over the spikes. One thread
     # per spike serialised hub neurons' thousands of edges: deliver was 96% of a sniff.
@@ -136,7 +158,11 @@ def deliver(
                 wt *= factor[learned]
             elif group == punish:
                 wt *= factor[C * KMAX + learned]
-            _ = Atomic.fetch_add(g.ptr.unsafe_offset(j), wt)
+            var q = Int(modp[Int(group)]) if mplanes > 0 else -1
+            if q >= 0:  # modulatory edge: into the target's slow level, never its fast conductance
+                _ = Atomic.fetch_add(m.ptr.unsafe_offset(q * S + j), wt)
+            else:
+                _ = Atomic.fetch_add(g.ptr.unsafe_offset(j), wt)
 
 
 def uniform(seed: UInt32, t: UInt32, entry: UInt32) -> Float32:
@@ -272,6 +298,19 @@ def main() raises:
         if plastic < 0 or punish < 0 or Int(punish) >= groups or punish == plastic:
             raise Error("punish.bin: needs plastic.bin and a different group in range")
     var planes = 2 if punish >= 0 else 1
+    var modp = List[Int32](length=GROUPS, fill=-1)
+    var mk = List[Float32](length=2 * MP, fill=0)
+    var mplanes = 0
+    if exists(work + "modp.bin"):  # modp.bin: int32 plane per edge group (-1 fast); modk.bin: decay x MP, gain k x MP
+        var mp_raw = load(work + "modp.bin", groups)
+        var mk_raw = load(work + "modk.bin", 2 * MP)
+        for gi in range(groups):
+            modp[gi] = mp_raw.unsafe_ptr().unsafe_bitcast[Int32]().unsafe_offset(gi)[]
+            mplanes = max(mplanes, Int(modp[gi]) + 1)
+        for q in range(2 * MP):
+            mk[q] = mk_raw.unsafe_ptr().unsafe_bitcast[Float32]().unsafe_offset(q)[]
+        if mplanes > MP or not grouped:
+            raise Error("modp.bin: needs edge groups and planes 0..2")
     var stim_raw = load(work + "stim_index.bin", -1)
     var p_raw = load(work + "stim_p.bin", len(stim_raw) // 4)
     var windows_raw = load(work + "windows.bin", -1)
@@ -326,6 +365,12 @@ def main() raises:
     var p_b = ctx.enqueue_create_buffer[DType.float32](S)
     var ring_b = ctx.enqueue_create_buffer[DType.int32](SLOTS * CAP)
     var fill_b = ctx.enqueue_create_buffer[DType.int32](SLOTS + 1)
+    var m_b = ctx.enqueue_create_buffer[DType.float32](MP * S if mplanes > 0 else 1)  # never read when off
+    var modp_b = ctx.enqueue_create_buffer[DType.int32](GROUPS)
+    var mk_b = ctx.enqueue_create_buffer[DType.float32](2 * MP)
+    ctx.enqueue_copy(modp_b, modp.unsafe_ptr())
+    ctx.enqueue_copy(mk_b, mk.unsafe_ptr())
+    m_b.enqueue_fill(0.0)
     ctx.enqueue_copy(row_b, rows.unsafe_ptr().unsafe_bitcast[Int32]())
     ctx.enqueue_copy(col_b, cols.unsafe_ptr().unsafe_bitcast[Int32]())
     ctx.enqueue_copy(w_b, weights.unsafe_ptr().unsafe_bitcast[Float32]())
@@ -363,6 +408,9 @@ def main() raises:
     var stim_t = TileTensor(stim_b, LS)
     var key_t = TileTensor(key_b, LS)
     var p_t = TileTensor(p_b, LS)
+    var m_t = TileTensor(m_b, LM)
+    var modp_t = TileTensor(modp_b, LMP)
+    var mk_t = TileTensor(mk_b, LMK)
     var ring_t = TileTensor(ring_b, LRING)
     var fill_t = TileTensor(fill_b, LSLOT)
 
@@ -428,6 +476,7 @@ def main() raises:
             last_b.enqueue_fill(-32768)
             counts_b.enqueue_fill(0)
             fill_b.enqueue_fill(0)
+            m_b.enqueue_fill(0.0)
         var window = 0
         var t = 0
         while window < window_count:
@@ -435,10 +484,10 @@ def main() raises:
             while t < stop:
                 var slot = Int32(t % SLOTS)
                 var due = Int32((t + 1) % SLOTS)  # == (t - delay) mod SLOTS
-                ctx.enqueue_function(step_integrate, u_t, g_t, last_t, rfc_t, counts_t, ring_t, fill_t,
-                    k.unsafe_offset(0)[], k.unsafe_offset(1)[], k.unsafe_offset(2)[], k.unsafe_offset(3)[], Int32(t), slot, grid_dim=(S + BLOCK - 1) // BLOCK, block_dim=BLOCK)
-                ctx.enqueue_function(step_deliver, rows_t, cols_t, w_t, grp_t, scale_t, rank_t, factor_t, g_t, ring_t, fill_t,
-                    Int32(t), due, Int32(groups), plastic, punish, grid_dim=DGRID, block_dim=BLOCK)
+                ctx.enqueue_function(step_integrate, u_t, g_t, last_t, rfc_t, counts_t, ring_t, fill_t, m_t, mk_t,
+                    k.unsafe_offset(0)[], k.unsafe_offset(1)[], k.unsafe_offset(2)[], k.unsafe_offset(3)[], Int32(t), slot, Int32(mplanes), grid_dim=(S + BLOCK - 1) // BLOCK, block_dim=BLOCK)
+                ctx.enqueue_function(step_deliver, rows_t, cols_t, w_t, grp_t, scale_t, rank_t, factor_t, g_t, ring_t, fill_t, m_t, modp_t,
+                    Int32(t), due, Int32(groups), plastic, punish, Int32(mplanes), grid_dim=DGRID, block_dim=BLOCK)
                 ctx.enqueue_function(step_kick, stim_t, key_t, p_t, u_t, last_t, fill_t, Int32(stim_count), seed + UInt32(sniff), Int32(t),
                     due, k.unsafe_offset(4)[], grid_dim=kick_grid, block_dim=BLOCK)
                 t += 1
