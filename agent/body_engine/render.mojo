@@ -244,9 +244,9 @@ def main() raises:
     camh[6] = fovy
     camh[7] = Float32(H) * 0.5 / tan(fovy * 0.5)
     camh[10] = Float32(atof(String(a[12])))
-    # MAX reserves most of the card per process by default (22.7 GB measured); the renderer needs ~30 MB, so
-    # reserve 1% unless the caller set it (same fix as the Shiu workers, eecb1f7)
-    _ = external_call["setenv", Int32]("MODULAR_DEVICE_CONTEXT_MEMORY_MANAGER_SIZE_PERCENT".unsafe_ptr(), "1".unsafe_ptr(), Int32(0))
+    # MAX pre-reserves most of the card per process by default (22.7 GB measured). Every buffer here is made
+    # once, so no pool: VRAM is then exactly the buffers plus the HIP runtime (152 MB). A caller's setting wins.
+    _ = external_call["setenv", Int32]("MODULAR_DEVICE_CONTEXT_MEMORY_MANAGER_SIZE_PERCENT".unsafe_ptr(), "0".unsafe_ptr(), Int32(0))
     var ctx = DeviceContext(0)  # every buffer below is created once; a frame allocates nothing
     var pi_h = load(rdir + "rmi.bin", 20 * NPART)
     var pf_h = load(rdir + "rmf.bin", 4 * PFS * NPART)

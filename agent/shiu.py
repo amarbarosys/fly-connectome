@@ -34,14 +34,12 @@ KMAX = 8192  # plastic KCs per column, shiu_worker's SHIU_K
 KEY = 'MODULAR_DEVICE_CONTEXT_MEMORY_MANAGER_SIZE_PERCENT'
 
 
-def worker_env(n, edges, flies):
-    """The MAX device context pre-reserves a pool, by default most of the card (22.6 GiB for a
-    4 GB job, so a second worker ran out of memory). Reserve this worker's own footprint
-    instead: graph and edge groups, nine N x C state buffers, scales and the spike ring, + 10%;
-    an outer setting wins."""
-    need = (n + 1) * 8 + edges * 9 + n * flies * 9 * 4 + 19 * (1 << 16) * 4 + flies * (256 + 8192 + 1) * 4
-    total = max(int(p.read_text()) for p in Path('/sys/class/drm').glob('card*/device/mem_info_vram_total'))
-    return {**os.environ, KEY: os.environ.get(KEY, str(max(1, -(-need * 110 // total))))}
+def worker_env():
+    """The MAX device context pre-reserves a pool, by default most of the card (22.6 GiB for a 4 GB job, so
+    a second worker ran out of memory). Workers allocate once, so no pool: pool 0 holds exactly the
+    worker's own buffers, at the same sniff time (391 ms vs 393 for a sized pool, 96 columns). An outer
+    setting wins."""
+    return {**os.environ, KEY: os.environ.get(KEY, '0')}
 
 
 def uniform(seed, t, entry):
@@ -244,7 +242,7 @@ class ShiuGPU(ShiuBrain):
         self._write_groups(work)
         np.asarray([self.em, self.eg, self.c, V_TH, W_SYN * F_POI], np.float32).tofile(work / 'consts.bin')
         subprocess.run([str(worker_binary(self.n, len(self.col), self.flies)), str(self.graph) + '/', str(work) + '/',
-                        str(self.seed), str(self.delay), str(self.refractory)], check=True, env=worker_env(self.n, len(self.col), self.flies))
+                        str(self.seed), str(self.delay), str(self.refractory)], check=True, env=worker_env())
         if cgrp is None:
             return np.fromfile(work / 'counts.bin', np.int32)
         got = np.fromfile(work / 'gather.bin', np.int32) if len(readout) else np.zeros(0, np.int32)
@@ -281,7 +279,7 @@ class ShiuLive(ShiuGPU):
         np.asarray([self.em, self.eg, self.c, V_TH, W_SYN * F_POI], np.float32).tofile(self.work / 'consts.bin')
         self.proc = subprocess.Popen([str(worker_binary(self.n, len(self.col), self.flies, *self.source)), str(self.graph) + '/',
                                       str(self.work) + '/', str(self.seed), str(self.delay), str(self.refractory), 'resident'],
-                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1, env=worker_env(self.n, len(self.col), self.flies))
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1, env=worker_env())
         return self
 
     source = ()  # (path,) builds the worker from that kernel source instead of agent/

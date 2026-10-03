@@ -269,7 +269,7 @@ class Worker:
         binary = binary or os.environ.get('FLY_NEURAL_WORKER_BINARY') or ROOT/'.work/neural-flies/neural_worker'
         self.disconnected = disconnected
         env = dict(os.environ, FLY_NEURAL_ASSETS=str(ASSETS),
-                   MODULAR_DEVICE_CONTEXT_MEMORY_MANAGER_SIZE_PERCENT='2',
+                   MODULAR_DEVICE_CONTEXT_MEMORY_MANAGER_SIZE_PERCENT='0',  # no pool: the worker holds exactly its buffers
                    PYTHONHOME=sys.base_prefix,
                    MOJO_PYTHON_LIBRARY=str(Path(sysconfig.get_config_var('LIBDIR'))/'libpython3.12.so'),
                    PYTHONPATH=os.pathsep.join((str(ROOT), sysconfig.get_path('purelib'))))

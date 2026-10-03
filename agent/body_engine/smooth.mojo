@@ -18,6 +18,7 @@ usage: smooth DIR/      reads DIR/mi.bin, mf.bin, qpos.bin (NQ x FLIES), qvel.bi
        cinert (bodies 1..), cdof, crb (bodies 1..), M; STAGE 3 adds qLD, qLDiagInv; STAGE 4 adds cvel (bodies
        1..), cdof_dot, qfrc_passive, qfrc_bias; STAGE 5 adds qH, qHDiagInv, qacc_euler, qpos_next; prints us per launch
 """
+from std.ffi import external_call
 from std.math import cos, sin, sqrt
 from std.sys import argv, get_defined_int
 from std.time import perf_counter_ns
@@ -979,6 +980,8 @@ def load(path: String, size: Int) raises -> List[UInt8]:
 
 def main() raises:
     var dir = String(argv()[1])
+    # no MAX pool: every buffer is made once, so VRAM is exactly the buffers plus the HIP runtime; a caller wins
+    _ = external_call["setenv", Int32]("MODULAR_DEVICE_CONTEXT_MEMORY_MANAGER_SIZE_PERCENT".unsafe_ptr(), "0".unsafe_ptr(), Int32(0))
     var ctx = DeviceContext(0)
     var mi_b = ctx.enqueue_create_buffer[DType.int32](NI)
     var mf_b = ctx.enqueue_create_buffer[DType.float32](NFL)

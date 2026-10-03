@@ -1,6 +1,7 @@
 """The renderer must not leak: stream 10,000 frames through a pipe and sample the process at frames 100 and 10,000.
-Open fds and VRAM (amdgpu drm-memory-vram over the process's fdinfo) must be equal; host RSS may move by page
-noise only (under 1 MB). The scar: Mojo 1.0 input() leaked one pipe fd per call (1a07a08).
+A leak is growth: open fds must be equal, VRAM (amdgpu drm-memory-vram over the process's fdinfo) must not
+grow, host RSS may grow by page noise only (under 1 MB). Both may fall: with no MAX pool the runtime hands back
+~6 MB of start-up allocations after the first frames. The scar: Mojo 1.0 input() leaked one pipe fd per call (1a07a08).
 
 usage: python -m agent.body_engine.verify_render_leak [RENDER_BINARY RENDER_DIR POSES]   (under gpu-wait; the
        defaults are render_check's 960 x 540 build, so run render_check first)
@@ -41,7 +42,7 @@ def main(binary, rdir, poses):
     if p.wait() != 0:
         sys.exit(f'FAIL verify_render_leak: renderer exited {p.returncode}')
     (f0, v0, r0), (f1, v1, r1) = got
-    ok = f0 == f1 and v0 == v1 and abs(r1 - r0) < 1024
+    ok = f0 == f1 and v1 <= v0 and r1 - r0 < 1024
     print(f'frames {EARLY} / {FRAMES}: fds {f0} / {f1}, VRAM {v0} / {v1} KiB, RSS {r0} / {r1} KiB -> {"PASS" if ok else "FAIL leak"}')
     sys.exit(0 if ok else 1)
 
