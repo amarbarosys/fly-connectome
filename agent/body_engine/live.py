@@ -8,7 +8,7 @@ check (under gpu-wait):
          100 frames is < 0.02 (settled). Control arm: the same fly with only the 6 feet colliding (FEET 'tarsus5',
          which sinks through the floor in MuJoCo too) must fail
   leak   10,000 streamed frames, verify_render_leak's sampler at 100 and 10,000: fds equal, VRAM not up, RSS < +1 MB
-watch: live.py watch [K] [cube] [spider] [world [SEED]]  -> mpv window (cube: inside the closed 40 mm cube of model.cube, walls
+fps: live.py fps K [...as watch]: 300 frames, ms per frame. watch: live.py watch [K] [cube] [spider] [world [SEED]]  -> mpv window (cube: inside the closed 40 mm cube of model.cube, walls
        drawn; spider: the body from models/spider.py instead of the fly) (slow motion: the engine is ~140x slower than real time at one fly)
 
 usage: gpu-wait run --priority 90 --timeout 1800 -- .venv/bin/python -m agent.body_engine.live check
@@ -85,6 +85,7 @@ def prepare(out=OUT, pairs=FEET, mjcf=MJCF, dist=DIST, flat=None):
 
 def build(out, m, k, box=0):
     flags = (out / 'sizes.txt').read_text().split() + (out / 'rsizes.txt').read_text().split()
+    flags += ['-DWAVE=1']  # one animal on a 32-lane wave (smooth.mojo WAVE): the live step is latency, not throughput
     flags += ['-DTERRAIN=1'] if any(f.startswith('-DHFGEOM') for f in flags) else []
     binary = out / f'live_k{k}_b{box}'
     src = [ENGINE / f for f in ('live.mojo', 'smooth.mojo', 'render.mojo')] + [out / 'sizes.txt', out / 'rsizes.txt']
@@ -212,7 +213,7 @@ def leak_check(out, m, cam, frames=10_000, early=100):
 
 
 def main(cmd, *args):
-    if cmd == 'watch':
+    if cmd in ('watch', 'fps'):  # fps: live.py fps K [world ...]: 300 frames to a file, prints ms per frame
         k = int(args[0]) if args else 10
         box = 40 if 'cube' in args else 0
         body = MJCF
@@ -231,6 +232,9 @@ def main(cmd, *args):
         if box:  # from inside a corner of the cube, looking at the animal
             look = np.array(cam[3:6], float)
             cam = [*map(str, look + np.array([12., -12., 8.]) * (1.6 if 'spider' in args else 1)), *cam[3:]]
+        if cmd == 'fps':
+            print(subprocess.run([str(build(out, m, k, box)), str(out) + '/', '300', *cam, str(out / 'fps.rgba')], check=True, capture_output=True, text=True).stdout.strip())
+            return
         live = subprocess.Popen([str(build(out, m, k, box)), str(out) + '/', '0', *cam], stdout=subprocess.PIPE)
         subprocess.run(['mpv', '--demuxer=rawvideo', f'--demuxer-rawvideo-w={W}', f'--demuxer-rawvideo-h={H}',
                         '--demuxer-rawvideo-mp-format=rgba', '-'], stdin=live.stdout)
