@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Every ported stage against MuJoCo on two bodies (fly: free + hinge; 8-leg spider test model:
 # free + ball + hinge + slide), plus a mutation that must fail (hinge angle sign flipped).
-# usage: gpu-wait run --timeout 1200 -- agent/body_engine/check.sh [STAGE]
+# usage: gpu-wait run --timeout 1200 -- [env BODY=path.xml] agent/body_engine/check.sh [STAGE]
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 stage=${1:-kinematics}; M=.venv/bin/python; X=.work/agent/body_engine; fail=0
@@ -28,7 +28,8 @@ if [ "$stage" = loop ]; then  # K steps per launch, state kept on the card. K=1 
   [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
   echo "PASS all loop checks"; exit 0
 fi
-$M -m agent.body_engine.model check .work/agent/gpu-body-port/body-v2/body.xml $X/fly "$stage" 64 || { echo "FAIL fly $stage"; fail=$((fail+1)); }
+B=${BODY:-.work/agent/gpu-body-port/body-v2/body.xml}  # BODY=path checks another MJCF (e.g. the spider from models/spider.py)
+$M -m agent.body_engine.model check $B $X/$(basename $B .xml) "$stage" 64 || { echo "FAIL $(basename $B .xml) $stage"; fail=$((fail+1)); }
 if [ "$stage" = contact ] || [ "$stage" = actuated ]; then  # plane-mesh foot pairs; the spider test body has none
   echo "spider: no plane-mesh contact pairs or actuators, $stage stage is fly-only"
 else
