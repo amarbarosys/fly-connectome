@@ -36,6 +36,7 @@ def main() raises:
     var v_b = ctx.enqueue_create_buffer[DType.float32](eng.NV * eng.F)
     var u_b = ctx.enqueue_create_buffer[DType.float32](max(eng.NU, 1) * eng.F)
     var o_b = ctx.enqueue_create_buffer[DType.float32](eng.NROW * eng.F)
+    o_b.enqueue_fill(0)  # warm start reads OWARM before the first step writes it
     var mi = eng.load(dir + "mi.bin", eng.NI)
     var mf = eng.load(dir + "mf.bin", eng.NFL)
     var qp = eng.load(dir + "qpos.bin", eng.NQ * eng.F)

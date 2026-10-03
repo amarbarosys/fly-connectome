@@ -80,7 +80,7 @@ if [ "$stage" = loop ]; then  # K steps per launch, state kept on the card. K=1 
   # gate: the engine's ~5e-6 per-step float32 error grows ~12x in 10 steps on contact-rich states (diag/k_floor.py)
   F=.work/agent/gpu-body-port/body-v2/body.xml
   $M -m agent.body_engine.model check $F $X/fly actuated 64 1 || { echo "FAIL fly loop K=1"; fail=$((fail+1)); }
-  ~/.local/bin/mojo build $(cat $X/fly/sizes.txt) -DFLIES=64 -DSTAGE=7 -DK=10 agent/body_engine/smooth.mojo -o $X/fly/k10
+  ~/.local/bin/mojo build $(cat $X/fly/sizes.txt) -DFLIES=64 -DSTAGE=7 -DK=10 -DWAVE=${WAVE:-0} agent/body_engine/smooth.mojo -o $X/fly/k10
   cp $X/fly/state10.bin $X/fly/k1x10.bin && $X/fly/k10 $X/fly/
   cmp $X/fly/state.bin $X/fly/k1x10.bin && echo "PASS K=10 launch == 10 K=1 launches, byte-equal" || { echo "FAIL loop K=10 vs 10 x K=1"; fail=$((fail+1)); }
   # the gate must fail with the velocity write-back dropped (each step restarts from the launch's qvel)

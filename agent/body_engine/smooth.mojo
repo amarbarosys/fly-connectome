@@ -166,7 +166,8 @@ comptime OWC = OW + 2 * NV  # noslip per step: w of every valid row (laid out as
 comptime OAC = OWC + NJE
 comptime OACT = OAC + 10 * NSLOT  # valid slots: count, then their ids ascending (row loops skip the ~95 % empty)
 comptime OPART = OACT + 1 + NSLOT  # WAVE: per-lane partial sums, 3 x LN
-comptime NROW = OPART + 3 * LN if STAGE >= 6 else (OCFRC + 6 * NB if STAGE >= 4 else NOUT)
+comptime OWARM = OPART + 3 * LN  # K > 0: last step's qacc (MuJoCo qacc_warmstart), persists across launches
+comptime NROW = OWARM + NV if STAGE >= 6 else (OCFRC + 6 * NB if STAGE >= 4 else NOUT)
 comptime LI = row_major[NI]()
 comptime LF = row_major[NFL]()
 comptime LQ = row_major[NQ * F]()
@@ -755,9 +756,12 @@ def hessian(mi: TI, res: TO, f: Int):
                     continue
                 var D = get(res, f, OD + row)
                 var jadr = OJ + jbase(mi, p) + (4 * sl + k) * nch
-                for a in range(lane(), nch, LN):  # lane owns H row chain[a]: no conflicts
+                for a in range(nch):  # lane owns H row d (d % LN): every row the same lane, no race across pairs
+                    var d = Int(mi[CCHAIN + choff + a])
+                    if d % LN != lane():
+                        continue
                     var ja = get(res, f, jadr + a) * D
-                    var ra = Int(mi[HADR + Int(mi[CCHAIN + choff + a])])
+                    var ra = Int(mi[HADR + d])
                     for bb in range(a + 1):
                         res[(OHN + ra + bb) * F + f] += ja * get(res, f, jadr + bb)
     sync()
@@ -889,6 +893,22 @@ def search(mi: TI, res: TO, f: Int, scale: Float32, tolerance: Float32, lsiter: 
     return 0
 
 
+def start(mi: TI, res: TO, f: Int, src: Int) -> Float32:
+    """Newton's starting point: qacc = rows src.., M qacc, jar on the valid rows, then PrimalUpdateConstraint's cost."""
+    for v in range(NV):
+        res[(OCQACC + v) * F + f] = get(res, f, src + v)
+    mulM(mi, res, f, OMA, OCQACC)
+    for p in range(NCP):
+        var nch = Int(mi[CPH + 11 * p + 6]); var choff = Int(mi[CPH + 11 * p + 7])
+        for sl in range(nslot(mi, p)):
+            if get(res, f, OVALID + sbase(mi, p) + sl) == 0:
+                continue
+            for k in range(4):
+                var row = 4 * (sbase(mi, p) + sl) + k
+                res[(OJAR + row) * F + f] = jdot(mi, res, f, OJ + jbase(mi, p) + (4 * sl + k) * nch, nch, choff, OCQACC) - get(res, f, OAREF + row)
+    return update(mi, res, f)
+
+
 def newton(mi: TI, mf: TF, res: TO, f: Int):
     """MuJoCo mj_solPrimal (Newton), one island: start at qacc_smooth, line search, Hessian rebuilt when the
     active set changes (MuJoCo updates it incrementally; same matrix)."""
@@ -900,23 +920,14 @@ def newton(mi: TI, mf: TF, res: TO, f: Int):
     solveLD(mi, res, f, OQACCS, OLD, OLDI)
     var scale: Float32 = 0
     for v in range(NV):
-        res[(OCQACC + v) * F + f] = get(res, f, OQACCS + v)
         scale += get(res, f, OM + Int(mi[MADR + v]) + Int(mi[MNNZ + v]) - 1)
     scale = 1 / scale
-    mulM(mi, res, f, OMA, OCQACC)
-    var ncon: Float32 = 0
-    for p in range(NCP):
-        var nch = Int(mi[CPH + 11 * p + 6]); var choff = Int(mi[CPH + 11 * p + 7])
-        for sl in range(nslot(mi, p)):
-            if get(res, f, OVALID + sbase(mi, p) + sl) == 0:
-                continue
-            ncon += 1
-            for k in range(4):
-                var row = 4 * (sbase(mi, p) + sl) + k
-                res[(OJAR + row) * F + f] = jdot(mi, res, f, OJ + jbase(mi, p) + (4 * sl + k) * nch, nch, choff, OCQACC) - get(res, f, OAREF + row)
-    res[ONCON * F + f] = ncon
+    res[ONCON * F + f] = get(res, f, OACT)
     var tol = mf[COPT + 1]
-    var cost = update(mi, res, f)
+    var cost = start(mi, res, f, OQACCS)
+    comptime if K > 0:  # mj warmstart: the last step's qacc unless qacc_smooth costs less
+        var cw = start(mi, res, f, OWARM)
+        cost = start(mi, res, f, OQACCS) if cw > cost else cw
     hessian(mi, res, f)
     gradient(mi, res, f)
     res[ODIAG * F + f] = 0
@@ -1350,6 +1361,9 @@ def step(mi: TI, mf: TF, qpos: TQ, qvel: TV, ctrl: TU, res: TO, f: Int):
             return
         newton(mi, mf, res, f)
         noslip(mi, mf, res, f)
+        comptime if K > 0:
+            for v in range(NV):
+                res[(OWARM + v) * F + f] = get(res, f, OCQACC + v)
         comptime if STOP == 6:
             return
     comptime if STAGE >= 5:
@@ -1373,6 +1387,7 @@ def main() raises:
     var v_b = ctx.enqueue_create_buffer[DType.float32](NV * F)
     var u_b = ctx.enqueue_create_buffer[DType.float32](max(NU, 1) * F)
     var o_b = ctx.enqueue_create_buffer[DType.float32](NROW * F)
+    o_b.enqueue_fill(0)  # warm start reads OWARM before the first step writes it
     var mi = load(dir + "mi.bin", NI)
     var mf = load(dir + "mf.bin", NFL)
     var qp = load(dir + "qpos.bin", NQ * F)
