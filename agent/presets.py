@@ -15,6 +15,12 @@ are skills to use: a preset that does not reproduce under a fresh seed is noise,
   taste   gustatory types, plus the authors' 21 sugar GRNs (both sides, 'sugar-both') ->
           descending neurons, brain motor neurons (MN9 proboscis among them) and PAM/PPL dopamine
           neurons (the reward and punishment teachers of the mushroom body)
+  sensory mechanosensory, hygrosensory, thermosensory, unknown sensory and ocellar types -> the
+          taste readout
+  motion  visual_centrifugal types (HS/VS among them) -> descending neurons
+  ascending  ascending neuron types (the nerve cord reporting to the brain) -> the taste readout
+  trace   CPU only: hops over excitatory edges from the sugar GRNs to every PAM type, and the
+          synapses into that type from cells at the previous hop
 
 usage: python -m agent.presets SENSE map     -> .work/agent/shiu/presets/SENSE.json
        python -m agent.presets SENSE check   PASS/FAIL per preset, FAIL k/N non-zero
@@ -53,11 +59,18 @@ def sense(name, c):
     dn = (c.super == 'descending') & lr
     if name == 'vision':
         return by_type(c, c.super == 'visual_projection', MIN_CELLS), np.flatnonzero(dn)
+    dan = np.char.startswith(c.type.astype(str), 'PAM') | np.char.startswith(c.type.astype(str), 'PPL')
+    wide = np.flatnonzero(dn | (c.super == 'motor') | dan)
     if name == 'taste':
         stim = by_type(c, c.klass == 'gustatory', 3)
         stim['sugar-both'] = sugar()
-        dan = np.char.startswith(c.type.astype(str), 'PAM') | np.char.startswith(c.type.astype(str), 'PPL')
-        return stim, np.flatnonzero(dn | (c.super == 'motor') | dan)
+        return stim, wide
+    if name == 'sensory':
+        return by_type(c, np.isin(c.klass, ('mechanosensory', 'hygrosensory', 'thermosensory', 'unknown_sensory', 'ocellar')), 3), wide
+    if name == 'motion':
+        return by_type(c, c.super == 'visual_centrifugal', 3), np.flatnonzero(dn)
+    if name == 'ascending':
+        return by_type(c, c.super == 'ascending', 3), wide
     raise SystemExit(f'unknown sense {name}')
 
 
@@ -128,5 +141,28 @@ def check(name):
         sys.exit(1)
 
 
+def trace():
+    from scipy.sparse import csr_matrix
+    from scipy.sparse.csgraph import shortest_path
+    c = cells()
+    pre, post, w, _ = _reference_graph()
+    n, exc = len(c.klass), np.asarray(w) > 0
+    g = csr_matrix((np.ones(exc.sum()), (np.asarray(pre)[exc], np.asarray(post)[exc])), (n, n))
+    src = sugar()
+    hops = shortest_path(g, unweighted=True, indices=src).min(0)
+    syn = csr_matrix((np.asarray(w)[exc], (np.asarray(pre)[exc], np.asarray(post)[exc])), (n, n)).tocsc()
+    out = {}
+    for t in sorted({t for t in c.type if t.startswith('PAM')}):
+        ids = np.flatnonzero(c.type == t)
+        h = hops[ids].min()
+        col = syn[:, ids]
+        prev = np.flatnonzero(hops == h - 1) if np.isfinite(h) else []
+        into = float(col[prev].sum()) if len(prev) else 0.
+        out[t] = {'cells': len(ids), 'min_hops': None if not np.isfinite(h) else int(h),
+                  'synapses_from_previous_hop': into, 'synapses_total_in': float(col.sum())}
+        print(f"{t:6s} cells {len(ids):3d} hops {out[t]['min_hops']}  from hop-1 {into:7.0f} of {out[t]['synapses_total_in']:7.0f} excitatory in")
+    path('trace-sugar-pam').write_text(json.dumps(out, indent=1) + '\n')
+
+
 if __name__ == '__main__':
-    {'map': map_presets, 'check': check}[sys.argv[2]](sys.argv[1])
+    trace() if sys.argv[1] == 'trace' else {'map': map_presets, 'check': check}[sys.argv[2]](sys.argv[1])
