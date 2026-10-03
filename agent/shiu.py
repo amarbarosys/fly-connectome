@@ -36,8 +36,9 @@ KEY = 'MODULAR_DEVICE_CONTEXT_MEMORY_MANAGER_SIZE_PERCENT'
 def worker_env(n, edges, flies):
     """The MAX device context pre-reserves a pool, by default most of the card (22.6 GiB for a
     4 GB job, so a second worker ran out of memory). Reserve this worker's own footprint
-    instead: graph, nine N x C state buffers and the spike ring, + 10%; an outer setting wins."""
-    need = (n + 1) * 4 + edges * 8 + n * flies * 9 * 4 + 19 * (1 << 16) * 4
+    instead: graph and edge groups, nine N x C state buffers, scales and the spike ring, + 10%;
+    an outer setting wins."""
+    need = (n + 1) * 4 + edges * 9 + n * flies * 9 * 4 + 19 * (1 << 16) * 4 + flies * 256 * 4
     total = max(int(p.read_text()) for p in Path('/sys/class/drm').glob('card*/device/mem_info_vram_total'))
     return {**os.environ, KEY: os.environ.get(KEY, str(max(1, -(-need * 110 // total))))}
 
@@ -92,7 +93,21 @@ class ShiuBrain:
         self.em, self.eg, self.c = constants(dt)
         self.delay, self.refractory = round(T_DLY / dt), round(T_RFC / dt)
         self.stim = {}  # entry (column * n + neuron) -> Poisson probability per step
+        self.grp, self.scale = None, None
         self.reset()
+
+    def edge_groups(self, grp, scale):
+        """Weight variants as columns: edge e (CSR order of self.col) delivers w[e] x scale[column, grp[e]].
+        grp uint8 per edge, scale float32 (flies, G); unset = every weight unchanged."""
+        self.grp, self.scale = np.asarray(grp, np.uint8), np.asarray(scale, np.float32).reshape(self.flies, -1)
+        assert len(self.grp) == len(self.col) and int(self.grp.max(initial=0)) < self.scale.shape[1] <= 256
+
+    def _write_groups(self, work):
+        for name in ('grp.bin', 'scale.bin'):
+            (work / name).unlink(missing_ok=True)
+        if self.grp is not None:
+            self.grp.tofile(work / 'grp.bin')
+            self.scale.tofile(work / 'scale.bin')
 
     def reset(self):
         size = self.n * self.flies
@@ -130,7 +145,10 @@ class ShiuBrain:
                 edges = np.repeat(end - (end - start).cumsum(), end - start) + np.arange(int((end - start).sum()))
                 target = np.repeat(column, end - start) * self.n + self.col[edges]
                 keep = (t - self.last[target] >= refractory[target]) & (self.last[target] != t)
-                self.g += np.bincount(target[keep], self.w[edges][keep], minlength=self.g.size).astype(np.float32)
+                w = self.w[edges]
+                if self.grp is not None:
+                    w = w * self.scale[np.repeat(column, end - start), self.grp[edges]]
+                self.g += np.bincount(target[keep], w[keep], minlength=self.g.size).astype(np.float32)
             self.ring[t % self.delay] = spike
             hit = entries[(uniform(self.seed, t, entries) < p) & (self.last[entries] != t)]
             self.u[hit] += np.float32(W_SYN * F_POI)
@@ -165,6 +183,7 @@ class ShiuGPU(ShiuBrain):
         entries.astype(np.int32).tofile(work / 'stim_index.bin')
         p.tofile(work / 'stim_p.bin')
         np.asarray(windows, np.int32).tofile(work / 'windows.bin')
+        self._write_groups(work)
         np.asarray([self.em, self.eg, self.c, V_TH, W_SYN * F_POI], np.float32).tofile(work / 'consts.bin')
         subprocess.run([str(worker_binary(self.n, len(self.col), self.flies)), str(self.graph) + '/', str(work) + '/',
                         str(self.seed), str(self.delay), str(self.refractory)], check=True, env=worker_env(self.n, len(self.col), self.flies))
@@ -197,6 +216,7 @@ class ShiuLive(ShiuGPU):
         self.windows, self.readout = np.asarray(windows, np.int32), np.asarray(readout, np.int32)
         self.windows.tofile(self.work / 'windows.bin')
         self.readout.tofile(self.work / 'readout.bin')
+        self._write_groups(self.work)
         np.asarray([self.em, self.eg, self.c, V_TH, W_SYN * F_POI], np.float32).tofile(self.work / 'consts.bin')
         self.proc = subprocess.Popen([str(worker_binary(self.n, len(self.col), self.flies)), str(self.graph) + '/',
                                       str(self.work) + '/', str(self.seed), str(self.delay), str(self.refractory), 'resident'],
