@@ -34,8 +34,9 @@ anatomy, cell types and web physics. Two datasets already carry passing checks
 | PMC12604854 | Dahl 2025 eLife | individual recognition |
 | PMC7234261 | Aguilar-Arguello 2020 Curr Zool | detour distance |
 | PMC3181266 | Girard 2011 PLoS One | peacock spider vibrational courtship |
+| book ch. | Winsor, Morehouse & Jakob 2023, Distributed Vision ch. 10 (doi 10.1007/978-3-031-23216-9_10) | spider vision review: eye roles, retina numbers, secondary->MB and principal->arcuate pathways; local PDF `~/Downloads/Distributed_Vision_Spiders.pdf`, text `winsor2023.txt`, notes `winsor2023-vision-spec.md` |
 
-Not open / not found: Homann 1928 (eye-patch roles), Cross 2016 Portia detours (PMC4751061, no text),
+Not open / not found: Homann 1928 (eye-patch roles; behaviour now covered by Land 1971 / Zurek & Nelson 2012 via Winsor 2023), Cross 2016 Portia detours (PMC4751061, no text),
 Steck 2024 (PMC11756594, no text), 2013 reversal learning, 2021 silk toughness.
 
 ## Notes and search logs
