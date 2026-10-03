@@ -1,8 +1,9 @@
 <mujoco model="spider-test">
+  <default><joint damping="0.02" stiffness="0.3"/></default>  <!-- exercise passive springs, dampers and implicit Euler -->
   <worldbody>
     <geom type="plane" size="10 10 .1"/>
     <body name="cephalothorax" pos="0 0 2">
-      <freejoint/>
+      <joint type="free"/>
       <geom type="ellipsoid" size="1.2 1 0.6" mass="0.5"/>
       <body name="abdomen" pos="-1.8 0 0.2"><joint type="ball"/><geom type="ellipsoid" size="1.4 1.1 1" mass="0.8"/></body>
       <body name="leg0" pos="1.109 0.459 0" euler="0 0 22.5">

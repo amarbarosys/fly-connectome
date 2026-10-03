@@ -2,6 +2,8 @@
 one GPU thread per animal. STAGE 1: mj_kinematics1 + the inertia and geom part of mj_kinematics2.
 STAGE 2: + mj_comPos (subtree_com, cinert, cdof) + mj_crb (sparse M in MuJoCo's own M_rowadr layout).
 STAGE 3: + mj_factorM (mj_factorI: sparse L'DL of M in place, qLD, qLDiagInv).
+STAGE 4: + mj_comVel (cvel, cdof_dot), mj_passive (joint springs, dof dampers), mj_rne without qacc (qfrc_bias).
+STAGE 5: + mj_Euler, contact-free: implicit dof damping (qH = M + h diag(damping)), qacc, mj_integratePos.
 
 Model arrays come from agent/body_engine/model.py export (mi.bin int32, mf.bin float32, field order
 INTS / FLOATS there); sizes are -D constants, so any MJCF body (fly, spider) builds its own binary.
@@ -11,9 +13,10 @@ the same map and stores 4 floats, not 9). Mocap bodies and the sleep filter are 
 Layout: every per-fly array is [row][fly], flies fastest, so a warp reads 32 neighbouring flies
 in one transaction. Model arrays are shared by all flies and stay in cache.
 
-usage: smooth DIR/      reads DIR/mi.bin, mf.bin, qpos.bin (NQ x FLIES); writes DIR/smooth.bin, rows:
+usage: smooth DIR/      reads DIR/mi.bin, mf.bin, qpos.bin (NQ x FLIES), qvel.bin (NV x FLIES); writes DIR/smooth.bin, rows:
        xpos, xquat, xipos (bodies 1..), geom_xpos, xanchor, xaxis; STAGE 2 adds subtree_com,
-       cinert (bodies 1..), cdof, crb (bodies 1..), M; STAGE 3 adds qLD, qLDiagInv; then prints us per launch
+       cinert (bodies 1..), cdof, crb (bodies 1..), M; STAGE 3 adds qLD, qLDiagInv; STAGE 4 adds cvel (bodies
+       1..), cdof_dot, qfrc_passive, qfrc_bias; STAGE 5 adds qH, qHDiagInv, qacc_euler, qpos_next; prints us per launch
 """
 from std.math import cos, sin, sqrt
 from std.sys import argv, get_defined_int
@@ -45,7 +48,9 @@ comptime DBODY = DPARENT + NV
 comptime MADR = DBODY + NV
 comptime MNNZ = MADR + NV
 comptime MCOL = MNNZ + NV  # STAGE 3: M_colind
-comptime NI = MCOL + NC
+comptime BDOFNUM = MCOL + NC  # STAGE 4: body_dofnum, body_dofadr
+comptime BDOFADR = BDOFNUM + NB
+comptime NI = BDOFADR + NB
 # mf.bin: body_pos, body_quat, jnt_pos, jnt_axis, qpos0, body_ipos, body_iquat, geom_pos, geom_quat
 comptime BPOS = 0
 comptime BQUAT = 3 * NB
@@ -60,7 +65,12 @@ comptime MASS = 14 * NB + 6 * NJ + NQ + 7 * NG
 comptime SUBMASS = MASS + NB
 comptime INERTIA = SUBMASS + NB
 comptime ARMATURE = INERTIA + 3 * NB
-comptime NFL = ARMATURE + NV
+comptime DAMP = ARMATURE + NV  # STAGE 4: dof_damping, jnt_stiffness, qpos_spring, opt.gravity, opt.timestep
+comptime STIFF = DAMP + NV
+comptime QSPRING = STIFF + NJ
+comptime GRAV = QSPRING + NQ
+comptime TSTEP = GRAV + 3
+comptime NFL = TSTEP + 1
 # smooth.bin rows (per animal): xpos, xquat, xipos of bodies 1.., geom_xpos, xanchor, xaxis
 comptime OXQ = 3 * (NB - 1)
 comptime OXI = 7 * (NB - 1)
@@ -74,11 +84,23 @@ comptime OCRB = OCD + 6 * NV
 comptime OM = OCRB + 10 * (NB - 1)
 comptime OLD = OM + NC  # STAGE 3: qLD, qLDiagInv
 comptime OLDI = OLD + NC
-comptime NOUT = OSC if STAGE == 1 else (OM + NC if STAGE == 2 else OLDI + NV)
+comptime OCV = OLDI + NV  # STAGE 4: cvel (bodies 1..), cdof_dot, qfrc_passive, qfrc_bias
+comptime OCDD = OCV + 6 * (NB - 1)
+comptime OPAS = OCDD + 6 * NV
+comptime OBIAS = OPAS + NV
+comptime OQH = OBIAS + NV  # STAGE 5: qH, qHDiagInv, qacc_euler, qpos_next
+comptime OQHI = OQH + NC
+comptime OQACC = OQHI + NV
+comptime OQPOS = OQACC + NV
+comptime NOUT = OSC if STAGE == 1 else (OM + NC if STAGE == 2 else (OLDI + NV if STAGE == 3 else (OQH if STAGE == 4 else OQPOS + NQ)))
+comptime OCACC = NOUT  # scratch rows after the output: cacc, cfrc_body per body (world included)
+comptime OCFRC = OCACC + 6 * NB
+comptime NROW = OCFRC + 6 * NB if STAGE >= 4 else NOUT
 comptime LI = row_major[NI]()
 comptime LF = row_major[NFL]()
 comptime LQ = row_major[NQ * F]()
-comptime LO = row_major[NOUT * F]()
+comptime LO = row_major[NROW * F]()
+comptime LV = row_major[NV * F]()
 comptime V3 = SIMD[DType.float32, 4]  # x, y, z, unused
 comptime Q4 = SIMD[DType.float32, 4]  # w, x, y, z
 
@@ -110,6 +132,7 @@ def unit(q: Q4) -> Q4:
 comptime TI = TileTensor[DType.int32, type_of(LI), MutAnyOrigin]
 comptime TF = TileTensor[DType.float32, type_of(LF), MutAnyOrigin]
 comptime TQ = TileTensor[DType.float32, type_of(LQ), MutAnyOrigin]
+comptime TV = TileTensor[DType.float32, type_of(LV), MutAnyOrigin]
 comptime TO = TileTensor[DType.float32, type_of(LO), MutAnyOrigin]
 
 
@@ -158,7 +181,204 @@ def body(res: TO, f: Int, i: Int) -> Tuple[V3, Q4]:
             Q4(res[s * F + f], res[(s + 1) * F + f], res[(s + 2) * F + f], res[(s + 3) * F + f]))
 
 
-def smooth(mi: TI, mf: TF, qpos: TQ, res: TO):
+comptime S6 = SIMD[DType.float32, 8]  # spatial vector: rotation 0..2, translation 3..5
+
+
+@always_inline
+def get6(res: TO, f: Int, row: Int) -> S6:
+    return S6(get(res, f, row), get(res, f, row + 1), get(res, f, row + 2), get(res, f, row + 3), get(res, f, row + 4), get(res, f, row + 5), 0, 0)
+
+
+@always_inline
+def put6(res: TO, f: Int, row: Int, v: S6):
+    for c in range(6):
+        res[(row + c) * F + f] = v[c]
+
+
+@always_inline
+def cross_motion(a: S6, v: S6) -> S6:
+    """MuJoCo mju_crossMotion: a x v for motion vectors."""
+    return S6(-a[2] * v[1] + a[1] * v[2], a[2] * v[0] - a[0] * v[2], -a[1] * v[0] + a[0] * v[1],
+              -a[2] * v[4] + a[1] * v[5] - a[5] * v[1] + a[4] * v[2], a[2] * v[3] - a[0] * v[5] + a[5] * v[0] - a[3] * v[2],
+              -a[1] * v[3] + a[0] * v[4] - a[4] * v[0] + a[3] * v[1], 0, 0)
+
+
+@always_inline
+def cross_force(a: S6, v: S6) -> S6:
+    """MuJoCo mju_crossForce: a x* v for force vectors."""
+    return S6(-a[2] * v[1] + a[1] * v[2] - a[5] * v[4] + a[4] * v[5], a[2] * v[0] - a[0] * v[2] + a[5] * v[3] - a[3] * v[5],
+              -a[1] * v[0] + a[0] * v[1] - a[4] * v[3] + a[3] * v[4], -a[2] * v[4] + a[1] * v[5], a[2] * v[3] - a[0] * v[5],
+              -a[1] * v[3] + a[0] * v[4], 0, 0)
+
+
+@always_inline
+def mul_inert(res: TO, f: Int, row: Int, v: S6) -> S6:
+    """MuJoCo mju_mulInertVec with the 10-float com inertia stored at rows row..row+9."""
+    var i = SIMD[DType.float32, 16](0)
+    for k in range(10):
+        i[k] = get(res, f, row + k)
+    return S6(i[0] * v[0] + i[3] * v[1] + i[4] * v[2] - i[8] * v[4] + i[7] * v[5],
+              i[3] * v[0] + i[1] * v[1] + i[5] * v[2] + i[8] * v[3] - i[6] * v[5],
+              i[4] * v[0] + i[5] * v[1] + i[2] * v[2] - i[7] * v[3] + i[6] * v[4],
+              i[8] * v[1] - i[7] * v[2] + i[9] * v[3], i[6] * v[2] - i[8] * v[0] + i[9] * v[4],
+              i[7] * v[0] - i[6] * v[1] + i[9] * v[5], 0, 0)
+
+
+@always_inline
+def atan2p(y: Float32, x: Float32) -> Float32:
+    """Atan2 for y >= 0 (amdgpu has no atan2f): 2 atan(y / (r + x)), atan reduced to |z| <= tan(pi/16), Taylor to z^9."""
+    var r = sqrt(x * x + y * y)
+    if r + x <= 0:
+        return 3.14159265358979 if r > 0 else 0.0
+    var z = y / (r + x)
+    var flip = z > 1
+    if flip:
+        z = 1 / z
+    z = z / (1 + sqrt(1 + z * z))
+    z = z / (1 + sqrt(1 + z * z))
+    var z2 = z * z
+    var a = 4 * z * (1 + z2 * (-1.0 / 3 + z2 * (1.0 / 5 + z2 * (-1.0 / 7 + z2 / 9))))
+    return 2 * (1.5707963267949 - a if flip else a)
+
+
+def factorI(mi: TI, res: TO, f: Int, L: Int, LI_: Int):
+    """MuJoCo mj_factorI: sparse L'DL of rows L.. in place, backward over rows k: L(i, 0..i) -= L(i, 0..i) L(k, i) / L(k, k),
+    then L(k, :) /= L(k, k); 1 / L(k, k) to rows LI_.."""
+    for k in range(NV - 1, -1, -1):
+        var start = Int(mi[MADR + k])
+        var diag = Int(mi[MNNZ + k]) - 1
+        var end = start + diag
+        var invD = 1 / get(res, f, L + end)
+        res[(LI_ + k) * F + f] = invD
+        for adr in range(end - 1, start - 1, -1):
+            var i = Int(mi[MCOL + adr])
+            var scl = -get(res, f, L + adr) * invD
+            var ri = Int(mi[MADR + i])
+            for c in range(Int(mi[MNNZ + i])):
+                res[(L + ri + c) * F + f] += get(res, f, L + start + c) * scl
+        for c in range(diag):
+            res[(L + start + c) * F + f] = get(res, f, L + start + c) * invD
+
+
+def velocity(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int):
+    """MuJoCo mj_comVel, mj_passive (joint springs, dof dampers), mj_rne(flg_acc = 0) into qfrc_bias."""
+    # mj_comVel: cvel = cvel_parent + cdof qvel, cdof_dot = cvel x cdof with the velocity before the joint
+    for i in range(1, NB):
+        var p = Int(mi[PARENT + i])
+        var cvel = get6(res, f, OCV + 6 * (p - 1)) if p > 0 else S6(0)
+        for j in range(Int(mi[JNTADR + i]), Int(mi[JNTADR + i]) + Int(mi[JNTNUM + i])):
+            var t = Int(mi[JTYPE + j])
+            var da = Int(mi[DOFADR + j])
+            if t == 0:  # free: translations have cdof_dot 0, then rotations as a ball
+                for k in range(3):
+                    put6(res, f, OCDD + 6 * (da + k), S6(0))
+                    cvel += get6(res, f, OCD + 6 * (da + k)) * qvel[(da + k) * F + f]
+                da += 3
+            var n = 3 if t <= 1 else 1
+            for k in range(n):
+                put6(res, f, OCDD + 6 * (da + k), cross_motion(cvel, get6(res, f, OCD + 6 * (da + k))))
+            for k in range(n):
+                cvel += get6(res, f, OCD + 6 * (da + k)) * qvel[(da + k) * F + f]
+        put6(res, f, OCV + 6 * (i - 1), cvel)
+    # mj_passive: qfrc_passive = qfrc_spring + qfrc_damper
+    for v in range(NV):
+        res[(OPAS + v) * F + f] = -mf[DAMP + v] * qvel[v * F + f]
+    for j in range(NJ):
+        var k = mf[STIFF + j]
+        if k == 0:
+            continue
+        var a = Int(mi[QADR + j])
+        var da = Int(mi[DOFADR + j])
+        var t = Int(mi[JTYPE + j])
+        if t == 0:
+            for c in range(3):
+                res[(OPAS + da + c) * F + f] += -k * (qpos[(a + c) * F + f] - mf[QSPRING + a + c])
+            a += 3
+            da += 3
+        if t <= 1:  # mju_subQuat(dif, unit(q), q_spring): neg(q_spring) q to axis-angle
+            var q = unit(Q4(qpos[a * F + f], qpos[(a + 1) * F + f], qpos[(a + 2) * F + f], qpos[(a + 3) * F + f]))
+            var qs = m4(mf, QSPRING + a)
+            var d = mul(Q4(qs[0], -qs[1], -qs[2], -qs[3]), q)
+            var axis = V3(d[1], d[2], d[3], 0)
+            var s = sqrt((axis * axis).reduce_add())
+            axis = axis / s if s >= 1e-15 else basis(0)
+            var speed = 2 * atan2p(s, d[0])
+            if speed > 3.14159265358979:
+                speed -= 2 * 3.14159265358979
+            for c in range(3):
+                res[(OPAS + da + c) * F + f] += -k * axis[c] * speed
+        else:  # slide, hinge
+            res[(OPAS + da) * F + f] += -k * (qpos[a * F + f] - mf[QSPRING + a])
+    # mj_rne: cacc = cacc_parent + cdof_dot qvel (world: -gravity), cfrc = cinert cacc + cvel x* (cinert cvel)
+    put6(res, f, OCACC, S6(0, 0, 0, -mf[GRAV], -mf[GRAV + 1], -mf[GRAV + 2], 0, 0))
+    for i in range(1, NB):
+        var acc = get6(res, f, OCACC + 6 * Int(mi[PARENT + i]))
+        var bda = Int(mi[BDOFADR + i])
+        for k in range(Int(mi[BDOFNUM + i])):
+            acc += get6(res, f, OCDD + 6 * (bda + k)) * qvel[(bda + k) * F + f]
+        put6(res, f, OCACC + 6 * i, acc)
+        var cvel = get6(res, f, OCV + 6 * (i - 1))
+        var ci = OCI + 10 * (i - 1)
+        put6(res, f, OCFRC + 6 * i, mul_inert(res, f, ci, acc) + cross_force(cvel, mul_inert(res, f, ci, cvel)))
+    for i in range(NB - 1, 0, -1):
+        var p = Int(mi[PARENT + i])
+        if p > 0:
+            put6(res, f, OCFRC + 6 * p, get6(res, f, OCFRC + 6 * p) + get6(res, f, OCFRC + 6 * i))
+    for v in range(NV):
+        var prod = get6(res, f, OCD + 6 * v) * get6(res, f, OCFRC + 6 * Int(mi[DBODY + v]))
+        res[(OBIAS + v) * F + f] = prod.reduce_add()
+
+
+def euler(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int):
+    """MuJoCo mj_Euler with implicit dof damping (contact-free: qfrc = qfrc_passive - qfrc_bias): qH = M + h diag(damping),
+    factor, solve qH qacc = qfrc (mj_solveLD), qvel += h qacc, mj_integratePos. qvel is read, not written back."""
+    var h = mf[TSTEP]
+    for c in range(NC):
+        res[(OQH + c) * F + f] = get(res, f, OM + c)
+    for v in range(NV):
+        res[(OQH + Int(mi[MADR + v]) + Int(mi[MNNZ + v]) - 1) * F + f] += h * mf[DAMP + v]
+    factorI(mi, res, f, OQH, OQHI)
+    for v in range(NV):
+        res[(OQACC + v) * F + f] = get(res, f, OPAS + v) - get(res, f, OBIAS + v)
+    for i in range(NV - 1, -1, -1):  # x <- L^-T x
+        var start = Int(mi[MADR + i])
+        var x_i = get(res, f, OQACC + i)
+        for adr in range(start, start + Int(mi[MNNZ + i]) - 1):
+            res[(OQACC + Int(mi[MCOL + adr])) * F + f] -= get(res, f, OQH + adr) * x_i
+    for i in range(NV):  # x <- D^-1 x
+        res[(OQACC + i) * F + f] *= get(res, f, OQHI + i)
+    for i in range(NV):  # x <- L^-1 x
+        var start = Int(mi[MADR + i])
+        var dot: Float32 = 0
+        for adr in range(start, start + Int(mi[MNNZ + i]) - 1):
+            dot += get(res, f, OQH + adr) * get(res, f, OQACC + Int(mi[MCOL + adr]))
+        res[(OQACC + i) * F + f] -= dot
+    for a in range(NQ):
+        res[(OQPOS + a) * F + f] = qpos[a * F + f]
+    for j in range(NJ):  # mj_integratePos with the new qvel
+        var a = Int(mi[QADR + j])
+        var da = Int(mi[DOFADR + j])
+        var t = Int(mi[JTYPE + j])
+        if t == 0:
+            for c in range(3):
+                res[(OQPOS + a + c) * F + f] += h * (qvel[(da + c) * F + f] + h * get(res, f, OQACC + da + c))
+            a += 3
+            da += 3
+        if t <= 1:  # mju_quatIntegrate: q = unit(q) * quat(axis, h |w|), w in the body frame
+            var w = V3(0)
+            for c in range(3):
+                w[c] = qvel[(da + c) * F + f] + h * get(res, f, OQACC + da + c)
+            var n = sqrt((w * w).reduce_add())
+            var axis = w / n if n >= 1e-15 else basis(0)
+            var half = 0.5 * h * n
+            var s = sin(half)
+            var q = unit(Q4(get(res, f, OQPOS + a), get(res, f, OQPOS + a + 1), get(res, f, OQPOS + a + 2), get(res, f, OQPOS + a + 3)))
+            put(res, f, OQPOS + a, mul(q, Q4(cos(half), axis[0] * s, axis[1] * s, axis[2] * s)), 4)
+        else:
+            res[(OQPOS + a) * F + f] += h * (qvel[da * F + f] + h * get(res, f, OQACC + da))
+
+
+def smooth(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO):
     var f = block_idx.x * block_dim.x + thread_idx.x
     if f >= F:
         return
@@ -310,24 +530,13 @@ def smooth(mi: TI, mf: TF, qpos: TQ, res: TO):
                 adr -= 1
                 j = Int(mi[DPARENT + j])
     comptime if STAGE >= 3:
-        # mj_factorI: backward over rows k, L(i, 0..i) -= L(i, 0..i) L(k, i) / L(k, k), then L(k, :) /= L(k, k)
         for c in range(NC):
             res[(OLD + c) * F + f] = get(res, f, OM + c)
-        for k in range(NV - 1, -1, -1):
-            var start = Int(mi[MADR + k])
-            var diag = Int(mi[MNNZ + k]) - 1
-            var end = start + diag
-            var invD = 1 / get(res, f, OLD + end)
-            res[(OLDI + k) * F + f] = invD
-            for adr in range(end - 1, start - 1, -1):
-                var i = Int(mi[MCOL + adr])
-                var scl = -get(res, f, OLD + adr) * invD
-                var ri = Int(mi[MADR + i])
-                for c in range(Int(mi[MNNZ + i])):
-                    res[(OLD + ri + c) * F + f] += get(res, f, OLD + start + c) * scl
-            for c in range(diag):
-                res[(OLD + start + c) * F + f] = get(res, f, OLD + start + c) * invD
-
+        factorI(mi, res, f, OLD, OLDI)
+    comptime if STAGE >= 4:
+        velocity(mi, mf, qpos, qvel, res, f)
+    comptime if STAGE >= 5:
+        euler(mi, mf, qpos, qvel, res, f)
 
 def load(path: String, size: Int) raises -> List[UInt8]:
     var raw = open(path, "r").read_bytes()
@@ -342,25 +551,28 @@ def main() raises:
     var mi_b = ctx.enqueue_create_buffer[DType.int32](NI)
     var mf_b = ctx.enqueue_create_buffer[DType.float32](NFL)
     var q_b = ctx.enqueue_create_buffer[DType.float32](NQ * F)
-    var o_b = ctx.enqueue_create_buffer[DType.float32](NOUT * F)
+    var v_b = ctx.enqueue_create_buffer[DType.float32](NV * F)
+    var o_b = ctx.enqueue_create_buffer[DType.float32](NROW * F)
     var mi = load(dir + "mi.bin", NI)
     var mf = load(dir + "mf.bin", NFL)
     var qp = load(dir + "qpos.bin", NQ * F)
+    var qv = load(dir + "qvel.bin", NV * F)
     ctx.enqueue_copy(mi_b, mi.unsafe_ptr().unsafe_bitcast[Int32]())
     ctx.enqueue_copy(mf_b, mf.unsafe_ptr().unsafe_bitcast[Float32]())
     ctx.enqueue_copy(q_b, qp.unsafe_ptr().unsafe_bitcast[Float32]())
+    ctx.enqueue_copy(v_b, qv.unsafe_ptr().unsafe_bitcast[Float32]())
     var kernel = ctx.compile_function[smooth]()
     var grid = (F + 63) // 64
-    ctx.enqueue_function(kernel, TileTensor(mi_b, LI), TileTensor(mf_b, LF), TileTensor(q_b, LQ), TileTensor(o_b, LO), grid_dim=grid, block_dim=64)
+    ctx.enqueue_function(kernel, TileTensor(mi_b, LI), TileTensor(mf_b, LF), TileTensor(q_b, LQ), TileTensor(v_b, LV), TileTensor(o_b, LO), grid_dim=grid, block_dim=64)
     ctx.synchronize()
     var t0 = perf_counter_ns()
     for _ in range(100):
-        ctx.enqueue_function(kernel, TileTensor(mi_b, LI), TileTensor(mf_b, LF), TileTensor(q_b, LQ), TileTensor(o_b, LO), grid_dim=grid, block_dim=64)
+        ctx.enqueue_function(kernel, TileTensor(mi_b, LI), TileTensor(mf_b, LF), TileTensor(q_b, LQ), TileTensor(v_b, LV), TileTensor(o_b, LO), grid_dim=grid, block_dim=64)
     ctx.synchronize()
     var us = Float64(perf_counter_ns() - t0) / 100 / 1000
-    var host = List[Float32](length=NOUT * F, fill=0)
+    var host = List[Float32](length=NROW * F, fill=0)
     ctx.enqueue_copy(host.unsafe_ptr(), o_b)
     ctx.synchronize()
     with open(dir + "smooth.bin", "w") as file:
-        file.write_bytes(Span(unsafe_ptr=host.unsafe_ptr().unsafe_bitcast[UInt8](), length=len(host) * 4))
+        file.write_bytes(Span(unsafe_ptr=host.unsafe_ptr().unsafe_bitcast[UInt8](), length=NOUT * F * 4))
     print(F, "animals, stage", STAGE, ":", us, "us per launch,", Float64(F) / us * 1e6, "animals/s")
