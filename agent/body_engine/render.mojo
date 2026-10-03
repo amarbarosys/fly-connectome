@@ -37,7 +37,8 @@ comptime NRV = get_defined_int["NRV"]()
 comptime NRT = get_defined_int["NRT"]()  # triangle indices (3 per triangle)
 comptime NTRI = NRT // 3
 comptime PFS = 21  # part floats: pos 3, quat 4, box offset 3, box scale 3, sphere centre 3, radius 1, rgba 4
-comptime GX = get_defined_int["GX", 1]()  # grid columns when spacing > 0
+comptime GX = get_defined_int["GX", 1]()
+comptime BOX = Float32(get_defined_int["BOX_MM", 0]())  # > 0: the camera is inside a closed cube of this side (model.cube)  # grid columns when spacing > 0
 comptime OXQ = 3 * (NB - 1)
 comptime EMPTY = UInt64.MAX
 comptime NEAR = Float32(1e-3)
@@ -166,8 +167,20 @@ def shade(vis: TVIS, img: TIMG, pi: TPI, pf: TPF, rv: TRV, rt: TRT, rp: TRP, pos
     var ray = c[3] * c[4] + c[1] * (Float32(i % W) + 0.5 - Float32(W) * 0.5) - c[2] * (Float32(i // W) + 0.5 - Float32(H) * 0.5)
     var key = vis[i]
     var floor_depth = Float32(3.4e38)
-    if ray[2] < 0:
-        floor_depth = -c[0][2] / ray[2] * c[4]  # ray scaled so its forward component is the focal length
+    var face = -1  # BOX: 0, 1 x walls, 2, 3 y walls, 4 floor, 5 ceiling
+    var tmin = Float32(3.4e38)
+    comptime if BOX > 0:  # exit point of the cube [-B/2, B/2]^2 x [0, B] along the ray
+        for a in range(3):
+            if ray[a] != 0:
+                var lo = Float32(0) if a == 2 else -BOX * 0.5
+                var t = ((lo + BOX if ray[a] > 0 else lo) - c[0][a]) / ray[a]
+                if t > 0 and t < tmin:
+                    tmin = t
+                    face = 2 * a + (1 if ray[a] > 0 else 0)
+        floor_depth = tmin * c[4]
+    else:
+        if ray[2] < 0:
+            floor_depth = -c[0][2] / ray[2] * c[4]  # ray scaled so its forward component is the focal length
     var rgb: V3
     var fly = key != EMPTY and UInt32(key >> 32) < UInt32(floor_depth.to_bits())
     if key != EMPTY and UInt32(key >> 32) < UInt32(floor_depth.to_bits()):  # positive floats order as their bits
@@ -181,6 +194,13 @@ def shade(vis: TVIS, img: TIMG, pi: TPI, pf: TPF, rv: TRV, rt: TRT, rp: TRP, pos
         var light = V3(0.3, 0.2, 0.93, 0)
         var lit = Float32(0.35) + Float32(0.65) * abs(dot(n, light))
         rgb = V3(pf[PFS * p + 17], pf[PFS * p + 18], pf[PFS * p + 19], 0) * lit
+    elif BOX > 0 and face >= 0:
+        var hit = c[0] + ray * tmin
+        var u = hit[1] if face < 2 else hit[0]
+        var v = hit[1] if face >= 4 else hit[2]
+        var check = (Int(u + 1e4) + Int(v + 1e4)) % 2
+        var tint = V3(0.55, 0.57, 0.6, 0) if face == 4 else (V3(0.62, 0.6, 0.55, 0) if face == 5 else V3(0.5, 0.56, 0.62, 0))
+        rgb = tint * (Float32(0.8) if check == 0 else Float32(1.0))
     elif ray[2] < 0:
         var hit = c[0] + ray * (-c[0][2] / ray[2])
         var check = (Int(hit[0] + 1e4) + Int(hit[1] + 1e4)) % 2

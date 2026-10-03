@@ -5,6 +5,15 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 stage=${1:-kinematics}; M=.venv/bin/python; X=.work/agent/body_engine; fail=0
+if [ "$stage" = cube ]; then  # closed 40 mm cube of planes (floor, 4 walls, ceiling; 330 pairs), states on every face
+  C=$($M -c "from agent.body_engine.model import cube; print(cube('.work/agent/gpu-body-port/body-v2/body.xml'))")
+  $M -m agent.body_engine.model check $C $X/cube actuated 64 || { echo "FAIL cube"; fail=$((fail+1)); }
+  # the gate must fail when the bounding-sphere skip drops pairs that touch (rbound added instead of subtracted)
+  ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo 's/(pos2 - pos1)).reduce_add() - mf\[pf + 12\] > margin/(pos2 - pos1)).reduce_add() + mf[pf + 12] > margin/' -- \
+    $M -m agent.body_engine.model check $C $X/mutant actuated 64 || fail=$((fail+1))
+  [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
+  echo "PASS all cube checks"; exit 0
+fi
 if [ "$stage" = loop ]; then  # K steps per launch, state kept on the card. K=1 vs mj_step (one step: the accuracy
   # gate); one K=10 launch must equal ten K=1 launches byte for byte (the loop). K=10 vs ten chained mj_step is not a
   # gate: the engine's ~5e-6 per-step float32 error grows ~12x in 10 steps on contact-rich states (diag/k_floor.py)

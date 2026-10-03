@@ -55,6 +55,62 @@ WORLD_FIRST = ('xpos', 'xquat', 'xipos', 'cinert', 'crb', 'cvel')  # body-indexe
 ENGINE = Path(__file__).parent
 
 
+def cube(mjcf, side=40.0):
+    """A closed cube of side `side` (mm) around the arena: the ground plane plus 4 wall planes and a ceiling plane,
+    normals inward, each colliding with every fly part the ground does (the ground pair's parameters copied). The
+    old box walls, lid and stones and their pairs are removed, so every contact is plane-mesh (ported). Written next
+    to mjcf (its meshes are relative paths); returns the new path."""
+    import xml.etree.ElementTree as ET
+    tree = ET.parse(mjcf)
+    root = tree.getroot()
+    world, contact = root.find('worldbody'), root.find('contact')
+    ground = world.find("geom[@name='ground_plane']")
+    for g in list(world.findall('geom')):
+        if g is not ground and g.get('type') in ('box', 'ellipsoid') and not g.get('name', '').startswith('stripe'):
+            world.remove(g)
+    keep = [q for q in contact.findall('pair') if q.get('geom1') == 'ground_plane']
+    for q in list(contact):
+        contact.remove(q)
+    h = side / 2
+    faces = {'wall_xn': (f'{-h} 0 {h}', '1 0 0'), 'wall_xp': (f'{h} 0 {h}', '-1 0 0'), 'wall_yn': (f'0 {-h} {h}', '0 1 0'),
+             'wall_yp': (f'0 {h} {h}', '0 -1 0'), 'ceiling': (f'0 0 {side}', '0 0 -1')}
+    for name, (pos, z) in faces.items():
+        g = ET.SubElement(world, 'geom', dict(ground.attrib))
+        g.set('name', name); g.set('pos', pos); g.set('zaxis', z); g.set('size', f'{h} {h} 1')
+        g.attrib.pop('quat', None)
+    for name in ('ground_plane', *faces):
+        for q in keep:
+            r = ET.SubElement(contact, 'pair', dict(q.attrib))
+            r.set('geom1', name); r.set('name', f"{q.get('geom2')}-{name}")
+    out = Path(mjcf).with_name(f'cube{int(side)}.xml')
+    tree.write(out)
+    return str(out)
+
+
+def onfaces(q, v, side):
+    """Standing states moved onto the cube's 6 faces in turn (state n on face n % 6): the whole fly rotated so the
+    floor's up becomes the face's inward normal and placed at the face; free-joint linear velocity rotated with it,
+    angular velocity (body frame) unchanged. Gravity stays -z, so on walls and ceiling the fly hangs by contacts."""
+    h = side / 2
+    ups = [(0, 0, 1), (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, -1)]
+    centres = [(0, 0, 0), (-h, 0, h), (h, 0, h), (0, -h, h), (0, h, h), (0, 0, side)]
+    q, v = q.copy(), v.copy()
+    for n in range(len(q)):
+        up, c = np.array(ups[n % 6], float), np.array(centres[n % 6], float)
+        axis, angle = np.cross([0, 0, 1], up), np.arccos(np.clip(up[2], -1, 1))
+        axis = axis / np.linalg.norm(axis) if np.linalg.norm(axis) > 1e-9 else np.array([1., 0, 0])
+        r = np.r_[np.cos(angle / 2), axis * np.sin(angle / 2)]
+        R = np.zeros(9)
+        mujoco.mju_quat2Mat(R, r)
+        R = R.reshape(3, 3)
+        q[n, :3] = c + R @ q[n, :3]
+        res = np.zeros(4)
+        mujoco.mju_mulQuat(res, r, q[n, 3:7])
+        q[n, 3:7] = res
+        v[n, :3] = R @ v[n, :3]
+    return q, v
+
+
 def load(mjcf):
     m = mujoco.MjModel.from_xml_path(str(mjcf))
     if m.nmocap or m.ntendon or m.dof_simplenum.any():
@@ -83,7 +139,7 @@ def feet(m, regex):
              and m.geom_type[m.pair_geom2[i]] == mujoco.mjtGeom.mjGEOM_MESH and re.search(regex, mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_GEOM, m.pair_geom2[i]))]
     if any(m.pair_dim[i] != 3 for i in pairs):
         raise SystemExit('FAIL export: only condim 3 contacts are ported')
-    head, first, edges, chains, fl, verts = [], [], [], [], [], []
+    head, first, edges, chains, fl, verts, hulls = [], [], [], [], [], [], {}
     for i in pairs:
         g1, g2 = m.pair_geom1[i], m.pair_geom2[i]
         mesh, b = m.geom_dataid[g2], m.geom_bodyid[g2]
@@ -99,11 +155,13 @@ def feet(m, regex):
             bb = m.body_parentid[bb]
         if any(m.M_rownnz[c] != k + 1 for k, c in enumerate(chain)) or m.pair_solimp[i][4] != int(m.pair_solimp[i][4]):
             raise SystemExit('FAIL export: a foot dof chain is not its own M row pattern, or solimp power is not whole')
-        head += [g1, g2, b, nv, len(verts) // 3, len(first), len(chain), len(chains)]
-        first += list(len(edges) + edgeadr)
-        edges += list(local)
+        if mesh not in hulls:  # one copy of each hull however many planes it meets (the cube: 6 pairs per part)
+            hulls[mesh] = (len(verts) // 3, len(first))
+            first += list(len(edges) + edgeadr)
+            edges += list(local)
+            verts += list(m.mesh_vert[m.mesh_vertadr[mesh] + gid].ravel())
+        head += [g1, g2, b, nv, *hulls[mesh], len(chain), len(chains)]
         chains += chain
-        verts += list(m.mesh_vert[m.mesh_vertadr[mesh] + gid].ravel())
         fl += [m.pair_margin[i], m.pair_gap[i], *m.pair_friction[i][:2], *m.pair_solref[i], *m.pair_solimp[i],
                m.body_invweight0[m.geom_bodyid[g1], 0] + m.body_invweight0[b, 0], m.geom_rbound[g2]]
     ints = np.array(head + first + edges + chains + [m.opt.iterations, m.opt.ls_iterations])
@@ -207,6 +265,8 @@ def check(mjcf, out, stage, count=64, k=0):
     m, out = export(mjcf, out, FEET if feet else None, stage == 'actuated'), Path(out)
     number, fn, fields = STAGES[stage]
     q, v = standing(m, count) if feet else (states(m, count), velocities(m, count, scale=VSCALE))
+    if feet and Path(mjcf).name.startswith('cube'):  # every face of the cube carries states
+        q, v = onfaces(q, v, float(Path(mjcf).stem[4:]))
     u = np.zeros((count, m.nu))
     if stage == 'actuated':  # servos within 0.3 rad of the current joint angle, adhesion anywhere in [0, 1]
         rng = np.random.default_rng(2)
@@ -229,17 +289,25 @@ def check(mjcf, out, stage, count=64, k=0):
         want['qacc_euler'] = (want.pop('qvel') - v) / m.opt.timestep
         want['qpos_next'] = want.pop('qpos')
         d = mujoco.MjData(s)  # ncon: contacts that carry constraint rows (MuJoCo also lists excluded ones)
+        ambiguous = np.zeros(count, int)  # pairs whose deepest vertex sits within float32 resolution of the margin
+        live = [i for i in range(s.npair) if s.pair_margin[i] > -1]
         for n in range(count):
             d.qpos[:], d.qvel[:], d.ctrl[:] = q[n], v[n], u[n]
             mujoco.mj_forward(s, d)
             want['ncon'][n] = sum(c.efc_address >= 0 for c in d.contact[:d.ncon])
+            for i in live:
+                g1, g2 = s.pair_geom1[i], s.pair_geom2[i]
+                a, c = s.mesh_vertadr[s.geom_dataid[g2]], s.mesh_vertnum[s.geom_dataid[g2]]
+                depth = ((s.mesh_vert[a:a + c] @ d.geom_xmat[g2].reshape(3, 3).T + d.geom_xpos[g2] - d.geom_xpos[g1]) @ d.geom_xmat[g1].reshape(3, 3)[:, 2]).min()
+                ambiguous[n] += abs(depth - s.pair_margin[i]) < 4 * np.spacing(np.float32(np.abs(d.geom_xpos[g2]).max()))
         # float32 floor: MuJoCo on the float32-rounded state (the engine's actual input) vs MuJoCo on the float64 state.
         # A contact force at solref 2e-4 moves 2.4e-5 of its scale from input rounding alone, so a field's bar is
         # max(REL, FLOOR_X x its floor); every field still has to beat 1e-5 unless float32 inputs cannot.
         r32 = lambda x: x.astype(np.float32).astype(np.float64)
-        alt = reference(s, fn, ('qacc', 'qfrc_constraint', 'qvel'), r32(q), r32(v), r32(u))
+        alt = reference(s, fn, tuple(f for f in fields if f not in ('qacc_euler', 'qpos_next', 'ncon')) + ('qpos', 'qvel'), r32(q), r32(v), r32(u))
         alt['qacc_euler'] = (alt.pop('qvel') - r32(v)) / m.opt.timestep  # same derivation as the reference's
-        floor = {f: float(np.abs(alt[f] - want[f]).max() / np.abs(want[f]).max()) for f in alt}
+        alt['qpos_next'] = alt.pop('qpos')
+        floor = {f: float(np.abs(alt[f] - want[f]).max() / max(np.abs(want[f]).max(), 1e-30)) for f in alt}
         if k:  # K-step loop: the state after k chained mj_step calls, ctrl held; its own float32 floor
             chain = ','.join(['mj_step'] * k)
             want = reference(s, chain, ('qpos', 'qvel'), q, v, u)
@@ -268,7 +336,15 @@ def check(mjcf, out, stage, count=64, k=0):
         raise SystemExit(f'FAIL {stage}: engine wrote {rows.shape[1]} values per fly, MuJoCo {sum(sizes)}')
     got = np.split(rows, np.cumsum(sizes)[:-1], axis=1)
     floor = locals().get('floor', {})
-    bad = [b for f, g in zip(fields, got) for b in compare({f: (want[f].reshape(count, -1), g)}, max(REL, FLOOR_X * floor.get(f, 0)))]
+    bad = []
+    if 'ambiguous' in locals() and 'ncon' in fields:  # a contact at the margin to within float32 resolution may go either way, up to 3 rows
+        i = fields.index('ncon')
+        off = np.abs(got[i][:, 0] - want['ncon'].reshape(count)) > 3 * ambiguous
+        print(f'{"PASS" if not off.any() else "FAIL"} ncon         {int(off.sum())} states off beyond float32-ambiguous pairs '
+              f'({int(ambiguous.sum())} ambiguous pairs in {int((ambiguous > 0).sum())} states)')
+        bad += ['ncon'] if off.any() else []
+        got, fields = got[:i] + got[i + 1:], fields[:i] + fields[i + 1:]
+    bad += [b for f, g in zip(fields, got) for b in compare({f: (want[f].reshape(count, -1), g)}, max(REL, FLOOR_X * floor.get(f, 0)))]
     if bad:
         print(f'FAIL {len(bad)}/{len(fields)} {stage} fields: {" ".join(bad)}')
         sys.exit(1)

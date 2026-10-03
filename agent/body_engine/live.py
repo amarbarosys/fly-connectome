@@ -8,7 +8,7 @@ check (under gpu-wait):
          100 frames is < 0.02 (settled). Control arm: the same fly with only the 6 feet colliding (FEET 'tarsus5',
          which sinks through the floor in MuJoCo too) must fail
   leak   10,000 streamed frames, verify_render_leak's sampler at 100 and 10,000: fds equal, VRAM not up, RSS < +1 MB
-watch: live.py watch [K]  -> mpv window (slow motion: the engine is ~140x slower than real time at one fly)
+watch: live.py watch [K] [cube]  -> mpv window (cube: inside the closed 40 mm cube of model.cube, walls drawn) (slow motion: the engine is ~140x slower than real time at one fly)
 
 usage: gpu-wait run --priority 90 --timeout 1800 -- .venv/bin/python -m agent.body_engine.live check
 """
@@ -20,7 +20,7 @@ from pathlib import Path
 import mujoco
 import numpy as np
 
-from agent.body_engine.model import ENGINE, FEET, export, meshes, standing
+from agent.body_engine.model import ENGINE, FEET, cube, export, meshes, standing
 from agent.body_engine.render_check import DIST, MJCF, MOJO
 from agent.body_engine.verify_render_leak import sample
 
@@ -29,12 +29,12 @@ W, H = 960, 540
 STATS = Path.home() / 'iTools/video/frame-stats/frame-stats'
 
 
-def prepare(out=OUT, pairs=FEET):
+def prepare(out=OUT, pairs=FEET, mjcf=MJCF):
     """Engine + mesh files for one fly standing still: state from model.standing, servos holding its joint angles,
     adhesion on. Returns the camera args (eye, target, fovy) and the model."""
     out.mkdir(parents=True, exist_ok=True)
-    m = export(MJCF, out, pairs, True)
-    meshes(MJCF, out)
+    m = export(mjcf, out, pairs, True)
+    meshes(mjcf, out)
     q, v = standing(m, 2)
     q, v = q[:1], v[:1]
     u = np.where(m.actuator_trntype == mujoco.mjtTrn.mjTRN_BODY, 1.0, q[0][m.jnt_qposadr[np.minimum(m.actuator_trnid[:, 0], m.njnt - 1)]])
@@ -50,14 +50,14 @@ def prepare(out=OUT, pairs=FEET):
     return [*map(str, eye), *map(str, look), str(m.vis.global_.fovy)], m
 
 
-def build(out, m, k):
+def build(out, m, k, box=0):
     flags = (out / 'sizes.txt').read_text().split() + (out / 'rsizes.txt').read_text().split()
-    binary = out / f'live_k{k}'
+    binary = out / f'live_k{k}_b{box}'
     src = [ENGINE / f for f in ('live.mojo', 'smooth.mojo', 'render.mojo')] + [out / 'sizes.txt', out / 'rsizes.txt']
     if binary.is_file() and binary.stat().st_mtime > max(f.stat().st_mtime for f in src):
         return binary  # built on the CPU before the GPU job
     subprocess.run([MOJO, 'build', '-I', str(ENGINE), *flags, '-DFLIES=1', '-DSTAGE=7', f'-DK={k}', f'-DW={W}', f'-DH={H}',
-                    f'-DPROWS={7 * (m.nbody - 1)}', str(ENGINE / 'live.mojo'), '-o', str(binary)], check=True)
+                    f'-DPROWS={7 * (m.nbody - 1)}', f'-DBOX_MM={box}', str(ENGINE / 'live.mojo'), '-o', str(binary)], check=True)
     return binary
 
 
@@ -111,7 +111,7 @@ def stand_check(out, m, cam):
 
 
 def leak_check(out, m, cam, frames=10_000, early=100):
-    binary = out / 'live_k1'
+    binary = out / 'live_k1_b0'
     p = subprocess.Popen([str(binary), str(out) + '/', str(frames), *cam], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     got = []
     for n in range(1, frames + 1):
@@ -127,13 +127,19 @@ def leak_check(out, m, cam, frames=10_000, early=100):
 
 
 def main(cmd, *args):
-    cam, m = prepare()
     if cmd == 'watch':
         k = int(args[0]) if args else 10
-        live = subprocess.Popen([str(build(OUT, m, k)), str(OUT) + '/', '0', *cam], stdout=subprocess.PIPE)
+        box = 40 if 'cube' in args else 0
+        out = OUT.parent / 'live-cube' if box else OUT
+        cam, m = prepare(out, mjcf=cube(MJCF, box) if box else MJCF)
+        if box:  # from inside a corner of the cube, looking at the fly
+            look = np.array(cam[3:6], float)
+            cam = [*map(str, look + np.array([12., -12., 8.])), *cam[3:]]
+        live = subprocess.Popen([str(build(out, m, k, box)), str(out) + '/', '0', *cam], stdout=subprocess.PIPE)
         subprocess.run(['mpv', '--demuxer=rawvideo', f'--demuxer-rawvideo-w={W}', f'--demuxer-rawvideo-h={H}',
                         '--demuxer-rawvideo-mp-format=rgba', '-'], stdin=live.stdout)
         return
+    cam, m = prepare()
     result = {'frame': frame_check(OUT, m, cam)}
     result['stand'] = stand_check(OUT, m, cam)
     result['leak'] = leak_check(OUT, m, cam)
