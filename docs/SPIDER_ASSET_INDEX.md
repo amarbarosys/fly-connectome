@@ -18,7 +18,7 @@ anatomy, cell types and web physics. Two datasets already carry passing checks
 | 77 MB | `dahl2025/STUDY.mat` + 3 `.m` | Dahl 2025 eLife, OSF gpnct | individual recognition, P. regius; readme names it `SUBJ.mat` |
 | 565 MB | `rem2022/Retina3.0-DLC.zip` | Rossler 2022 PNAS, Zenodo 6616655 | DeepLabCut project: config, 24 model files, 841 labelled frames; tracks retinal tubes + body |
 | 27 KB | `rem2022/REMSleep.rmd`, `REM_retinaAnalysis.m` | same | analysis code; needs datasets S2/S3 |
-| pending | `rem2022/supp.zip` | same, Europe PMC supplementaryFiles | should hold datasets S2/S3 (retinal-movement CSVs); download incomplete, unverified |
+| 413 MB | `rem2022/supp/` | same, Europe PMC supplementaryFiles | 9 movies (sm01-09.mp4) + SI appendix PDF + fig 1; NO datasets S2/S3 (retinal-movement CSVs not in this bundle, PNAS hosts them separately); movies can feed the DLC project |
 
 ## Papers (full text, `PMC*.txt` plain body, `PMC*.xml` JATS)
 
