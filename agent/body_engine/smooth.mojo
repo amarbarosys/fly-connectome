@@ -164,7 +164,9 @@ comptime OZ = OFRC + NEFC
 comptime OW = OZ + NV
 comptime OWC = OW + 2 * NV  # noslip per step: w of every valid row (laid out as J), then per row pair A 00 01 11, base 0 1
 comptime OAC = OWC + NJE
-comptime NROW = OAC + 10 * NSLOT if STAGE >= 6 else (OCFRC + 6 * NB if STAGE >= 4 else NOUT)
+comptime OACT = OAC + 10 * NSLOT  # valid slots: count, then their ids ascending (row loops skip the ~95 % empty)
+comptime OPART = OACT + 1 + NSLOT  # WAVE: per-lane partial sums, 3 x LN
+comptime NROW = OPART + 3 * LN if STAGE >= 6 else (OCFRC + 6 * NB if STAGE >= 4 else NOUT)
 comptime LI = row_major[NI]()
 comptime LF = row_major[NFL]()
 comptime LQ = row_major[NQ * F]()
@@ -741,6 +743,7 @@ def hessian(mi: TI, res: TO, f: Int):
         res[(OHN + c) * F + f] = 0
     for c in range(NC):
         res[(OHN + Int(mi[MTOH + c])) * F + f] = get(res, f, OM + c)
+    sync()
     for p in range(NCP):
         var nch = Int(mi[CPH + 11 * p + 6]); var choff = Int(mi[CPH + 11 * p + 7])
         for sl in range(nslot(mi, p)):
@@ -752,11 +755,12 @@ def hessian(mi: TI, res: TO, f: Int):
                     continue
                 var D = get(res, f, OD + row)
                 var jadr = OJ + jbase(mi, p) + (4 * sl + k) * nch
-                for a in range(nch):
+                for a in range(lane(), nch, LN):  # lane owns H row chain[a]: no conflicts
                     var ja = get(res, f, jadr + a) * D
                     var ra = Int(mi[HADR + Int(mi[CCHAIN + choff + a])])
                     for bb in range(a + 1):
                         res[(OHN + ra + bb) * F + f] += ja * get(res, f, jadr + bb)
+    sync()
     factorI(mi, res, f, OHN, OHNI, HADR)
 
 
@@ -775,17 +779,27 @@ comptime PNT = SIMD[DType.float32, 4]  # line-search point: alpha, cost, deriv0,
 
 
 def peval(mi: TI, res: TO, f: Int, gauss: PNT, alpha: Float32) -> PNT:
-    """MuJoCo PrimalEval for pyramidal rows: Gauss quadratic plus every row active at jar + alpha jv."""
-    var q0 = gauss[0]; var q1 = gauss[1]; var q2 = gauss[2]
-    for r in range(NEFC):
-        if get(res, f, OVALID + r // 4) == 0:
-            continue
+    """MuJoCo PrimalEval for pyramidal rows: Gauss quadratic plus every row active at jar + alpha jv (valid rows split
+    over lanes, partial sums in OPART)."""
+    var q0: Float32 = 0; var q1: Float32 = 0; var q2: Float32 = 0
+    for a in range(lane(), 4 * Int(get(res, f, OACT)), LN):
+        var r = 4 * Int(get(res, f, OACT + 1 + a // 4)) + a % 4
         var jar = get(res, f, OJAR + r); var jv = get(res, f, OJV + r)
         if jar + alpha * jv < 0:
             var D = get(res, f, OD + r)
             q0 += 0.5 * D * jar * jar
             q1 += jv * D * jar
             q2 += 0.5 * jv * D * jv
+    comptime if WAVE:
+        res[(OPART + lane()) * F + f] = q0
+        res[(OPART + LN + lane()) * F + f] = q1
+        res[(OPART + 2 * LN + lane()) * F + f] = q2
+        sync()
+        q0 = 0; q1 = 0; q2 = 0
+        for l in range(LN):
+            q0 += get(res, f, OPART + l); q1 += get(res, f, OPART + LN + l); q2 += get(res, f, OPART + 2 * LN + l)
+        sync()
+    q0 += gauss[0]; q1 += gauss[1]; q2 += gauss[2]
     res[(ODIAG + 1) * F + f] += 1
     var d1 = 2 * q2
     return PNT(alpha, alpha * alpha * q2 + alpha * q1 + q0, 2 * alpha * q2 + q1, d1 if d1 > 0 else Float32(1e-15))
@@ -916,9 +930,10 @@ def newton(mi: TI, mf: TF, res: TO, f: Int):
             res[(OCQACC + v) * F + f] += alpha * get(res, f, OSRCH + v)
             res[(OMA + v) * F + f] += alpha * get(res, f, OMV + v)
         var changed = False
-        for r in range(NEFC):
+        for a in range(4 * Int(get(res, f, OACT))):
+            var r = 4 * Int(get(res, f, OACT + 1 + a // 4)) + a % 4
             res[(OJAR + r) * F + f] += alpha * get(res, f, OJV + r)
-            if get(res, f, OVALID + r // 4) != 0 and (get(res, f, OJAR + r) < 0) != (get(res, f, OST + r) != 0):
+            if (get(res, f, OJAR + r) < 0) != (get(res, f, OST + r) != 0):
                 changed = True
         var oldcost = cost
         cost = update(mi, res, f)
@@ -967,9 +982,10 @@ def noslip(mi: TI, mf: TF, res: TO, f: Int):
     if nit == 0:
         return
     var imp0: Float32 = 0
-    for r in range(NEFC):  # Newton's forces: -D jar on active rows
+    for a in range(4 * Int(get(res, f, OACT))):  # Newton's forces: -D jar on active rows
+        var r = 4 * Int(get(res, f, OACT + 1 + a // 4)) + a % 4
         var fr: Float32 = 0
-        if get(res, f, OVALID + r // 4) != 0 and get(res, f, OST + r) != 0:
+        if get(res, f, OST + r) != 0:
             var D = get(res, f, OD + r)
             fr = -D * get(res, f, OJAR + r)
             imp0 += 0.5 * fr * fr / D
@@ -1322,6 +1338,12 @@ def step(mi: TI, mf: TF, qpos: TQ, qvel: TV, ctrl: TU, res: TO, f: Int):
         return
     comptime if STAGE >= 6:
         contacts(mi, mf, qpos, qvel, res, f)
+        var na = 0
+        for sl in range(NSLOT):
+            if get(res, f, OVALID + sl) != 0:
+                res[(OACT + 1 + na) * F + f] = Float32(sl)
+                na += 1
+        res[OACT * F + f] = Float32(na)
         comptime if STAGE >= 7:
             actuation(mi, mf, qpos, qvel, ctrl, res, f)
         comptime if STOP == 5:
