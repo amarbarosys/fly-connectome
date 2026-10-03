@@ -47,7 +47,7 @@ STAGES['contact'] = (6, 'mj_step', STAGES['step'][2] + ('ncon', 'qacc', 'qfrc_co
 # 'actuated' (S3): + mj_transmission (hinge/slide joints, adhesion bodies) and mj_fwdActuation (fixed gain, affine
 # or no bias, no activation dynamics), random controls, actuators on.
 STAGES['actuated'] = (7, 'mj_step', STAGES['contact'][2] + ('actuator_force', 'qfrc_actuator'))
-FEET = 'tarsus5'
+FEET = '.'  # every plane-mesh pair (55 on the fly: each body part on the floor); 'tarsus5' (6 feet) sank through the floor in MuJoCo too
 VSCALE = 10  # random qvel in +-10 per dof: velocity terms well above float32 noise; qpos moves ~1e-3 per fly step
 REL = 1e-5
 FLOOR_X = 3  # contact stage: bar = max(REL, 3 x the field's float32 input floor), see check()
@@ -223,7 +223,7 @@ def check(mjcf, out, stage, count=64, k=0):
         s.opt.noslip_iterations = 0
         import re
         for i in range(s.npair):
-            if not re.search(FEET, mujoco.mj_id2name(s, mujoco.mjtObj.mjOBJ_GEOM, s.pair_geom2[i])):
+            if s.geom_type[s.pair_geom1[i]] != mujoco.mjtGeom.mjGEOM_PLANE or not re.search(FEET, mujoco.mj_id2name(s, mujoco.mjtObj.mjOBJ_GEOM, s.pair_geom2[i])):
                 s.pair_margin[i] = -1e10
         want = reference(s, fn, tuple(f for f in fields if f not in ('qacc_euler', 'qpos_next')) + ('qpos', 'qvel'), q, v, u)
         want['qacc_euler'] = (want.pop('qvel') - v) / m.opt.timestep
@@ -237,7 +237,8 @@ def check(mjcf, out, stage, count=64, k=0):
         # A contact force at solref 2e-4 moves 2.4e-5 of its scale from input rounding alone, so a field's bar is
         # max(REL, FLOOR_X x its floor); every field still has to beat 1e-5 unless float32 inputs cannot.
         r32 = lambda x: x.astype(np.float32).astype(np.float64)
-        alt = reference(s, fn, ('qacc', 'qfrc_constraint'), r32(q), r32(v), r32(u))
+        alt = reference(s, fn, ('qacc', 'qfrc_constraint', 'qvel'), r32(q), r32(v), r32(u))
+        alt['qacc_euler'] = (alt.pop('qvel') - r32(v)) / m.opt.timestep  # same derivation as the reference's
         floor = {f: float(np.abs(alt[f] - want[f]).max() / np.abs(want[f]).max()) for f in alt}
         if k:  # K-step loop: the state after k chained mj_step calls, ctrl held; its own float32 floor
             chain = ','.join(['mj_step'] * k)
