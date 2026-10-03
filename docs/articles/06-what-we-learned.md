@@ -25,7 +25,7 @@ One quieter correction: mirrored layouts are not independent trials, so our p-va
 
 **Gates with numbers, written before the run.** Every stage of the engine has a bar, such as 1e-5 of the field's own size, and some bars are derived from measured rounding floors rather than hope. A gate that has no number is not a gate.
 
-**Planted bugs.** Before a check counts, we break something it should notice (a sign, a dropped term, the wrong reference frame) and watch it fail. A check that cannot fail told us nothing; three of our "stand" gates were exactly that.
+**Planted bugs.** Before a check counts, we break something it should notice (a sign, a dropped term, the wrong reference frame) and watch it fail. A check that cannot fail told us nothing; our first three "stand" gates each measured something that could not tell standing from lying down.
 
 **Controls, both kinds.** A positive control that must pass (flat ground) and a negative that must fail (an upside-down fly). Learner flies get paired twins with the teacher switched off. Training gets a sham that depresses cells active for neither odour. The odour-absent control produced zero output neurons, zero Kenyon cells and zero descending spikes, so the activity we measured was driven by the smell.
 

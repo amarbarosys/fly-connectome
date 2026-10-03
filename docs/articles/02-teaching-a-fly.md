@@ -2,7 +2,7 @@
 
 *Teaching a simulated fly to find food and dodge a trap took a run of failures, and the last fix was a bug in who got the credit.*
 
-In our first pain experiment the trap smell fell from a score of +0.77 to +0.08 inside the fly's brain. The fly kept walking into the trap anyway. Its behaviour was no better than an untrained twin's (p = 0.80).
+In our first pain loop, the one where the fly walks, the trap smell's score inside the brain fell from +0.77 to +0.08. The fly kept walking into the trap anyway. Its behaviour was no better than an untrained twin's (p = 0.80).
 
 The brain had learned. The walker, the little program that turns brain output into steps, could not use it. This article follows that gap from a brain that flooded, to a brain that learned, to a fly that finally acted on it.
 
@@ -60,7 +60,7 @@ Now the closed loop. The fly walks a T-shaped maze. One arm smells of food, the 
 
 First run: learners scored -0.35 against twins' -0.21. The learners did slightly worse. Only 11 of 48 pairs went the right way (p = 0.82). A fly got about one food bite per trial, a thin lesson.
 
-Pain worked at the brain level. A punished smell's score went from +0.24 to -0.56, its partner's stayed put, and our CPU and GPU versions agreed exactly. But the pain loop failed in behaviour, as in the opening.
+Pain worked at the brain level. In a separate test with no walking, a punished smell's score went from +0.24 to -0.56, its partner's stayed put, and our CPU and GPU versions agreed exactly. But the pain loop failed in behaviour, as in the opening.
 
 ## The walker was playing hot and cold
 
