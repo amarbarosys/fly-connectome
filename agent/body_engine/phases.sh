@@ -5,11 +5,11 @@
 # usage: agent/body_engine/phases.sh build MJCF; gpu-wait run --priority 90 --timeout 1800 -- agent/body_engine/phases.sh run MJCF
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-mode=$1; X=.work/agent/body_engine/bench/$(basename "$2" .xml)-6; fail=0
-for n in 1024 65536; do
+mode=$1; st=${STAGE:-6}; X=.work/agent/body_engine/bench/$(basename "$2" .xml)-$st; fail=0
+for n in ${NS:-1024 65536}; do
   for k in 1 2 3 4 5 6 7; do
     if [ "$mode" = build ]; then
-      ~/.local/bin/mojo build $(cat "$X/$n/sizes.txt") -DFLIES=$n -DSTAGE=6 -DSTOP=$k agent/body_engine/smooth.mojo -o "$X/$n/stop$k" 2>&1 | grep -v warning | grep . && { echo "FAIL build $n stop $k"; fail=$((fail+1)); } || true
+      ~/.local/bin/mojo build $(cat "$X/$n/sizes.txt") -DFLIES=$n -DSTAGE=$st -DSTOP=$k agent/body_engine/smooth.mojo -o "$X/$n/stop$k" 2>&1 | grep -v warning | grep . && { echo "FAIL build $n stop $k"; fail=$((fail+1)); } || true
     else
       echo -n "stop $k: "; "$X/$n/stop$k" "$X/$n/" || { echo "FAIL run $n stop $k"; fail=$((fail+1)); }
     fi
