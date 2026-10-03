@@ -120,6 +120,32 @@ def terrain(mjcf, params=(0.1, 0.05, 0, 8.0, 0, 0, 2.0, 0.5), n=257, half=40.0):
     return out
 
 
+def combine(fly, spider, offset=(8.0, 0.0, 0.0), name='world'):
+    """Fly and spider in one model (one export, one engine binary): the spider's spec attached at `offset` with prefix
+    sp_ (MjSpec.attach copies its assets, actuators and pairs), its own ground removed and its pairs retargeted to the
+    shared ground_plane, mesh paths made absolute. MuJoCo 3.9 has no compiler/conflict (3.10), so every global option
+    must already agree or the merge fails. Written next to the fly MJCF as NAME.xml; returns the path."""
+    a, b = mujoco.MjSpec.from_file(str(fly)), mujoco.MjSpec.from_file(str(spider))
+    oa, ob = a.compile().opt, b.compile().opt
+    diff = [f for f in dir(oa) if not f.startswith('_') and not callable(getattr(oa, f)) and np.any(np.asarray(getattr(oa, f)) != np.asarray(getattr(ob, f)))
+            and f not in ('enableflags', 'noslip_iterations')]  # the fly's win: energy reporting only, noslip not ported
+    if diff:
+        raise SystemExit(f'FAIL combine: global options differ: {diff}')
+    for spec, path in ((a, fly), (b, spider)):  # absolute mesh files: the merged MJCF loads from anywhere
+        base = Path(path).parent / (spec.meshdir or '')
+        for mesh in spec.meshes:
+            mesh.file = str((base / mesh.file).resolve()) if mesh.file else mesh.file
+        spec.meshdir = ''
+    a.attach(b, frame=a.worldbody.add_frame(pos=list(offset)), prefix='sp_')
+    a.delete(a.geom('sp_ground_plane'))
+    for pair in a.pairs:
+        if pair.geomname1 == 'sp_ground_plane':
+            pair.geomname1 = 'ground_plane'
+    out = Path(fly).with_name(f'{name}.xml')
+    out.write_text(a.to_xml())
+    return str(out)
+
+
 def onfaces(q, v, side):
     """Standing states moved onto the cube's 6 faces in turn (state n on face n % 6): the whole fly rotated so the
     floor's up becomes the face's inward normal and placed at the face; free-joint linear velocity rotated with it,
@@ -398,11 +424,13 @@ def check(mjcf, out, stage, count=64, k=0, oracle=None):
     if 'switch' in locals() and 'qfrc_constraint' in fields:  # a row within the qacc bar of its active-set switch
         # may land on either side in float32: one row's force then redistributes over the stance (fly ramp state 37:
         # |jar| 1.8e-5 of scale, force error 2.4e-4 along that row's direction). Those states skip qfrc_constraint only.
-        flip = switch < max(REL, FLOOR_X * floor.get('qacc', 0))
-        print(f'{"PASS" if flip.mean() <= 0.1 else "FAIL"} active-set ambiguous states {int(flip.sum())}/{count} '
+        i = fields.index('qfrc_constraint')
+        w = want['qfrc_constraint'].reshape(count, -1)
+        over = np.abs(got[i] - w).max(1) / max(np.abs(w).max(), 1e-30) > max(REL, FLOOR_X * floor.get('qfrc_constraint', 0))
+        flip = (switch < max(REL, FLOOR_X * floor.get('qacc', 0))) & over  # only states the bar would fail count
+        print(f'{"PASS" if flip.mean() <= 0.1 else "FAIL"} active-set ambiguous states over the bar {int(flip.sum())}/{count} '
               f'(qfrc_constraint not compared there; at most 10 %)')
         bad += ['active-set'] if flip.mean() > 0.1 else []
-        i = fields.index('qfrc_constraint')
         compare({'qfrc_constraint (ambiguous states)': (want['qfrc_constraint'].reshape(count, -1)[flip], got[i][flip])}, 1.0) if flip.any() else None
         want['qfrc_constraint'] = want['qfrc_constraint'].reshape(count, -1)[~flip]
         got[i] = got[i][~flip]

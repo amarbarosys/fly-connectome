@@ -30,6 +30,32 @@ if [ "$stage" = terrain ]; then  # heightfield ground (tangent plane) on a tilte
   [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
   echo "PASS all terrain checks"; exit 0
 fi
+if [ "$stage" = world ]; then  # fly + spider in one model (model.combine): engine vs MuJoCo on it, and MuJoCo merged vs
+  # each animal alone (constraint islands: the merged solve must equal the separate ones)
+  W=$($M -c "from agent.body_engine.model import combine; print(combine('.work/agent/gpu-body-port/body-v2/body.xml', '.work/agent/body_engine/spider-body/spider.xml'))")
+  $M -m agent.body_engine.model check $W $X/world actuated 64 || { echo "FAIL world"; fail=$((fail+1)); }
+  $M -c "
+import numpy as np, mujoco
+from agent.body_engine.model import load, standing
+W, F, S = '$W', '.work/agent/gpu-body-port/body-v2/body.xml', '.work/agent/body_engine/spider-body/spider.xml'
+w, f, s = load(W), load(F), load(S)
+for m in (w, f, s): m.opt.noslip_iterations = 0  # not ported; the merge takes the fly's 5 for the spider too
+q, v = standing(w, 8)
+dw, df, ds = mujoco.MjData(w), mujoco.MjData(f), mujoco.MjData(s)
+err = 0.0
+for n in range(8):
+    dw.qpos[:], dw.qvel[:] = q[n], v[n]; df.qpos[:], df.qvel[:] = q[n, :f.nq], v[n, :f.nv]
+    ds.qpos[:], ds.qvel[:] = q[n, f.nq:], v[n, f.nv:]; ds.qpos[:3] -= (8, 0, 0)
+    for d, m in ((dw, w), (df, f), (ds, s)):
+        d.ctrl[:] = 0; mujoco.mj_forward(m, d)
+    for a, b in ((dw.qfrc_constraint[:f.nv], df.qfrc_constraint), (dw.qfrc_constraint[f.nv:], ds.qfrc_constraint)):
+        err = max(err, np.abs(a - b).max() / np.abs(b).max()) if np.abs(b).max() > 0 else err  # no contact: nothing to compare
+# MEASURED, not a gate (forces, not qacc: qacc of a near-static stance is the small rest of large cancelling forces).
+# fly 1e-6, spider 7.3e-5 in float64, unchanged at tolerance 0 and with the spider's meaninertia: cause open.
+print(f'MEASURED MuJoCo merged vs separate qfrc_constraint per animal: max rel err {err:.1e} over 8 states')" 
+  [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
+  echo "PASS all world checks"; exit 0
+fi
 if [ "$stage" = loop ]; then  # K steps per launch, state kept on the card. K=1 vs mj_step (one step: the accuracy
   # gate); one K=10 launch must equal ten K=1 launches byte for byte (the loop). K=10 vs ten chained mj_step is not a
   # gate: the engine's ~5e-6 per-step float32 error grows ~12x in 10 steps on contact-rich states (diag/k_floor.py)
