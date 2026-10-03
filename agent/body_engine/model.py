@@ -93,7 +93,7 @@ def terrain(mjcf, params=(0.1, 0.05, 0, 8.0, 0, 0, 2.0, 0.5), n=257, half=40.0):
     terrain.xml next to mjcf and, with octaves 0 (a pure ramp), its exact twin terrain_plane.xml: the same tilted
     plane as a plane geom, the oracle of the tilt gate. Returns the paths."""
     import xml.etree.ElementTree as ET
-    from agent.body_engine.world import height_grad
+    from agent.body_engine.world import full, height_grad
     xs = np.linspace(-half, half, n)
     X, Y = np.meshgrid(xs, xs)  # row r along +y, column c along +x (mjModel.hfield_data order)
     H = height_grad(X, Y, params)[0].astype(np.float64)
@@ -111,7 +111,7 @@ def terrain(mjcf, params=(0.1, 0.05, 0, 8.0, 0, 0, 2.0, 0.5), n=257, half=40.0):
             ground.set('type', 'hfield'); ground.set('hfield', 'terrain'); ground.set('pos', f'0 0 {lo}')
             ground.attrib.pop('size', None)
             custom = root.find('custom') if root.find('custom') is not None else ET.SubElement(root, 'custom')
-            ET.SubElement(custom, 'numeric', name='terrain', data=' '.join(map(str, params)))
+            ET.SubElement(custom, 'numeric', name='terrain', data=' '.join(map(str, full(params))))
         else:
             ground.set('pos', '0 0 0'); ground.set('zaxis', f'{-params[0]} {-params[1]} 1')
         path = Path(mjcf).with_name('terrain.xml' if kind == 'hfield' else 'terrain_plane.xml')
@@ -230,9 +230,9 @@ def feet(m, regex):
     hf = sorted({m.pair_geom1[i] for i in pairs if m.geom_type[m.pair_geom1[i]] == mujoco.mjtGeom.mjGEOM_HFIELD})
     if hf:  # terrain: the heightfield is MuJoCo's sample; the engine evaluates world.py's function from its 8 params
         t = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_NUMERIC, 'terrain')
-        if len(hf) > 1 or t < 0 or m.numeric_size[t] != 8:
-            raise SystemExit('FAIL export: one heightfield ground, with its 8 world params in <numeric name="terrain">')
-        floats += list(m.numeric_data[m.numeric_adr[t]:m.numeric_adr[t] + 8])
+        if len(hf) > 1 or t < 0 or m.numeric_size[t] != 16:
+            raise SystemExit('FAIL export: one heightfield ground, with its 16 world params in <numeric name="terrain">')
+        floats += list(m.numeric_data[m.numeric_adr[t]:m.numeric_adr[t] + 16])
         sizes |= {'HFGEOM': hf[0]}
     floats = np.array(floats)
     return ints, floats, sizes

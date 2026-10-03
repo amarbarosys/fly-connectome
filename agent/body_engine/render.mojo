@@ -26,7 +26,7 @@ from std.time import perf_counter_ns
 from std.gpu import block_idx, block_dim, thread_idx
 from max.gpu.host import DeviceContext
 from layout import TileTensor, row_major
-from world import P8, height_grad
+from world import NP, PW, height_grad
 
 comptime W = get_defined_int["W", 1920]()
 comptime H = get_defined_int["H", 1080]()
@@ -51,7 +51,7 @@ comptime LRV = row_major[NRV * 3]()
 comptime LRT = row_major[NRT]()
 comptime LRP = row_major[NTRI]()
 comptime LPOSE = row_major[PROWS * F]()
-comptime NCAM = 24  # eye 3, target 3, fovy, focal, ..., [10] grid spacing; [16:24] world.mojo terrain params
+comptime NCAM = 16 + NP  # eye 3, target 3, fovy, focal, ..., [10] grid spacing; [16:] world.mojo terrain params
 comptime LCAM = row_major[NCAM]()
 comptime TERRAIN = get_defined_int["TERRAIN", 0]()  # 1: the ground is world.mojo's terrain (cam[16:24]), not z = 0
 comptime TVIS = TileTensor[DType.uint64, type_of(LVIS), MutAnyOrigin]
@@ -163,8 +163,11 @@ def raster(vis: TVIS, pi: TPI, pf: TPF, rv: TRV, rt: TRT, rp: TRP, pose: TPOSE, 
 
 
 @always_inline
-def terrain(cam: TCAM) -> P8:
-    return P8(cam[16], cam[17], cam[18], cam[19], cam[20], cam[21], cam[22], cam[23])
+def terrain(cam: TCAM) -> PW:
+    var p = PW()
+    for k in range(NP):
+        p[k] = cam[16 + k]
+    return p
 
 
 def ground(cam: TCAM, eye: V3, ray: V3) -> Float32:
@@ -172,7 +175,7 @@ def ground(cam: TCAM, eye: V3, ray: V3) -> Float32:
     (so a flat world renders as the old z = 0 floor); so is amplitude 0. Else 96 steps, denser near the eye, then 10 bisections on
     eye z - height."""
     var p = terrain(cam)
-    if Int(p[4]) == 0 or p[2] == 0:  # no noise: a plane
+    if (Int(p[4]) == 0 or p[2] == 0) and p[8] == 0:  # no noise, no landmarks: a plane
         var den = ray[2] - p[0] * ray[0] - p[1] * ray[1]
         var t = (p[0] * eye[0] + p[1] * eye[1] - eye[2]) / den if den != 0 else Float32(-1)
         return t if t > 0 else Float32(3.4e38)

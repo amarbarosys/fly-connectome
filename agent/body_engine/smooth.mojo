@@ -29,7 +29,7 @@ from std.time import perf_counter_ns
 from std.gpu import block_idx, block_dim, thread_idx
 from max.gpu.host import DeviceContext
 from layout import TileTensor, row_major
-from world import P8, height_grad
+from world import NP, PW, height_grad
 
 comptime NB = get_defined_int["NBODY"]()
 comptime NJ = get_defined_int["NJNT"]()
@@ -99,8 +99,8 @@ comptime CPF = NFL0  # STAGE 6: per pair margin, gap, friction 2, solref 2, soli
 comptime CVERT = CPF + 13 * NCP
 comptime COPT = CVERT + 3 * NHV
 comptime HFG = get_defined_int["HFGEOM", -1]()  # heightfield ground geom (model.py feet), else none
-comptime HFO = COPT + 3  # world.mojo params (8)
-comptime CACF = HFO + (8 if HFG >= 0 else 0)  # STAGE 7: per actuator gain, bias 0-2, ctrlrange 2, forcerange 2, gear
+comptime HFO = COPT + 3  # world.mojo params (NP)
+comptime CACF = HFO + (NP if HFG >= 0 else 0)  # STAGE 7: per actuator gain, bias 0-2, ctrlrange 2, forcerange 2, gear
 comptime NFL = CACF + 9 * NU if STAGE >= 7 else (CACF if STAGE >= 6 else NFL0)
 # smooth.bin rows (per animal): xpos, xquat, xipos of bodies 1.., geom_xpos, xanchor, xaxis
 comptime OXQ = 3 * (NB - 1)
@@ -436,6 +436,14 @@ def powi(a: Float32, b: Float32) -> Float32:
     return r
 
 
+@always_inline
+def terrain(mf: TF) -> PW:
+    var p = PW()
+    for k in range(NP):
+        p[k] = mf[HFO + k]
+    return p
+
+
 def contacts(mi: TI, mf: TF, qvel: TV, res: TO, f: Int, o: V3):
     """MuJoCo mjc_PlaneConvex (support vertex + hull neighbours below the margin, at most 3, none within 0.3 rbound of
     the first), mj_instantiateContact (pyramidal condim 3, Jacobian over the body's dof chain), mj_diagApprox,
@@ -460,7 +468,7 @@ def contacts(mi: TI, mf: TF, qvel: TV, res: TO, f: Int, o: V3):
         comptime if HFG >= 0:
             if g1 == HFG:
                 var w = pos2 + o
-                var hg = height_grad(w[0], w[1], P8(mf[HFO], mf[HFO + 1], mf[HFO + 2], mf[HFO + 3], mf[HFO + 4], mf[HFO + 5], mf[HFO + 6], mf[HFO + 7]))
+                var hg = height_grad(w[0], w[1], terrain(mf))
                 normal = V3(-hg[1], -hg[2], 1, 0) / sqrt(hg[1] * hg[1] + hg[2] * hg[2] + 1)
                 pos1 = V3(pos2[0], pos2[1], hg[0] - o[2], 0)  # pos2's own x, y: no round trip through world coordinates
         if (normal * (pos2 - pos1)).reduce_add() - mf[pf + 12] > margin:  # bounding sphere clear of the plane: the

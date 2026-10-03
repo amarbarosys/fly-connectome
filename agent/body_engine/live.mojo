@@ -71,7 +71,7 @@ def main() raises:
     camh[7] = Float32(ren.H) * 0.5 / tan(fovy * 0.5)
     comptime if eng.HFG >= 0:  # the renderer draws the engine's own terrain
         var mfp = mf.unsafe_ptr().unsafe_bitcast[Float32]()
-        for k in range(8):
+        for k in range(eng.NP):
             camh[16 + k] = mfp[eng.HFO + k]
     ctx.enqueue_copy(pi_b, pi_h.unsafe_ptr().unsafe_bitcast[Int32]())
     ctx.enqueue_copy(pf_b, pf_h.unsafe_ptr().unsafe_bitcast[Float32]())

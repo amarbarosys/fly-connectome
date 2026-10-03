@@ -45,7 +45,7 @@ def prepare(out=OUT, pairs=FEET, mjcf=MJCF, dist=DIST, flat=None):
         from agent.body_engine.world import height_grad
         t = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_NUMERIC, 'terrain')
         g = np.mgrid[-4:4:33j, -4:4:33j].reshape(2, -1) + q[0, :2, None]
-        q[0, 2] += float(height_grad(g[0], g[1], m.numeric_data[m.numeric_adr[t]:m.numeric_adr[t] + 8])[0].max()) + 0.05
+        q[0, 2] += float(height_grad(g[0], g[1], m.numeric_data[m.numeric_adr[t]:m.numeric_adr[t] + 16])[0].max()) + 0.05
     u = np.where(m.actuator_trntype == mujoco.mjtTrn.mjTRN_BODY, 1.0, q[0][m.jnt_qposadr[np.minimum(m.actuator_trnid[:, 0], m.njnt - 1)]])
     q.astype(np.float32).T.copy().tofile(out / 'qpos.bin')
     v.astype(np.float32).T.copy().tofile(out / 'qvel.bin')
@@ -128,7 +128,7 @@ def upright(out, m, cam, frames=300, flip=False):
     r0 = np.zeros(9)
     mujoco.mju_quat2Mat(r0, q0[3:7].astype(float))
     t = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_NUMERIC, 'terrain')
-    p = m.numeric_data[m.numeric_adr[t]:m.numeric_adr[t] + 8] if t >= 0 else (0, 0, 0, 1, 0, 0, 2, 0.5)
+    p = m.numeric_data[m.numeric_adr[t]:m.numeric_adr[t] + 16] if t >= 0 else (0, 0, 0, 1, 0, 0, 2, 0.5)
     low = np.inf
     for g in range(m.ngeom):
         if 'thorax' in (mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_GEOM, g) or '') and m.geom_type[g] == mujoco.mjtGeom.mjGEOM_MESH:

@@ -13,17 +13,27 @@ F = np.float32
 R = F(0.70710678)
 GX = np.array([1, -1, 0, 0, R, -R, R, -R], F)
 GY = np.array([0, 0, 1, -1, R, -R, -R, R], F)
-DEFAULT = (0.0, 0.0, 0.3, 8.0, 4, 1, 2.0, 0.5)  # slope x y, amplitude mm, wavelength mm, octaves, seed, lacunarity, gain
+DEFAULT = (0.0, 0.0, 0.3, 8.0, 4, 1, 2.0, 0.5, 0.0, 40.0, 5.0, 40.0, 0, 0, 0, 0)  # slope x y, amplitude mm, wavelength
+# mm, octaves, seed, lacunarity, gain, landmark density, cell mm, cone radius mm, cone height mm, 4 unused (world.mojo)
 
 
-def grad(ix, iy, seed):
+def full(p):
+    """Params padded to 16 with DEFAULT's tail (landmarks off)."""
+    return tuple(p) + DEFAULT[len(p):]
+
+
+def hash(ix, iy, seed):
     with np.errstate(over='ignore'):
         h = ix.astype(np.int32).view(np.uint32) * np.uint32(0x8DA6B343) ^ iy.astype(np.int32).view(np.uint32) * np.uint32(0xD8163841) \
             ^ np.uint32(seed) * np.uint32(0xCB1AB31F)
         h ^= h >> np.uint32(13)
         h *= np.uint32(0x85EBCA6B)
         h ^= h >> np.uint32(16)
-    k = h >> np.uint32(29)
+    return h
+
+
+def grad(ix, iy, seed):
+    k = hash(ix, iy, seed) >> np.uint32(29)
     return GX[k], GY[k]
 
 
@@ -47,21 +57,32 @@ def noise(x, y, seed):
 
 
 def height_grad(x, y, p=DEFAULT):
-    x, y, p = np.asarray(x, F), np.asarray(y, F), np.asarray(p, F)
+    x, y, p = np.asarray(x, F), np.asarray(y, F), np.asarray(full(p), F)
     h, gx, gy = p[0] * x + p[1] * y, np.full_like(x, p[0]), np.full_like(x, p[1])
     amp, f = p[2], F(1) / p[3]
     for o in range(int(p[4])):
         n, nx, ny = noise(x * f, y * f, int(p[5]) + o)
         h, gx, gy = h + amp * n, gx + amp * f * nx, gy + amp * f * ny
         amp, f = amp * p[7], f * p[6]
+    if p[8] > 0:
+        cx, cy = np.floor(x / p[9]), np.floor(y / p[9])
+        ix, iy, s = cx.astype(np.int32), cy.astype(np.int32), int(p[5]) + 1000
+        u = lambda k: (hash(ix, iy, s + k) >> np.uint32(8)).astype(F) * F(1 / 16777216)
+        room = F(0.5) * p[9] - p[10]
+        dx = x - ((cx + F(0.5)) * p[9] + room * (u(1) * 2 - 1))
+        dy = y - ((cy + F(0.5)) * p[9] + room * (u(2) * 2 - 1))
+        r = np.sqrt(dx * dx + dy * dy)
+        on = (u(0) < p[8]) & (r < p[10]) & (r > 0)
+        k, rs = p[11] / p[10], np.where(on, r, 1)
+        h, gx, gy = h + np.where(on, p[11] - k * r, 0), gx + np.where(on, -k * dx / rs, 0), gy + np.where(on, -k * dy / rs, 0)
     return h, gx, gy
 
 
-def diff(n=100_000, p=DEFAULT):
+def diff(n=100_000, p=DEFAULT[:8] + (0.5,) + DEFAULT[9:]):
     out = Path('.work/agent/body_engine/world')
     out.mkdir(parents=True, exist_ok=True)
     xy = np.random.default_rng(0).uniform(-2e3, 2e3, (n, 2)).astype(F)
-    np.concatenate([xy.ravel(), np.asarray(p, F)]).tofile(out / 'in.bin')
+    np.concatenate([xy.ravel(), np.asarray(full(p), F)]).tofile(out / 'in.bin')
     binary = out / 'world'
     subprocess.run([str(Path.home() / '.local/bin/mojo'), 'build', str(Path(__file__).with_name('world.mojo')), '-o', str(binary)], check=True)
     subprocess.run([str(binary), str(out / 'in.bin'), str(out / 'out.bin'), str(n)], check=True)
@@ -72,9 +93,12 @@ def diff(n=100_000, p=DEFAULT):
         print(f'{"PASS" if err <= 1e-5 else "FAIL"} {name:6} max rel err {err:.2e} over {n} points')
         bad += err > 1e-5
     e = F(1e-2)  # the gradient against central differences of the height (both twins share one derivation)
-    fd = [(height_grad(xy[:, 0] + e * (k == 0), xy[:, 1] + e * (k == 1), p)[0] - height_grad(xy[:, 0] - e * (k == 0), xy[:, 1] - e * (k == 1), p)[0]) / (2 * e) for k in (0, 1)]
-    _, gx, gy = height_grad(xy[:, 0], xy[:, 1], p)
-    err = float(max(np.abs(fd[0] - gx).max(), np.abs(fd[1] - gy).max()) / np.abs(np.r_[gx, gy]).max())
+    h0, gx, gy = height_grad(xy[:, 0], xy[:, 1], p)
+    err = 0.0
+    for k, g in ((0, gx), (1, gy)):
+        hp, hm = (height_grad(xy[:, 0] + s * e * (k == 0), xy[:, 1] + s * e * (k == 1), p)[0] for s in (1, -1))
+        smooth = np.abs((hp - h0) - (h0 - hm)) < 1e-3 * e  # one-sided slopes agree: no cone tip or rim within e
+        err = max(err, float(np.abs((hp - hm) / (2 * e) - g)[smooth].max() / np.abs(np.r_[gx, gy]).max()))
     print(f'{"PASS" if err <= 1e-2 else "FAIL"} gradient vs central difference (h 1e-2 mm, float32): max rel err {err:.2e}')
     bad += err > 1e-2
     if bad:
