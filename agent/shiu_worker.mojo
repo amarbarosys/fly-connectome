@@ -35,6 +35,7 @@ Poisson kicks. Spikes wait in a ring of DELAY + 1 slots so step t never overwrit
 delivers. A full slot is counted and fails the run; nothing is dropped silently.
 """
 from std.atomic import Atomic
+from std.ffi import c_ssize_t, external_call
 from std.os.path import exists
 from std.sys import argv, get_defined_int
 from std.gpu import block_idx, block_dim, thread_idx
@@ -208,6 +209,16 @@ def reward(
         for p in range(Int(planes)):
             var f = p * C * KMAX + c * KMAX + n
             factor[f] = factor[f] * (1.0 - dopamine[p * C + c])
+
+
+def read_line() raises -> String:
+    """One stdin line, newline stripped; empty at EOF. Mojo 1.0's input() leaks a duplicate of the stdin
+    pipe per call: a resident worker hit 'Too many open files' after ~1,000 sniffs (one per loop step)."""
+    var buf = List[UInt8]()
+    var b = List[UInt8](unsafe_uninit_length=1)
+    while external_call["read", c_ssize_t](0, b.unsafe_ptr(), 1) > 0 and b[0] != 10:
+        buf.append(b[0])
+    return String(from_utf8=Span[UInt8](buf))
 
 
 def load(path: String, size: Int) raises -> List[UInt8]:
@@ -386,8 +397,8 @@ def main() raises:
     var sniff = 0
     while True:
         if resident:
-            var line = input()
-            if line == "q":
+            var line = read_line()
+            if line == "q" or line == "":  # empty = EOF (parent gone)
                 break
             if line == "save":
                 var host = List[Float32](length=planes * C * KMAX, fill=0)
