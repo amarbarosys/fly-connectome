@@ -14,6 +14,7 @@ usage: python -m agent.body_engine.model export MJCF OUT_DIR
        python -m agent.body_engine.model check  MJCF OUT_DIR STAGE [STATES]
        python -m agent.body_engine.model meshes MJCF OUT_DIR   (renderer tables; fails above 1e-4 decode error)
 """
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -181,53 +182,107 @@ def load(mjcf):
     return m
 
 
-def feet(m, regex):
-    """Contact pairs (plane geom1, mesh geom2 named by regex): ints, floats and -D sizes for smooth.mojo STAGE 6.
-
-    ints   per pair: plane geom, mesh geom, mesh body, hull vertex count, hull vertex offset, edge-address offset,
-           chain length, chain offset (8); then every hull vertex's first edge (absolute, into the edge list), the
-           edge lists (hull-local vertex ids, -1 ends a vertex), the dof chains (ancestor dofs of the body, ascending)
-           and opt.iterations, opt.ls_iterations
-    floats per pair: margin, gap, friction 0-1, solref 2, solimp 5, invweight0 translation (both bodies), rbound (13);
-           then hull vertices in the geom frame; then opt.impratio, opt.tolerance, opt.ls_tolerance
-    """
+def pairs(m, regex):
+    """Exported contact pairs: geom2 named by regex, of a ported kind (plane or heightfield vs mesh, sphere vs sphere).
+    Returns (pair ids, {unported kind: count}); the caller must say what it drops."""
     import re
+    from collections import Counter
+    G = mujoco.mjtGeom
+    ported = {(G.mjGEOM_PLANE, G.mjGEOM_MESH), (G.mjGEOM_HFIELD, G.mjGEOM_MESH), (G.mjGEOM_SPHERE, G.mjGEOM_SPHERE)}
+    kind = lambda i: (G(m.geom_type[m.pair_geom1[i]]), G(m.geom_type[m.pair_geom2[i]]))
+    sel = [i for i in range(m.npair) if re.search(regex, mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_GEOM, m.pair_geom2[i]))]
+    return [i for i in sel if kind(i) in ported], Counter('-'.join(g.name[7:].lower() for g in kind(i)) for i in sel if kind(i) not in ported)
+
+
+def hpattern(m, couple):
+    """Sparsity of H = M + J'DJ for mj_factorI: rows of M plus every pair's coupled dofs, filled by backward
+    elimination. Row k = k's chain in the elimination tree (parent = largest column left after elimination), a
+    superset of the fill, so each row's pattern is a prefix of the rows below it, as factorI requires."""
+    rows = [set() for _ in range(m.nv)]
+    for v in range(m.nv):
+        p = m.dof_parentid[v]
+        while p >= 0:
+            rows[v].add(p)
+            p = m.dof_parentid[p]
+    for u in couple:
+        for a in u:
+            rows[a] |= {c for c in u if c < a}
+    par = [-1] * m.nv
+    for k in range(m.nv - 1, -1, -1):
+        if rows[k]:
+            par[k] = max(rows[k])
+            rows[par[k]] |= rows[k] - {par[k]}
+    hrow = []
+    for k in range(m.nv):
+        c, p = [k], par[k]
+        while p >= 0:
+            c, p = [p] + c, par[p]
+        hrow.append(c)
+    return hrow
+
+
+def feet(m, regex):
+    """Contact pairs (pairs()): ints, floats and -D sizes for smooth.mojo STAGE 6.
+
+    ints   per pair: geom1, geom2, geom2's body, hull vertex count (0: sphere-sphere), hull vertex offset,
+           edge-address offset, chain length, chain offset (8); then every hull vertex's first edge (absolute, into the
+           edge list), the edge lists (hull-local vertex ids, -1 ends a vertex), the dof chains (H's row pattern of the
+           pair's deepest dof, ascending), their Jacobian signs (+1 geom2's body only, -1 geom1's only, 0 both or
+           neither), H's pattern (rowadr, rownnz, colind as hpattern()), M's entry -> H's entry, opt.iterations,
+           opt.ls_iterations
+    floats per pair: margin, gap, friction 0-1, solref 2, solimp 5, invweight0 translation (both bodies), rbound of
+           geom2 and geom1 (14); then hull vertices in the geom frame; then opt.impratio, opt.tolerance, opt.ls_tolerance
+    """
     if m.opt.cone != mujoco.mjtCone.mjCONE_PYRAMIDAL or (m.geom_contype & m.geom_conaffinity).any():
         raise SystemExit('FAIL export: contacts need the pyramidal cone and explicit pairs only')
-    ground = (mujoco.mjtGeom.mjGEOM_PLANE, mujoco.mjtGeom.mjGEOM_HFIELD)
-    pairs = [i for i in range(m.npair) if m.geom_type[m.pair_geom1[i]] in ground
-             and m.geom_type[m.pair_geom2[i]] == mujoco.mjtGeom.mjGEOM_MESH and re.search(regex, mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_GEOM, m.pair_geom2[i]))]
-    if any(m.pair_dim[i] != 3 for i in pairs):
-        raise SystemExit('FAIL export: only condim 3 contacts are ported')
-    head, first, edges, chains, fl, verts, hulls = [], [], [], [], [], [], {}
-    for i in pairs:
+    sel, drop = pairs(m, regex)
+    if drop:
+        print(f'export: {sum(drop.values())} pairs of unported kinds NOT exported: {dict(drop)}')
+    if any(m.pair_dim[i] != 3 or m.pair_solimp[i][4] != int(m.pair_solimp[i][4]) for i in sel):
+        raise SystemExit('FAIL export: only condim 3 contacts with a whole solimp power are ported')
+
+    def anc(b):
+        c = set()
+        while b > 0:
+            c |= set(range(m.body_dofadr[b], m.body_dofadr[b] + m.body_dofnum[b]))
+            b = m.body_parentid[b]
+        return c
+    two = [(anc(m.geom_bodyid[m.pair_geom1[i]]), anc(m.geom_bodyid[m.pair_geom2[i]])) for i in sel]
+    if any(m.body_rootid[m.geom_bodyid[m.pair_geom1[i]]] not in (0, m.body_rootid[m.geom_bodyid[m.pair_geom2[i]]]) for i in sel):
+        raise SystemExit('FAIL export: a pair across two animals (Jacobian about one root only)')
+    hrow = hpattern(m, [a ^ b for a, b in two])
+    head, first, edges, chains, signs, fl, verts, hulls = [], [], [], [], [], [], [], {}
+    for i, (a1, a2) in zip(sel, two):
         g1, g2 = m.pair_geom1[i], m.pair_geom2[i]
-        mesh, b = m.geom_dataid[g2], m.geom_bodyid[g2]
-        ga = m.mesh_graphadr[mesh]
-        nv = m.mesh_graph[ga]
-        edgeadr = m.mesh_graph[ga + 2:ga + 2 + nv]
-        gid = m.mesh_graph[ga + 2 + nv:ga + 2 + 2 * nv]
-        local = m.mesh_graph[ga + 2 + 2 * nv:]
-        local = local[:edgeadr.max() + list(local[edgeadr.max():]).index(-1) + 1]  # through the last vertex's -1
-        chain, bb = [], b
-        while bb > 0:
-            chain = list(range(m.body_dofadr[bb], m.body_dofadr[bb] + m.body_dofnum[bb])) + chain
-            bb = m.body_parentid[bb]
-        if any(m.M_rownnz[c] != k + 1 for k, c in enumerate(chain)) or m.pair_solimp[i][4] != int(m.pair_solimp[i][4]):
-            raise SystemExit('FAIL export: a foot dof chain is not its own M row pattern, or solimp power is not whole')
-        if mesh not in hulls:  # one copy of each hull however many planes it meets (the cube: 6 pairs per part)
-            hulls[mesh] = (len(verts) // 3, len(first))
-            first += list(len(edges) + edgeadr)
-            edges += list(local)
-            verts += list(m.mesh_vert[m.mesh_vertadr[mesh] + gid].ravel())
-        head += [g1, g2, b, nv, *hulls[mesh], len(chain), len(chains)]
+        b = m.geom_bodyid[g2]
+        chain = hrow[max(a1 ^ a2)]
+        nv = 0
+        if m.geom_type[g2] == mujoco.mjtGeom.mjGEOM_MESH:
+            mesh = m.geom_dataid[g2]
+            ga = m.mesh_graphadr[mesh]
+            nv = m.mesh_graph[ga]
+            edgeadr = m.mesh_graph[ga + 2:ga + 2 + nv]
+            gid = m.mesh_graph[ga + 2 + nv:ga + 2 + 2 * nv]
+            local = m.mesh_graph[ga + 2 + 2 * nv:]
+            local = local[:edgeadr.max() + list(local[edgeadr.max():]).index(-1) + 1]  # through the last vertex's -1
+            if mesh not in hulls:  # one copy of each hull however many planes it meets (the cube: 6 pairs per part)
+                hulls[mesh] = (len(verts) // 3, len(first))
+                first += list(len(edges) + edgeadr)
+                edges += list(local)
+                verts += list(m.mesh_vert[m.mesh_vertadr[mesh] + gid].ravel())
+        head += [g1, g2, b, nv, *(hulls[m.geom_dataid[g2]] if nv else (0, 0)), len(chain), len(chains)]
         chains += chain
+        signs += [(c in a2) - (c in a1) for c in chain]
         fl += [m.pair_margin[i], m.pair_gap[i], *m.pair_friction[i][:2], *m.pair_solref[i], *m.pair_solimp[i],
-               m.body_invweight0[m.geom_bodyid[g1], 0] + m.body_invweight0[b, 0], m.geom_rbound[g2]]
-    ints = np.array(head + first + edges + chains + [m.opt.iterations, m.opt.ls_iterations])
+               m.body_invweight0[m.geom_bodyid[g1], 0] + m.body_invweight0[b, 0], m.geom_rbound[g2], m.geom_rbound[g1]]
+    hnnz = [len(r) for r in hrow]
+    hadr = list(np.cumsum([0] + hnnz[:-1]))
+    hcol = [c for r in hrow for c in r]
+    mtoh = [hadr[v] + hrow[v].index(m.M_colind[a]) for v in range(m.nv) for a in range(m.M_rowadr[v], m.M_rowadr[v] + m.M_rownnz[v])]
+    ints = np.array(head + first + edges + chains + signs + hadr + hnnz + hcol + mtoh + [m.opt.iterations, m.opt.ls_iterations])
     floats = fl + verts + [m.opt.impratio, m.opt.tolerance, m.opt.ls_tolerance]
-    sizes = {'NCP': len(pairs), 'NHV': len(verts) // 3, 'NHE': len(edges), 'NCH': len(chains)}
-    hf = sorted({m.pair_geom1[i] for i in pairs if m.geom_type[m.pair_geom1[i]] == mujoco.mjtGeom.mjGEOM_HFIELD})
+    sizes = {'NCP': len(sel), 'NHV': len(verts) // 3, 'NHE': len(edges), 'NCH': len(chains), 'NH': len(hcol)}
+    hf = sorted({m.pair_geom1[i] for i in sel if m.geom_type[m.pair_geom1[i]] == mujoco.mjtGeom.mjGEOM_HFIELD})
     if hf:  # terrain: the heightfield is MuJoCo's sample; the engine evaluates world.py's function from its 8 params
         t = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_NUMERIC, 'terrain')
         if len(hf) > 1 or t < 0 or m.numeric_size[t] != 16:
@@ -335,6 +390,9 @@ def check(mjcf, out, stage, count=64, k=0, oracle=None):
     m, out = export(mjcf, out, FEET if feet else None, stage == 'actuated'), Path(out)
     number, fn, fields = STAGES[stage]
     q, v = standing(load(oracle) if oracle else m, count) if feet else (states(m, count), velocities(m, count, scale=VSCALE))
+    if os.environ.get('STATES'):  # saved states instead (e.g. grooming poses: legs on the head, .work/.../groom_states.npz)
+        z = np.load(os.environ['STATES'])
+        q, v = z['qpos'][:count], z['qvel'][:count]
     if feet and Path(mjcf).name.startswith('cube'):  # every face of the cube carries states
         q, v = onfaces(q, v, float(Path(mjcf).stem[4:]))
     u = np.zeros((count, m.nu))
@@ -351,9 +409,9 @@ def check(mjcf, out, stage, count=64, k=0, oracle=None):
         if stage == 'contact':
             s.opt.disableflags |= mujoco.mjtDisableBit.mjDSBL_ACTUATION
         s.opt.noslip_iterations = 0
-        import re
+        on = set(pairs(s, FEET)[0])
         for i in range(s.npair):
-            if s.geom_type[s.pair_geom1[i]] not in (mujoco.mjtGeom.mjGEOM_PLANE, mujoco.mjtGeom.mjGEOM_HFIELD) or not re.search(FEET, mujoco.mj_id2name(s, mujoco.mjtObj.mjOBJ_GEOM, s.pair_geom2[i])):
+            if i not in on:
                 s.pair_margin[i] = -1e10
         want = reference(s, fn, tuple(f for f in fields if f not in ('qacc_euler', 'qpos_next')) + ('qpos', 'qvel'), q, v, u)
         want['qacc_euler'] = (want.pop('qvel') - v) / m.opt.timestep

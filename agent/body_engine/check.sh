@@ -30,6 +30,15 @@ if [ "$stage" = terrain ]; then  # heightfield ground (tangent plane) on a tilte
   [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
   echo "PASS all terrain checks"; exit 0
 fi
+if [ "$stage" = groom ]; then  # the 7 sphere-sphere grooming pairs (front-leg rubs on head, antennae, each other)
+  $M agent/body_engine/groom.py $X/groom.npz || { echo "FAIL groom states"; exit 1; }
+  STATES=$X/groom.npz $M -m agent.body_engine.model check .work/agent/gpu-body-port/body-v2/body.xml $X/groom actuated 64 || { echo "FAIL groom"; fail=$((fail+1)); }
+  # the gate must fail with the sphere-sphere normal reversed
+  ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo 's/normal = dif \/ len/normal = -dif \/ len/' -- \
+    env STATES=$X/groom.npz $M -m agent.body_engine.model check .work/agent/gpu-body-port/body-v2/body.xml $X/mutant actuated 64 || fail=$((fail+1))
+  [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
+  echo "PASS all groom checks"; exit 0
+fi
 if [ "$stage" = world ]; then  # fly + spider in one model (model.combine): engine vs MuJoCo on it, and MuJoCo merged vs
   # each animal alone (constraint islands: the merged solve must equal the separate ones)
   # spider 8 mm and 200 mm from the fly: each animal computes relative to its own origin (smooth.mojo origin())

@@ -66,11 +66,15 @@ comptime NCP = get_defined_int["NCP", 0]()
 comptime NHV = get_defined_int["NHV", 0]()
 comptime NHE = get_defined_int["NHE", 0]()
 comptime NCH = get_defined_int["NCH", 0]()
+comptime NH = get_defined_int["NH", 0]()  # H's nonzeros (M's plus the fill of pairs that couple two dof chains)
 comptime CPH = NI0
 comptime CFIRST = CPH + 8 * NCP
 comptime CEDGE = CFIRST + NHV
 comptime CCHAIN = CEDGE + NHE
-comptime CITER = CCHAIN + NCH
+comptime CSIGN = CCHAIN + NCH
+comptime HADR = CSIGN + NCH  # H's pattern: rowadr, rownnz, colind (same layout as M's at MADR), then M entry -> H entry
+comptime MTOH = HADR + 2 * NV + NH
+comptime CITER = MTOH + NC
 comptime NU = get_defined_int["NU", 0]()
 comptime CACT = CITER + 2  # STAGE 7 (model.py actuators): per actuator trntype, dof or body, ctrllimited, forcelimited, qpos address
 comptime NI = CACT + 5 * NU if STAGE >= 7 else (CITER + 2 if STAGE >= 6 else NI0)
@@ -95,8 +99,8 @@ comptime QSPRING = STIFF + NJ
 comptime GRAV = QSPRING + NQ
 comptime TSTEP = GRAV + 3
 comptime NFL0 = TSTEP + 1
-comptime CPF = NFL0  # STAGE 6: per pair margin, gap, friction 2, solref 2, solimp 5, invweight, rbound; hull verts; 3 opts
-comptime CVERT = CPF + 13 * NCP
+comptime CPF = NFL0  # STAGE 6: per pair margin, gap, friction 2, solref 2, solimp 5, invweight, rbound 2 and 1; hull verts; 3 opts
+comptime CVERT = CPF + 14 * NCP
 comptime COPT = CVERT + 3 * NHV
 comptime HFG = get_defined_int["HFGEOM", -1]()  # heightfield ground geom (model.py feet), else none
 comptime HFO = COPT + 3  # world.mojo params (NP)
@@ -147,7 +151,7 @@ comptime OGRAD = OMA + NV
 comptime OSRCH = OGRAD + NV
 comptime OMV = OSRCH + NV
 comptime OHN = OMV + NV
-comptime OHNI = OHN + NC
+comptime OHNI = OHN + NH
 comptime ODIAG = OHNI + NV  # Newton iterations, line-search evaluations (printed by main)
 comptime NROW = ODIAG + 2 if STAGE >= 6 else (OCFRC + 6 * NB if STAGE >= 4 else NOUT)
 comptime LI = row_major[NI]()
@@ -297,39 +301,39 @@ def atan2p(y: Float32, x: Float32) -> Float32:
     return 2 * (1.5707963267949 - a if flip else a)
 
 
-def factorI(mi: TI, res: TO, f: Int, L: Int, LI_: Int):
+def factorI(mi: TI, res: TO, f: Int, L: Int, LI_: Int, A: Int = MADR):
     """MuJoCo mj_factorI: sparse L'DL of rows L.. in place, backward over rows k: L(i, 0..i) -= L(i, 0..i) L(k, i) / L(k, k),
-    then L(k, :) /= L(k, k); 1 / L(k, k) to rows LI_.."""
+    then L(k, :) /= L(k, k); 1 / L(k, k) to rows LI_.. Pattern at A: rowadr, rownnz, colind (M's, or H's at HADR)."""
     for k in range(NV - 1, -1, -1):
-        var start = Int(mi[MADR + k])
-        var diag = Int(mi[MNNZ + k]) - 1
+        var start = Int(mi[A + k])
+        var diag = Int(mi[A + NV + k]) - 1
         var end = start + diag
         var invD = 1 / get(res, f, L + end)
         res[(LI_ + k) * F + f] = invD
         for adr in range(end - 1, start - 1, -1):
-            var i = Int(mi[MCOL + adr])
+            var i = Int(mi[A + 2 * NV + adr])
             var scl = -get(res, f, L + adr) * invD
-            var ri = Int(mi[MADR + i])
-            for c in range(Int(mi[MNNZ + i])):
+            var ri = Int(mi[A + i])
+            for c in range(Int(mi[A + NV + i])):
                 res[(L + ri + c) * F + f] += get(res, f, L + start + c) * scl
         for c in range(diag):
             res[(L + start + c) * F + f] = get(res, f, L + start + c) * invD
 
 
-def solveLD(mi: TI, res: TO, f: Int, X: Int, L: Int, LI_: Int):
+def solveLD(mi: TI, res: TO, f: Int, X: Int, L: Int, LI_: Int, A: Int = MADR):
     """MuJoCo mj_solveLD, one vector: x <- (L'DL)^-1 x for the factor in rows L.., 1/D in rows LI_.."""
     for i in range(NV - 1, -1, -1):  # x <- L^-T x
-        var start = Int(mi[MADR + i])
+        var start = Int(mi[A + i])
         var x_i = get(res, f, X + i)
-        for adr in range(start, start + Int(mi[MNNZ + i]) - 1):
-            res[(X + Int(mi[MCOL + adr])) * F + f] -= get(res, f, L + adr) * x_i
+        for adr in range(start, start + Int(mi[A + NV + i]) - 1):
+            res[(X + Int(mi[A + 2 * NV + adr])) * F + f] -= get(res, f, L + adr) * x_i
     for i in range(NV):  # x <- D^-1 x
         res[(X + i) * F + f] *= get(res, f, LI_ + i)
     for i in range(NV):  # x <- L^-1 x
-        var start = Int(mi[MADR + i])
+        var start = Int(mi[A + i])
         var dot: Float32 = 0
-        for adr in range(start, start + Int(mi[MNNZ + i]) - 1):
-            dot += get(res, f, L + adr) * get(res, f, X + Int(mi[MCOL + adr]))
+        for adr in range(start, start + Int(mi[A + NV + i]) - 1):
+            dot += get(res, f, L + adr) * get(res, f, X + Int(mi[A + 2 * NV + adr]))
         res[(X + i) * F + f] -= dot
 
 
@@ -447,7 +451,7 @@ def terrain(mf: TF) -> PW:
 def contacts(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int):
     """MuJoCo mjc_PlaneConvex (support vertex + hull neighbours below the margin, at most 3, none within 0.3 rbound of
     the first), mj_instantiateContact (pyramidal condim 3, Jacobian over the body's dof chain), mj_diagApprox,
-    mj_makeImpedance and mj_referenceConstraint, per exported plane-mesh pair. A heightfield ground (HFGEOM) is not
+    mj_makeImpedance and mj_referenceConstraint, per exported plane-mesh pair; mjc_SphereSphere (one contact on the centre line, a two-body Jacobian) per sphere pair. A heightfield ground (HFGEOM) is not
     mjc_ConvexHField (GJK+EPA on cell prisms): the plane is the tangent plane of world.mojo's terrain function under
     the mesh centre, exact on linear terrain, wrong where the terrain bends inside one mesh."""
     var h = mf[TSTEP]
@@ -456,47 +460,71 @@ def contacts(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int):
         var g1 = Int(mi[CPH + 8 * p]); var g2 = Int(mi[CPH + 8 * p + 1]); var b = Int(mi[CPH + 8 * p + 2])
         var nvert = Int(mi[CPH + 8 * p + 3]); var voff = Int(mi[CPH + 8 * p + 4]); var eoff = Int(mi[CPH + 8 * p + 5])
         var nch = Int(mi[CPH + 8 * p + 6]); var choff = Int(mi[CPH + 8 * p + 7])
-        var pf = CPF + 13 * p
+        var pf = CPF + 14 * p
         var margin = mf[pf]; var gap = mf[pf + 1]; var f0 = mf[pf + 2]; var f1 = mf[pf + 3]
         var b1 = body(res, f, Int(mi[GBODY + g1]))
         var q1 = mul(b1[1], m4(mf, GQUAT + 4 * g1))
-        var o = origin(mi, qpos, f, b)  # the plane (a world geom, world coordinates) in the animal's frame
-        var pos1 = V3(get(res, f, OG + 3 * g1), get(res, f, OG + 3 * g1 + 1), get(res, f, OG + 3 * g1 + 2), 0) - o
+        var pos1 = V3(get(res, f, OG + 3 * g1), get(res, f, OG + 3 * g1 + 1), get(res, f, OG + 3 * g1 + 2), 0)
         var b2 = body(res, f, b)
         var q2 = mul(b2[1], m4(mf, GQUAT + 4 * g2))
         var pos2 = V3(get(res, f, OG + 3 * g2), get(res, f, OG + 3 * g2 + 1), get(res, f, OG + 3 * g2 + 2), 0)
-        var normal = rot(q1, basis(2))
-        comptime if HFG >= 0:
-            if g1 == HFG:
-                var w = pos2 + o
-                var hg = height_grad(w[0], w[1], terrain(mf))
-                normal = V3(-hg[1], -hg[2], 1, 0) / sqrt(hg[1] * hg[1] + hg[2] * hg[2] + 1)
-                pos1 = V3(pos2[0], pos2[1], hg[0] - o[2], 0)  # pos2's own x, y: no round trip through world coordinates
-        if (normal * (pos2 - pos1)).reduce_add() - mf[pf + 12] > margin:  # bounding sphere clear of the plane: the
-            for c in range(3):                                          # support vertex would be too (no contact)
-                res[(OVALID + 3 * p + c) * F + f] = 0
-            continue
-        var locdir = rot(Q4(q2[0], -q2[1], -q2[2], -q2[3]), -normal)
+        var normal: V3
+        var pnt: V3
+        var dist: Float32
+        var locdir = V3(0)
         var best = 0
-        var bdot: Float32 = -3.4e38
-        for v in range(nvert):
-            var vd = (locdir * m3(mf, CVERT + 3 * (voff + v))).reduce_add()
-            if vd > bdot:
-                bdot = vd
-                best = v
+        var ncap = 3
+        if nvert == 0:  # mjraw_SphereSphere: one contact on the centre line, normal from geom1 to geom2
+            var r1 = mf[pf + 13]; var r2 = mf[pf + 12]
+            var dif = pos2 - pos1
+            var cd2 = (dif * dif).reduce_add()
+            if cd2 > (margin + r1 + r2) * (margin + r1 + r2):
+                for c in range(3):
+                    res[(OVALID + 3 * p + c) * F + f] = 0
+                continue
+            var len = sqrt(cd2)
+            dist = len - r1 - r2
+            if len < 1e-15:  # same centre: the cross product of the z axes
+                normal = cross(col(q1, 2), col(q2, 2))
+                normal = normal / sqrt((normal * normal).reduce_add())
+            else:
+                normal = dif / len
+            pnt = pos1 + normal * (r1 + dist)  # the loop's contact point pnt - dist/2 normal is MuJoCo's pos
+            ncap = 1
+        else:
+            var o = origin(mi, qpos, f, b)  # the plane (a world geom, world coordinates) in the animal's frame
+            pos1 = pos1 - o
+            normal = rot(q1, basis(2))
+            comptime if HFG >= 0:
+                if g1 == HFG:
+                    var w = pos2 + o
+                    var hg = height_grad(w[0], w[1], terrain(mf))
+                    normal = V3(-hg[1], -hg[2], 1, 0) / sqrt(hg[1] * hg[1] + hg[2] * hg[2] + 1)
+                    pos1 = V3(pos2[0], pos2[1], hg[0] - o[2], 0)  # pos2's own x, y: no round trip through world coordinates
+            if (normal * (pos2 - pos1)).reduce_add() - mf[pf + 12] > margin:  # bounding sphere clear of the plane: the
+                for c in range(3):                                          # support vertex would be too (no contact)
+                    res[(OVALID + 3 * p + c) * F + f] = 0
+                continue
+            locdir = rot(Q4(q2[0], -q2[1], -q2[2], -q2[3]), -normal)
+            var bdot: Float32 = -3.4e38
+            for v in range(nvert):
+                var vd = (locdir * m3(mf, CVERT + 3 * (voff + v))).reduce_add()
+                if vd > bdot:
+                    bdot = vd
+                    best = v
+            pnt = rot(q2, m3(mf, CVERT + 3 * (voff + best))) + pos2
+            dist = (normal * (pnt - pos1)).reduce_add()
         # contact frame (mju_makeFrame from the normal), shared by the pair's contacts
         var y = basis(1) if normal[1] < 0.5 and normal[1] > -0.5 else basis(2)
         y = y - normal * (normal * y).reduce_add()
         y = y / sqrt((y * y).reduce_add())
         var z = cross(normal, y)
         var com = V3(get(res, f, OSC + 3 * Int(mi[ROOT + b])), get(res, f, OSC + 3 * Int(mi[ROOT + b]) + 1), get(res, f, OSC + 3 * Int(mi[ROOT + b]) + 2), 0)
-        var pnt = rot(q2, m3(mf, CVERT + 3 * (voff + best))) + pos2
-        var dist = (normal * (pnt - pos1)).reduce_add()
         var first = pnt - normal * (0.5 * dist)
         var threshold = (normal * (pos2 - pos1)).reduce_add() - margin
         var count = 0
         var e = Int(mi[CFIRST + eoff + best])
-        while count < 3:
+        while count < ncap:
             if count > 0:  # hull neighbours of the support vertex
                 var loc = Int(mi[CEDGE + e])
                 if loc < 0:
@@ -514,12 +542,13 @@ def contacts(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int):
             var cpos = pnt - normal * (0.5 * dist)
             var slot = 3 * p + count
             res[(OVALID + slot) * F + f] = 1
-            # mj_jac over the chain: jacp = cdof_lin + cdof_ang x (pos - subtree_com[root]); rows to the contact frame
+            # mj_jacDifPair over the chain: jacp = cdof_lin + cdof_ang x (pos - subtree_com[root]), signed (geom2's body
+            # minus geom1's; a dof of both cancels exactly); rows to the contact frame
             var off = cpos - com
             for c in range(nch):
                 var cd = OCD + 6 * Int(mi[CCHAIN + choff + c])
                 var ang = V3(get(res, f, cd), get(res, f, cd + 1), get(res, f, cd + 2), 0)
-                var jp = V3(get(res, f, cd + 3), get(res, f, cd + 4), get(res, f, cd + 5), 0) + cross(ang, off)
+                var jp = (V3(get(res, f, cd + 3), get(res, f, cd + 4), get(res, f, cd + 5), 0) + cross(ang, off)) * Float32(mi[CSIGN + choff + c])
                 var jn = (normal * jp).reduce_add(); var j1 = (y * jp).reduce_add(); var j2 = (z * jp).reduce_add()
                 var jadr = OJ + 12 * choff + 4 * count * nch + c
                 res[jadr * F + f] = jn + f0 * j1
@@ -647,10 +676,13 @@ def update(mi: TI, res: TO, f: Int) -> Float32:
 
 
 def hessian(mi: TI, res: TO, f: Int):
-    """MuJoCo MakeHessian + FactorizeHessian: H = M + J' D J over active rows, in M's own sparse pattern (a foot's
-    dof chain is exactly the pattern of its deepest row), factored L'DL with mj_factorI."""
+    """MuJoCo MakeHessian + FactorizeHessian: H = M + J' D J over active rows, in H's pattern (model.py hpattern: M's
+    plus the fill of pairs coupling two limbs; a pair's dof chain is exactly the pattern of its deepest row),
+    factored L'DL with mj_factorI."""
+    for c in range(NH):
+        res[(OHN + c) * F + f] = 0
     for c in range(NC):
-        res[(OHN + c) * F + f] = get(res, f, OM + c)
+        res[(OHN + Int(mi[MTOH + c])) * F + f] = get(res, f, OM + c)
     for p in range(NCP):
         var nch = Int(mi[CPH + 8 * p + 6]); var choff = Int(mi[CPH + 8 * p + 7])
         for sl in range(3):
@@ -664,10 +696,10 @@ def hessian(mi: TI, res: TO, f: Int):
                 var jadr = OJ + 12 * choff + (4 * sl + k) * nch
                 for a in range(nch):
                     var ja = get(res, f, jadr + a) * D
-                    var ra = Int(mi[MADR + Int(mi[CCHAIN + choff + a])])
+                    var ra = Int(mi[HADR + Int(mi[CCHAIN + choff + a])])
                     for bb in range(a + 1):
                         res[(OHN + ra + bb) * F + f] += ja * get(res, f, jadr + bb)
-    factorI(mi, res, f, OHN, OHNI)
+    factorI(mi, res, f, OHN, OHNI, HADR)
 
 
 def gradient(mi: TI, res: TO, f: Int):
@@ -676,7 +708,7 @@ def gradient(mi: TI, res: TO, f: Int):
         var g = get(res, f, OMA + v) - get(res, f, OQSM + v) - get(res, f, OQFC + v)
         res[(OGRAD + v) * F + f] = g
         res[(OSRCH + v) * F + f] = g
-    solveLD(mi, res, f, OSRCH, OHN, OHNI)
+    solveLD(mi, res, f, OSRCH, OHN, OHNI, HADR)
     for v in range(NV):
         res[(OSRCH + v) * F + f] = -get(res, f, OSRCH + v)
 
