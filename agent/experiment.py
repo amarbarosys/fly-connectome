@@ -24,15 +24,15 @@ from agent.verify_shiu import _reference_graph
 
 
 def cells():
-    """FlyWire annotation columns in graph order (class = cell_class, else super_class), parsed once into .work."""
-    path = ROOT / '.work/agent/shiu/cells-flywire.npz'
+    """FlyWire annotation columns in graph order (class = cell_class, else super_class; nt = top_nt), parsed once into .work."""
+    path = ROOT / '.work/agent/shiu/cells-flywire-v2.npz'
     if not path.is_file():
         index = _reference_graph()[3]
-        table = {k: np.full(len(index), '', dtype=object) for k in ('klass', 'type', 'side', 'super')}
+        table = {k: np.full(len(index), '', dtype=object) for k in ('klass', 'type', 'side', 'super', 'nt')}
         for r in csv.DictReader(open(ANNOTATIONS), delimiter='\t'):
             i = index.get(int(r['root_id']))
             if i is not None:
-                for k, col in (('klass', 'cell_class'), ('type', 'cell_type'), ('side', 'side'), ('super', 'super_class')):
+                for k, col in (('klass', 'cell_class'), ('type', 'cell_type'), ('side', 'side'), ('super', 'super_class'), ('nt', 'top_nt')):
                     table[k][i] = r[col]
         table['klass'] = np.where(table['klass'] == '', table['super'], table['klass'])
         np.savez(path, **{k: v.astype(str) for k, v in table.items()})
