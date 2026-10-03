@@ -40,7 +40,7 @@ delivers. A full slot is counted and fails the run; nothing is dropped silently.
 """
 from std.atomic import Atomic
 from std.ffi import c_ssize_t, external_call
-from std.os import getenv
+from std.os import getenv, remove
 from std.os.path import exists
 from std.sys import argv, get_defined_int
 from std.gpu import block_idx, block_dim, thread_idx
@@ -185,16 +185,21 @@ def kick(
     u: TileTensor[DType.float32, type_of(LS), MutAnyOrigin],
     last: TileTensor[DType.int16, type_of(LS), MutAnyOrigin],
     fill: TileTensor[DType.int32, type_of(LSLOT), MutAnyOrigin],
-    count: Int32, seed: UInt32, t: Int32, clear: Int32, amount: Float32,
+    amt: TileTensor[DType.float32, type_of(LS), MutAnyOrigin],
+    w0: TileTensor[DType.int32, type_of(LS), MutAnyOrigin],
+    w1: TileTensor[DType.int32, type_of(LS), MutAnyOrigin],
+    count: Int32, seed: UInt32, t: Int32, clear: Int32,
 ):
     var k = block_idx.x * block_dim.x + thread_idx.x
     if k == 0:
         fill[Int(clear)] = 0  # delivered this step; integrate writes it next step
     if k >= Int(count):
         return
+    if t < w0[k] or t >= w1[k]:  # entry's window [t0, t1) in steps
+        return
     var i = Int(stim[k])
     if Int32(last[i]) != t and uniform(seed, UInt32(t), UInt32(key[k])) < p[k]:
-        u[i] += amount
+        u[i] += amt[k]
 
 
 def gather(
@@ -257,6 +262,23 @@ def load(path: String, size: Int) raises -> List[UInt8]:
     if size >= 0 and len(raw) != size * 4:
         raise Error(path + ": unexpected size")
     return raw^
+
+
+def read_drive(work: String, count: Int, mut amt: List[Float32], mut w0: List[Int32], mut w1: List[Int32]) raises -> Bool:
+    """Fill amounts and windows from stim_amount.bin / stim_window.bin when present; True when either was read."""
+    var got = False
+    if exists(work + "stim_amount.bin"):
+        var a = load(work + "stim_amount.bin", count)
+        for i in range(count):
+            amt[i] = a.unsafe_ptr().unsafe_bitcast[Float32]().unsafe_offset(i)[]
+        got = True
+    if exists(work + "stim_window.bin"):
+        var w = load(work + "stim_window.bin", 2 * count)
+        for i in range(count):
+            w0[i] = w.unsafe_ptr().unsafe_bitcast[Int32]().unsafe_offset(2 * i)[]
+            w1[i] = w.unsafe_ptr().unsafe_bitcast[Int32]().unsafe_offset(2 * i + 1)[]
+        got = True
+    return got
 
 
 def main() raises:
@@ -329,10 +351,17 @@ def main() raises:
     if refractory > 255 or Int(windows.unsafe_offset(window_count - 1)[]) > 32000:
         raise Error("state is int16 last-spike step and uint8 refractory: needs <= 32000 steps, <= 255 refractory steps")
     var rfc = List[UInt8](length=S, fill=UInt8(refractory))
+    # drive entries: optional stim_amount.bin (float32 per entry, default the Poisson kick) and stim_window.bin
+    # (int32 t0, t1 per entry, steps, default always); only Poisson-kick entries drop the refractory period
+    var amt = List[Float32](length=max(stim_count, 1), fill=k.unsafe_offset(4)[])  # sized to the entries, not to N x C
+    var w0 = List[Int32](length=max(stim_count, 1), fill=0)
+    var w1 = List[Int32](length=max(stim_count, 1), fill=Int32.MAX)
+    _ = read_drive(work, stim_count, amt, w0, w1)
     for i in range(stim_count):
         stim[i] = stim_raw.unsafe_ptr().unsafe_bitcast[Int32]().unsafe_offset(i)[]
         p[i] = p_raw.unsafe_ptr().unsafe_bitcast[Float32]().unsafe_offset(i)[]
-        rfc[Int(stim[i])] = 0
+        if amt[i] == k.unsafe_offset(4)[]:
+            rfc[Int(stim[i])] = 0
 
     var ctx = DeviceContext(0)
     var step_integrate = ctx.compile_function[integrate]()
@@ -365,6 +394,9 @@ def main() raises:
     var stim_b = ctx.enqueue_create_buffer[DType.int32](S)
     var key_b = ctx.enqueue_create_buffer[DType.int32](S)
     var p_b = ctx.enqueue_create_buffer[DType.float32](S)
+    var amt_b = ctx.enqueue_create_buffer[DType.float32](max(stim_count, 1))  # kick reads index < count only
+    var w0_b = ctx.enqueue_create_buffer[DType.int32](max(stim_count, 1))
+    var w1_b = ctx.enqueue_create_buffer[DType.int32](max(stim_count, 1))
     var ring_b = ctx.enqueue_create_buffer[DType.int32](SLOTS * CAP)
     var fill_b = ctx.enqueue_create_buffer[DType.int32](SLOTS + 1)
     var m_b = ctx.enqueue_create_buffer[DType.float32](MP * S if mplanes > 0 else 1)  # never read when off
@@ -387,6 +419,9 @@ def main() raises:
     if stim_count > 0:
         ctx.enqueue_copy(key_b.create_sub_buffer[DType.int32](0, stim_count), key_raw.unsafe_ptr().unsafe_bitcast[Int32]())
     ctx.enqueue_copy(p_b, p.unsafe_ptr())
+    ctx.enqueue_copy(amt_b, amt.unsafe_ptr())
+    ctx.enqueue_copy(w0_b, w0.unsafe_ptr())
+    ctx.enqueue_copy(w1_b, w1.unsafe_ptr())
     u_b.enqueue_fill(0.0)
     g_b.enqueue_fill(0.0)
     last_b.enqueue_fill(-32768)
@@ -410,6 +445,9 @@ def main() raises:
     var stim_t = TileTensor(stim_b, LS)
     var key_t = TileTensor(key_b, LS)
     var p_t = TileTensor(p_b, LS)
+    var amt_t = TileTensor(amt_b, LS)
+    var w0_t = TileTensor(w0_b, LS)
+    var w1_t = TileTensor(w1_b, LS)
     var m_t = TileTensor(m_b, LM)
     var modp_t = TileTensor(modp_b, LMP)
     var mk_t = TileTensor(mk_b, LMK)
@@ -473,6 +511,16 @@ def main() raises:
                 continue
             var fresh = load(work + "stim_p.bin", stim_count)
             ctx.enqueue_copy(p_b.create_sub_buffer[DType.float32](0, stim_count), fresh.unsafe_ptr().unsafe_bitcast[Float32]())
+            if exists(work + "pushed"):  # ShiuLive.push changed settings: the scale row (gains, cuts, silencing)
+                remove(work + "pushed")  # and drive amounts / windows; otherwise nothing is reread
+                if grouped:
+                    var sc = load(work + "scale.bin", C * groups)
+                    ctx.enqueue_copy(scale_b.create_sub_buffer[DType.float32](0, C * groups), sc.unsafe_ptr().unsafe_bitcast[Float32]())
+                if read_drive(work, stim_count, amt, w0, w1):
+                    ctx.enqueue_copy(amt_b, amt.unsafe_ptr())
+                    ctx.enqueue_copy(w0_b, w0.unsafe_ptr())
+                    ctx.enqueue_copy(w1_b, w1.unsafe_ptr())
+                ctx.synchronize()
             u_b.enqueue_fill(0.0)
             g_b.enqueue_fill(0.0)
             last_b.enqueue_fill(-32768)
@@ -490,8 +538,8 @@ def main() raises:
                     k.unsafe_offset(0)[], k.unsafe_offset(1)[], k.unsafe_offset(2)[], k.unsafe_offset(3)[], Int32(t), slot, Int32(mplanes), grid_dim=(S + BLOCK - 1) // BLOCK, block_dim=BLOCK)
                 ctx.enqueue_function(step_deliver, rows_t, cols_t, w_t, grp_t, scale_t, rank_t, factor_t, g_t, ring_t, fill_t, m_t, modp_t,
                     Int32(t), due, Int32(groups), plastic, punish, Int32(mplanes), grid_dim=DGRID, block_dim=BLOCK)
-                ctx.enqueue_function(step_kick, stim_t, key_t, p_t, u_t, last_t, fill_t, Int32(stim_count), seed + UInt32(sniff), Int32(t),
-                    due, k.unsafe_offset(4)[], grid_dim=kick_grid, block_dim=BLOCK)
+                ctx.enqueue_function(step_kick, stim_t, key_t, p_t, u_t, last_t, fill_t, amt_t, w0_t, w1_t, Int32(stim_count), seed + UInt32(sniff), Int32(t),
+                    due, grid_dim=kick_grid, block_dim=BLOCK)
                 t += 1
             if gathered:
                 ctx.enqueue_function(step_gather, counts_t, idx_t, got_t, Int32(readout_count), Int32(window * readout_count),

@@ -92,6 +92,7 @@ class ShiuBrain:
         self.em, self.eg, self.c = constants(dt)
         self.delay, self.refractory = round(T_DLY / dt), round(T_RFC / dt)
         self.stim = {}  # entry (column * n + neuron) -> Poisson probability per step
+        self.drive = {}  # entry -> (amount added to u per event, t0, t1 steps); absent = Poisson kick, always on
         self.key = {}  # entry -> entry whose Poisson draws it uses (common random numbers)
         self.grp, self.scale, self.plastic_groups = None, None, []
         self.modp = None
@@ -175,13 +176,39 @@ class ShiuBrain:
         self.t, self.counts = 0, np.zeros(size, np.int32)
         self.m = np.zeros((0 if self.modp is None else len(self.mk), size), np.float32)
 
-    def stimulate(self, cells, rate, fly=None, key=None):
+    def stimulate(self, cells, rate, fly=None, key=None, amount=None, window=None, p=None):
         """Poisson input at `rate` Hz on `cells` (all flies unless one is named); with `key`, the
-        named fly's events are drawn as column `key`'s would be, so columns can share inputs."""
+        named fly's events are drawn as column `key`'s would be, so columns can share inputs.
+        amount: u added per event (default the Poisson kick W_SYN x F_POI, which also drops the cell's
+        refractory period); window: (t0, t1) steps it is on; p: probability per step instead of rate x dt
+        (p = 1 with a small amount is a constant injected current, see inject)."""
         for column in range(self.flies) if fly is None else [fly]:
             for cell in np.asarray(cells, np.int64):
-                self.stim[int(column * self.n + cell)] = np.float32(rate * self.dt)
-                self.key[int(column * self.n + cell)] = int((column if key is None else key) * self.n + cell)
+                e = int(column * self.n + cell)
+                self.stim[e] = np.float32(rate * self.dt if p is None else p)
+                self.key[e] = int((column if key is None else key) * self.n + cell)
+                if amount is not None or window is not None:
+                    self.drive[e] = (np.float32(W_SYN * F_POI if amount is None else amount), *(window or (0, 2**31 - 1)))
+                else:
+                    self.drive.pop(e, None)
+
+    def inject(self, cells, current, fly=None, window=None):
+        """Constant current on `cells`: u += current (mV per ms) x dt every step it is not refractory."""
+        self.stimulate(cells, 0, fly=fly, amount=current * self.dt * 1e3, window=window, p=1.0)
+
+    def _write_drive(self, work, entries):
+        """stim_amount.bin + stim_window.bin when any entry is not a plain always-on Poisson kick, else neither."""
+        for name in ('stim_amount.bin', 'stim_window.bin'):
+            (work / name).unlink(missing_ok=True)
+        if self.drive:
+            amount, window = self._drive_arrays(entries)
+            amount.tofile(work / 'stim_amount.bin')
+            window.tofile(work / 'stim_window.bin')
+
+    def _drive_arrays(self, entries):
+        """(amount, t0, t1) per entry, in entry order: the worker's stim_amount.bin / stim_window.bin."""
+        d = [self.drive.get(int(e), (np.float32(W_SYN * F_POI), 0, 2**31 - 1)) for e in entries]
+        return np.array([x[0] for x in d], np.float32), np.array([x[1:] for x in d], np.int32).reshape(-1, 2)
 
     def _stim_arrays(self):
         entries = np.fromiter(self.stim, np.int64, len(self.stim))
@@ -193,8 +220,9 @@ class ShiuBrain:
     def step(self, steps=1):
         entries, p = self._stim_arrays()
         keys = self._stim_keys(entries)
+        amount, window = self._drive_arrays(entries)
         refractory = np.full(self.n * self.flies, self.refractory, np.int64)
-        refractory[entries] = 0
+        refractory[entries[amount == np.float32(W_SYN * F_POI)]] = 0
         for _ in range(steps):
             t = self.t
             moving = t - 1 - self.last >= refractory
@@ -232,8 +260,8 @@ class ShiuBrain:
                     keep &= q < 0
                 self.g += np.bincount(target[keep], w[keep], minlength=self.g.size).astype(np.float32)
             self.ring[t % self.delay] = spike
-            hit = entries[(uniform(self.seed, t, keys) < p) & (self.last[entries] != t)]
-            self.u[hit] += np.float32(W_SYN * F_POI)
+            on = (uniform(self.seed, t, keys) < p) & (self.last[entries] != t) & (window[:, 0] <= t) & (t < window[:, 1])
+            np.add.at(self.u, entries[on], amount[on])
             self.t += 1
 
     def run(self, windows):
@@ -285,6 +313,7 @@ class ShiuGPU(ShiuBrain):
         entries.astype(np.int32).tofile(work / 'stim_index.bin')
         self._stim_keys(entries).astype(np.int32).tofile(work / 'stim_key.bin')
         p.tofile(work / 'stim_p.bin')
+        self._write_drive(work, entries)
         np.asarray(windows, np.int32).tofile(work / 'windows.bin')
         self._write_groups(work)
         np.asarray([self.em, self.eg, self.c, V_TH, W_SYN * F_POI], np.float32).tofile(work / 'consts.bin')
@@ -320,6 +349,7 @@ class ShiuLive(ShiuGPU):
         entries.astype(np.int32).tofile(self.work / 'stim_index.bin')
         self._stim_keys(entries).astype(np.int32).tofile(self.work / 'stim_key.bin')
         p.tofile(self.work / 'stim_p.bin')
+        self._write_drive(self.work, entries)
         self.windows, self.readout = np.asarray(windows, np.int32), np.asarray(readout, np.int32)
         self.windows.tofile(self.work / 'windows.bin')
         self.readout.tofile(self.work / 'readout.bin')
@@ -363,6 +393,17 @@ class ShiuLive(ShiuGPU):
         self.proc.stdin.write('reward\n')
         self.proc.stdin.flush()
         self._ok()
+
+    def push(self):
+        """Send changed settings to the running worker; it reads them at the next sniff: the scale row (same
+        groups) and the drive amounts / windows / probabilities of the entries given at start."""
+        if self.scale is not None:
+            self.scale.tofile(self.work / 'scale.bin')
+        entries, p = self._stim_arrays()
+        p.tofile(self.work / 'stim_p.bin')
+        self._write_drive(self.work, entries)
+        (self.work / 'pushed').touch()  # the worker rereads only after a push
+        return p
 
     def sniff(self, p):
         np.asarray(p, np.float32).tofile(self.work / 'stim_p.bin')
