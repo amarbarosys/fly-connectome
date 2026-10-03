@@ -28,7 +28,7 @@ readout.bin only (gather.bin, int32 windows x R), then prints "ok"; "q" ends. Sn
 seed + k, so repeated sniffs draw fresh Poisson events.
 Slow modulation (modp.bin + modk.bin, ShiuBrain.modulate): edges of a modulatory group add to the target's level
 m[plane] instead of g; every step m decays by its plane's factor and the target integrates g x c x max(0, 1 + sum
-k m). Levels reset with each sniff; off (no modp.bin) the arithmetic is the unmodulated model's, bit for bit. FLY_RECORD=path appends every neuron's count at every
+k m) + c x sum b m (b: a slow depolarising (> 0) or hyperpolarising current). Levels reset with each sniff; off (no modp.bin) the arithmetic is the unmodulated model's, bit for bit. FLY_RECORD=path appends every neuron's count at every
 window of every sniff to path (int32 sniffs x windows x C x N, counts since the sniff began): the full brain.
 
 Per step t, three launches in ShiuBrain's order: integrate + threshold + reset, push delivery
@@ -70,7 +70,7 @@ comptime LSLOT = row_major[SLOTS + 1]()  # last entry counts overflowed spikes
 comptime MP = 3  # slow modulator planes (dopamine, octopamine, serotonin)
 comptime LM = row_major[MP * S]()
 comptime LMP = row_major[GROUPS]()
-comptime LMK = row_major[2 * MP]()
+comptime LMK = row_major[3 * MP]()
 
 
 def integrate(
@@ -88,17 +88,19 @@ def integrate(
     var i = block_idx.x * block_dim.x + thread_idx.x
     if i >= S:
         return
-    var gain: Float32 = 1.0  # slow modulation: gain from the levels before this step's decay
+    var gain: Float32 = 1.0  # slow modulation: gain and drive from the levels before this step's decay
+    var drive: Float32 = 0.0
     if mplanes > 0:
         var acc: Float32 = 0.0
         for q in range(Int(mplanes)):
             var level = m[q * S + i]
             acc += mk[MP + q] * level
+            drive += mk[2 * MP + q] * level
             m[q * S + i] = level * mk[q]
         gain = max(1.0 + acc, 0.0)
     var uu = u[i]
     var gg = g[i]
-    if uu == 0.0 and gg == 0.0:  # at rest: stays exactly 0 and cannot spike (v_th > 0); skip 16 B of state
+    if uu == 0.0 and gg == 0.0 and drive == 0.0:  # at rest: stays exactly 0 and cannot spike (v_th > 0); skip 16 B of state
         return
     var since = t - Int32(last[i])
     var r = Int32(rfc[i])
@@ -106,7 +108,7 @@ def integrate(
         gg = 0.0                      # (deliver adds unconditionally; g is 0 here in the oracle)
     if since - 1 >= r:
         if mplanes > 0:
-            uu = uu * em + gg * c * gain
+            uu = uu * em + gg * c * gain + drive * c
         else:
             uu = uu * em + gg * c
         gg = gg * eg
@@ -299,15 +301,15 @@ def main() raises:
             raise Error("punish.bin: needs plastic.bin and a different group in range")
     var planes = 2 if punish >= 0 else 1
     var modp = List[Int32](length=GROUPS, fill=-1)
-    var mk = List[Float32](length=2 * MP, fill=0)
+    var mk = List[Float32](length=3 * MP, fill=0)
     var mplanes = 0
-    if exists(work + "modp.bin"):  # modp.bin: int32 plane per edge group (-1 fast); modk.bin: decay x MP, gain k x MP
+    if exists(work + "modp.bin"):  # modp.bin: int32 plane per edge group (-1 fast); modk.bin: decay, gain k, drive b (x MP each)
         var mp_raw = load(work + "modp.bin", groups)
-        var mk_raw = load(work + "modk.bin", 2 * MP)
+        var mk_raw = load(work + "modk.bin", 3 * MP)
         for gi in range(groups):
             modp[gi] = mp_raw.unsafe_ptr().unsafe_bitcast[Int32]().unsafe_offset(gi)[]
             mplanes = max(mplanes, Int(modp[gi]) + 1)
-        for q in range(2 * MP):
+        for q in range(3 * MP):
             mk[q] = mk_raw.unsafe_ptr().unsafe_bitcast[Float32]().unsafe_offset(q)[]
         if mplanes > MP or not grouped:
             raise Error("modp.bin: needs edge groups and planes 0..2")
@@ -367,7 +369,7 @@ def main() raises:
     var fill_b = ctx.enqueue_create_buffer[DType.int32](SLOTS + 1)
     var m_b = ctx.enqueue_create_buffer[DType.float32](MP * S if mplanes > 0 else 1)  # never read when off
     var modp_b = ctx.enqueue_create_buffer[DType.int32](GROUPS)
-    var mk_b = ctx.enqueue_create_buffer[DType.float32](2 * MP)
+    var mk_b = ctx.enqueue_create_buffer[DType.float32](3 * MP)
     ctx.enqueue_copy(modp_b, modp.unsafe_ptr())
     ctx.enqueue_copy(mk_b, mk.unsafe_ptr())
     m_b.enqueue_fill(0.0)

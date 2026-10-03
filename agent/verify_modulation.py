@@ -22,6 +22,7 @@ from agent.verify_shiu import REF, _reference_graph
 import numpy as np
 
 K = (0.05, 0.05, 0.05)  # gain per unit level: strong enough that modulation changes spikes within 200 steps
+B = (0.1, 0.1, 0.1)  # slow current per unit level, on in the exact check so both terms are compared
 
 
 def exact(steps=(50, 100, 200), columns=2):
@@ -32,7 +33,7 @@ def exact(steps=(50, 100, 200), columns=2):
     for engine in (ShiuBrain, ShiuGPU):
         brain = engine(pre, post, w, n=len(index), flies=columns, seed=7)
         brain.stimulate(sugar, 200.0)
-        brain.modulators(nt, k=K)
+        brain.modulators(nt, k=K, b=B)
         runs[engine.__name__] = brain.run(list(steps))
     off = ShiuBrain(pre, post, w, n=len(index), flies=columns, seed=7)
     off.stimulate(sugar, 200.0)

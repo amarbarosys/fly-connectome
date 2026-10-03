@@ -103,18 +103,19 @@ class ShiuBrain:
         self.grp, self.scale = np.asarray(grp, np.uint8), np.asarray(scale, np.float32).reshape(self.flies, -1)
         assert len(self.grp) == len(self.col) and int(self.grp.max(initial=0)) < self.scale.shape[1] <= 256
 
-    def modulate(self, plane, tau, k):
+    def modulate(self, plane, tau, k, b=(0.0, 0.0, 0.0)):
         """Slow neuromodulation: edges of group g with plane[g] >= 0 (a dopamine, octopamine or serotonin pre)
         add to the target's level m[plane] instead of its conductance; m decays with tau[plane] seconds and the
-        target integrates g x c x max(0, 1 + sum k m). plane: int per edge group (len G, -1 = fast); <= 3 planes."""
+        target integrates g x c x max(0, 1 + sum k m) + c x sum b m (b: slow current per unit level). plane: int per edge group (len G, -1 = fast); <= 3 planes."""
         assert self.grp is not None and len(plane) == self.scale.shape[1] and max(plane) < 3
         self.modp = np.asarray(plane, np.int32)
         P = int(self.modp.max()) + 1
         self.mdecay = np.float32(np.exp(-self.dt / np.asarray(tau, np.float64)))[:P].astype(np.float32)
         self.mk = np.asarray(k, np.float32)[:P]
+        self.mb = np.asarray(b, np.float32)[:P]
         self.reset()
 
-    def modulators(self, nt, tau=(0.5, 1.0, 2.0), k=(0.0, 0.0, 0.0)):
+    def modulators(self, nt, tau=(0.5, 1.0, 2.0), k=(0.0, 0.0, 0.0), b=(0.0, 0.0, 0.0)):
         """Route every edge whose pre neuron's predicted transmitter (FlyWire top_nt, experiment.cells().nt) is
         dopamine, octopamine or serotonin into planes 0, 1, 2 (three new edge groups, scale 1, appended after the
         existing ones), then modulate(). tau in seconds per plane, k the gain per unit level."""
@@ -124,7 +125,7 @@ class ShiuBrain:
         scale = np.ones((self.flies, 1), np.float32) if self.scale is None else self.scale
         G = scale.shape[1]
         self.edge_groups(np.where(q >= 0, G + q, grp), np.hstack([scale, np.ones((self.flies, 3), np.float32)]))
-        self.modulate(np.r_[np.full(G, -1), 0, 1, 2], tau, k)
+        self.modulate(np.r_[np.full(G, -1), 0, 1, 2], tau, k, b)
         return q
 
     def plastic(self, group, kcs, punish=None):
@@ -150,8 +151,9 @@ class ShiuBrain:
             (work / name).unlink(missing_ok=True)
         if self.modp is not None:
             self.modp.tofile(work / 'modp.bin')
-            mk = np.zeros(6, np.float32)
-            mk[:len(self.mk)], mk[3:3 + len(self.mk)] = self.mdecay, self.mk
+            mk = np.zeros(9, np.float32)
+            P = len(self.mk)
+            mk[:P], mk[3:3 + P], mk[6:6 + P] = self.mdecay, self.mk, self.mb
             mk.tofile(work / 'modk.bin')
         if self.grp is not None:
             self.grp.tofile(work / 'grp.bin')
@@ -197,12 +199,13 @@ class ShiuBrain:
             t = self.t
             moving = t - 1 - self.last >= refractory
             if len(self.m):  # the worker's order: gain from the levels before this step's decay
-                acc = np.zeros(self.u.size, np.float32)
+                acc, drive = np.zeros(self.u.size, np.float32), np.zeros(self.u.size, np.float32)
                 for q in range(len(self.m)):
                     acc += self.mk[q] * self.m[q]
+                    drive += self.mb[q] * self.m[q]
                     self.m[q] *= self.mdecay[q]
                 gain = np.maximum(np.float32(1) + acc, np.float32(0))
-                self.u = np.where(moving, self.u * self.em + self.g * self.c * gain, self.u)
+                self.u = np.where(moving, self.u * self.em + self.g * self.c * gain + drive * self.c, self.u)
             else:
                 self.u = np.where(moving, self.u * self.em + self.g * self.c, self.u)
             self.g = np.where(moving, self.g * self.eg, self.g)
