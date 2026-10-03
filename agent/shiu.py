@@ -293,26 +293,29 @@ class ShiuLive(ShiuGPU):
         self.factor = np.fromfile(self.work / 'factor.bin', np.float32).reshape(P, self.flies, KMAX)[:, :, :k].transpose(1, 0, 2).reshape(self.flies, P * k).copy()
         return self.factor
 
+    def _ok(self):
+        """The worker answers 'ok'; anything else (its error goes to stdout) is raised with its text."""
+        line = self.proc.stdout.readline().strip()
+        if line != 'ok':
+            raise RuntimeError(f'FAIL shiu_worker resident exited {self.proc.wait()}: {line} {self.proc.stdout.read().strip()}'.strip())
+
     def _command(self, line):
         self.proc.stdin.write(line + '\n')
         self.proc.stdin.flush()
-        if self.proc.stdout.readline().strip() != 'ok':
-            raise RuntimeError(f'FAIL shiu_worker resident exited {self.proc.wait()}')
+        self._ok()
 
     def reward(self, dopamine, punishment=None):
         """Device twin of ShiuBrain.reward for the last sniff; the factors stay on the device."""
         np.concatenate([dopamine] + ([] if punishment is None else [punishment])).astype(np.float32).tofile(self.work / 'dopamine.bin')
         self.proc.stdin.write('reward\n')
         self.proc.stdin.flush()
-        if self.proc.stdout.readline().strip() != 'ok':
-            raise RuntimeError(f'FAIL shiu_worker resident exited {self.proc.wait()}')
+        self._ok()
 
     def sniff(self, p):
         np.asarray(p, np.float32).tofile(self.work / 'stim_p.bin')
         self.proc.stdin.write('sniff\n')
         self.proc.stdin.flush()
-        if self.proc.stdout.readline().strip() != 'ok':
-            raise RuntimeError(f'FAIL shiu_worker resident exited {self.proc.wait()}')
+        self._ok()
         return np.fromfile(self.work / 'gather.bin', np.int32).reshape(len(self.windows), len(self.readout))
 
     def close(self):
