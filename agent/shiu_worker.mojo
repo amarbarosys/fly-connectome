@@ -25,7 +25,8 @@ cells in readout.bin when that file is there.
 resident: the graph stays on the device and each stdin line "sniff" resets the state, rereads
 stim_p.bin, runs to the last window and writes counts at every window for the entries in
 readout.bin only (gather.bin, int32 windows x R), then prints "ok"; "q" ends. Sniff k uses
-seed + k, so repeated sniffs draw fresh Poisson events.
+seed + k, so repeated sniffs draw fresh Poisson events. FLY_RECORD=path appends every neuron's count at every
+window of every sniff to path (int32 sniffs x windows x C x N, counts since the sniff began): the full brain.
 
 Per step t, three launches in ShiuBrain's order: integrate + threshold + reset, push delivery
 of the spikes from t - DELAY (atomic adds into g; integrate clears g of refractory and just-spiked
@@ -36,6 +37,7 @@ delivers. A full slot is counted and fails the run; nothing is dropped silently.
 """
 from std.atomic import Atomic
 from std.ffi import c_ssize_t, external_call
+from std.os import getenv
 from std.os.path import exists
 from std.sys import argv, get_defined_int
 from std.gpu import block_idx, block_dim, thread_idx
@@ -394,6 +396,9 @@ def main() raises:
     var out = List[Int32](length=(window_count * readout_count) if gathered else (0 if summed else window_count * S), fill=0)
     var sums_out = List[Int32](length=window_count * group_count * C, fill=0)
     var kick_grid = max((Int(stim_count) + BLOCK - 1) // BLOCK, 1)
+    var record = getenv("FLY_RECORD", "")
+    var rec_file = open(record if record else "/dev/null", "w")
+    var rec = List[Int32](length=S if record else 0, fill=0)
     var sniff = 0
     while True:
         if resident:
@@ -445,6 +450,10 @@ def main() raises:
                     grid_dim=(S + BLOCK - 1) // BLOCK, block_dim=BLOCK)
             elif not resident:
                 ctx.enqueue_copy(out.unsafe_ptr().unsafe_offset(window * S), counts_b)
+            if record:
+                ctx.enqueue_copy(rec.unsafe_ptr(), counts_b)
+                ctx.synchronize()
+                rec_file.write_bytes(Span(unsafe_ptr=rec.unsafe_ptr().unsafe_bitcast[UInt8](), length=S * 4))
             window += 1
         if gathered and len(out) > 0:
             ctx.enqueue_copy(out.unsafe_ptr(), got_b.create_sub_buffer[DType.int32](0, len(out)))

@@ -264,8 +264,9 @@ def worker_binary(n, edges, flies, source=ROOT / 'agent/shiu_worker.mojo'):
 class ShiuLive(ShiuGPU):
     """Resident ShiuGPU: graph uploaded once; each sniff(p) resets the brain, runs to the last
     window with Poisson probabilities p (per stimulate() entry, in insertion order) and returns
-    counts (windows, len(readout)) for the readout entries only. Sniff k uses seed + k."""
-    def start(self, windows, readout):
+    counts (windows, len(readout)) for the readout entries only. Sniff k uses seed + k. record=path writes
+    every neuron's counts at every window there; read it back with recording()."""
+    def start(self, windows, readout, record=None):
         self.work = ROOT / f'.work/agent/shiu/live-{id(self)}'
         self.work.mkdir(parents=True, exist_ok=True)
         entries, p = self._stim_arrays()
@@ -279,8 +280,15 @@ class ShiuLive(ShiuGPU):
         np.asarray([self.em, self.eg, self.c, V_TH, W_SYN * F_POI], np.float32).tofile(self.work / 'consts.bin')
         self.proc = subprocess.Popen([str(worker_binary(self.n, len(self.col), self.flies, *self.source)), str(self.graph) + '/',
                                       str(self.work) + '/', str(self.seed), str(self.delay), str(self.refractory), 'resident'],
-                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1, env=worker_env())
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1,
+                                     env=worker_env() | ({'FLY_RECORD': str(record)} if record else {}))
+        self.record = record
         return self
+
+    def recording(self):
+        """The full brain so far: int32 (sniffs, windows, n, flies) spike counts since each sniff began."""
+        r = np.fromfile(self.record, np.int32)
+        return r.reshape(-1, len(self.windows), self.flies, self.n).transpose(0, 1, 3, 2)
 
     source = ()  # (path,) builds the worker from that kernel source instead of agent/
 
