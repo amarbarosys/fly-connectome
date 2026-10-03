@@ -8,6 +8,10 @@ poisson kick); counts.bin (int32, windows x C x N) is written there. Optional ed
 grp.bin (uint8 group per edge) and scale.bin (float32 C x G); an edge delivers weight x scale of its
 group in the spiking cell's column, so weight variants of one topology run as columns of one graph.
 Without them every edge is group 0 at scale 1.0, which leaves each weight bit-identical.
+Optional plastic.bin (int32: plastic edge group, then KC neuron ids) gives every column one factor
+per KC, initially 1, multiplying that KC's plastic-group edges; resident "reward" reads dopamine.bin
+(float32 per column) and scales the factor of every KC that spiked in the last sniff by 1 - d.
+Factors persist across sniffs (the learned state); without plastic.bin nothing changes.
 Optional stim_key.bin (int32 per stimulus entry) names the entry whose Poisson draws an entry uses
 (default itself), so columns of different weight variants can see the same input events.
 Optional cell groups: cgrp.bin (int32 group per neuron, -1 none) makes a one-shot run write sums.bin
@@ -40,11 +44,15 @@ comptime CAP = 1 << 16
 comptime BLOCK = 256
 comptime LANES = 32  # gfx1100 wave32
 comptime GROUPS = 256  # uint8 edge groups
+comptime KMAX = get_defined_int["SHIU_K", 8192]()  # plastic KCs per column (FlyWire: 5,177)
 comptime DGRID = 1024
 comptime LS = row_major[S]()
 comptime LR = row_major[N + 1]()
 comptime LE = row_major[E]()
 comptime LSCALE = row_major[C * GROUPS]()
+comptime LF = row_major[C * KMAX]()
+comptime LK = row_major[KMAX]()
+comptime LC = row_major[C]()
 comptime LRING = row_major[SLOTS * CAP]()
 comptime LSLOT = row_major[SLOTS + 1]()  # last entry counts overflowed spikes
 
@@ -89,12 +97,14 @@ def deliver(
     weights: TileTensor[DType.float32, type_of(LE), MutAnyOrigin],
     grp: TileTensor[DType.uint8, type_of(LE), MutAnyOrigin],
     scale: TileTensor[DType.float32, type_of(LSCALE), MutAnyOrigin],
+    rank: TileTensor[DType.int32, type_of(LR), MutAnyOrigin],
+    factor: TileTensor[DType.float32, type_of(LF), MutAnyOrigin],
     g: TileTensor[DType.float32, type_of(LS), MutAnyOrigin],
     last: TileTensor[DType.int32, type_of(LS), MutAnyOrigin],
     rfc: TileTensor[DType.int32, type_of(LS), MutAnyOrigin],
     ring: TileTensor[DType.int32, type_of(LRING), MutAnyOrigin],
     fill: TileTensor[DType.int32, type_of(LSLOT), MutAnyOrigin],
-    t: Int32, slot: Int32, groups: Int32,
+    t: Int32, slot: Int32, groups: Int32, plastic: Int32,
 ):
     # LANES threads per spike stride over its out-edges; groups stride over the spikes. One thread
     # per spike serialised hub neurons' thousands of edges: deliver was 96% of a sniff.
@@ -106,11 +116,16 @@ def deliver(
         var base = (i // N) * N
         var pre = i - base
         var own = (i // N) * Int(groups)  # this column's row of scales
+        var learned = (i // N) * KMAX + Int(rank[pre])  # read only for plastic edges, whose pre is a KC
         for e in range(Int(rows[pre]) + lane, Int(rows[pre + 1]), LANES):
             var j = base + Int(cols[e])
             var lj = last[j]
             if t - lj >= rfc[j] and lj != t:
-                _ = Atomic.fetch_add(g.ptr.unsafe_offset(j), weights[e] * scale[own + Int(grp[e])])
+                var group = Int32(grp[e])
+                var wt = weights[e] * scale[own + Int(group)]
+                if group == plastic:
+                    wt *= factor[learned]
+                _ = Atomic.fetch_add(g.ptr.unsafe_offset(j), wt)
 
 
 def uniform(seed: UInt32, t: UInt32, entry: UInt32) -> Float32:
@@ -169,6 +184,22 @@ def group_sum(
         _ = Atomic.fetch_add(sums.ptr.unsafe_offset(Int(offset) + group * C + i // N), spikes)
 
 
+def reward(
+    counts: TileTensor[DType.int32, type_of(LS), MutAnyOrigin],
+    kc: TileTensor[DType.int32, type_of(LK), MutAnyOrigin],
+    factor: TileTensor[DType.float32, type_of(LF), MutAnyOrigin],
+    dopamine: TileTensor[DType.float32, type_of(LC), MutAnyOrigin],
+    kcs: Int32,
+):
+    var k = block_idx.x * block_dim.x + thread_idx.x
+    if k >= Int(kcs) * C:
+        return
+    var c = k // Int(kcs)
+    var n = k % Int(kcs)
+    if counts[c * N + Int(kc[n])] > 0:
+        factor[c * KMAX + n] = factor[c * KMAX + n] * (1.0 - dopamine[c])
+
+
 def load(path: String, size: Int) raises -> List[UInt8]:
     """Raw little-endian file, length checked; device copies read it in place, no host copy."""
     var raw = open(path, "r").read_bytes()
@@ -200,6 +231,18 @@ def main() raises:
     var grp_raw = open(work + "grp.bin", "r").read_bytes() if grouped else List[UInt8]()
     if grouped and len(grp_raw) != E:
         raise Error("grp.bin must hold one uint8 per edge")
+    var plastic_raw = load(work + "plastic.bin", -1) if exists(work + "plastic.bin") else List[UInt8]()
+    var plastic = Int32(-1)
+    var kcs = 0
+    var rank = List[Int32](length=N + 1, fill=0)
+    if len(plastic_raw) > 0:
+        var words = plastic_raw.unsafe_ptr().unsafe_bitcast[Int32]()
+        plastic = words.unsafe_offset(0)[]
+        kcs = len(plastic_raw) // 4 - 1
+        if kcs > KMAX or plastic < 0 or Int(plastic) >= groups:
+            raise Error("plastic.bin: group out of range or more than KMAX KCs")
+        for n in range(kcs):
+            rank[Int(words.unsafe_offset(n + 1)[])] = Int32(n)
     var stim_raw = load(work + "stim_index.bin", -1)
     var p_raw = load(work + "stim_p.bin", len(stim_raw) // 4)
     var windows_raw = load(work + "windows.bin", -1)
@@ -228,6 +271,14 @@ def main() raises:
     var w_b = ctx.enqueue_create_buffer[DType.float32](E)
     var grp_b = ctx.enqueue_create_buffer[DType.uint8](E)
     var scale_b = ctx.enqueue_create_buffer[DType.float32](C * GROUPS)
+    var rank_b = ctx.enqueue_create_buffer[DType.int32](N + 1)
+    var factor_b = ctx.enqueue_create_buffer[DType.float32](C * KMAX)
+    var kc_b = ctx.enqueue_create_buffer[DType.int32](KMAX)
+    var dopamine_b = ctx.enqueue_create_buffer[DType.float32](C)
+    ctx.enqueue_copy(rank_b, rank.unsafe_ptr())
+    factor_b.enqueue_fill(1.0)
+    if kcs > 0:
+        ctx.enqueue_copy(kc_b.create_sub_buffer[DType.int32](0, kcs), plastic_raw.unsafe_ptr().unsafe_bitcast[Int32]().unsafe_offset(1))
     var u_b = ctx.enqueue_create_buffer[DType.float32](S)
     var g_b = ctx.enqueue_create_buffer[DType.float32](S)
     var last_b = ctx.enqueue_create_buffer[DType.int32](S)
@@ -262,6 +313,11 @@ def main() raises:
     var w_t = TileTensor(w_b, LE)
     var grp_t = TileTensor(grp_b, LE)
     var scale_t = TileTensor(scale_b, LSCALE)
+    var rank_t = TileTensor(rank_b, LR)
+    var factor_t = TileTensor(factor_b, LF)
+    var kc_t = TileTensor(kc_b, LK)
+    var dopamine_t = TileTensor(dopamine_b, LC)
+    var step_reward = ctx.compile_function[reward]()
     var u_t = TileTensor(u_b, LS)
     var g_t = TileTensor(g_b, LS)
     var last_t = TileTensor(last_b, LS)
@@ -309,6 +365,14 @@ def main() raises:
             var line = input()
             if line == "q":
                 break
+            if line == "reward":
+                var d = load(work + "dopamine.bin", C)
+                ctx.enqueue_copy(dopamine_b, d.unsafe_ptr().unsafe_bitcast[Float32]())
+                ctx.enqueue_function(step_reward, counts_t, kc_t, factor_t, dopamine_t, Int32(kcs),
+                    grid_dim=max((kcs * C + BLOCK - 1) // BLOCK, 1), block_dim=BLOCK)
+                ctx.synchronize()
+                print("ok", flush=True)
+                continue
             var fresh = load(work + "stim_p.bin", stim_count)
             ctx.enqueue_copy(p_b.create_sub_buffer[DType.float32](0, stim_count), fresh.unsafe_ptr().unsafe_bitcast[Float32]())
             u_b.enqueue_fill(0.0)
@@ -325,8 +389,8 @@ def main() raises:
                 var due = Int32((t + 1) % SLOTS)  # == (t - delay) mod SLOTS
                 ctx.enqueue_function(step_integrate, u_t, g_t, last_t, rfc_t, counts_t, ring_t, fill_t,
                     k.unsafe_offset(0)[], k.unsafe_offset(1)[], k.unsafe_offset(2)[], k.unsafe_offset(3)[], Int32(t), slot, grid_dim=(S + BLOCK - 1) // BLOCK, block_dim=BLOCK)
-                ctx.enqueue_function(step_deliver, rows_t, cols_t, w_t, grp_t, scale_t, g_t, last_t, rfc_t, ring_t, fill_t,
-                    Int32(t), due, Int32(groups), grid_dim=DGRID, block_dim=BLOCK)
+                ctx.enqueue_function(step_deliver, rows_t, cols_t, w_t, grp_t, scale_t, rank_t, factor_t, g_t, last_t, rfc_t, ring_t, fill_t,
+                    Int32(t), due, Int32(groups), plastic, grid_dim=DGRID, block_dim=BLOCK)
                 ctx.enqueue_function(step_kick, stim_t, key_t, p_t, u_t, last_t, fill_t, Int32(stim_count), seed + UInt32(sniff), Int32(t),
                     due, k.unsafe_offset(4)[], grid_dim=kick_grid, block_dim=BLOCK)
                 t += 1

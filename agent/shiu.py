@@ -38,7 +38,7 @@ def worker_env(n, edges, flies):
     4 GB job, so a second worker ran out of memory). Reserve this worker's own footprint
     instead: graph and edge groups, nine N x C state buffers, scales and the spike ring, + 10%;
     an outer setting wins."""
-    need = (n + 1) * 4 + edges * 9 + n * flies * 9 * 4 + 19 * (1 << 16) * 4 + flies * 256 * 4
+    need = (n + 1) * 8 + edges * 9 + n * flies * 9 * 4 + 19 * (1 << 16) * 4 + flies * (256 + 8192 + 1) * 4
     total = max(int(p.read_text()) for p in Path('/sys/class/drm').glob('card*/device/mem_info_vram_total'))
     return {**os.environ, KEY: os.environ.get(KEY, str(max(1, -(-need * 110 // total))))}
 
@@ -94,7 +94,7 @@ class ShiuBrain:
         self.delay, self.refractory = round(T_DLY / dt), round(T_RFC / dt)
         self.stim = {}  # entry (column * n + neuron) -> Poisson probability per step
         self.key = {}  # entry -> entry whose Poisson draws it uses (common random numbers)
-        self.grp, self.scale = None, None
+        self.grp, self.scale, self.plastic_group = None, None, None
         self.reset()
 
     def edge_groups(self, grp, scale):
@@ -103,12 +103,27 @@ class ShiuBrain:
         self.grp, self.scale = np.asarray(grp, np.uint8), np.asarray(scale, np.float32).reshape(self.flies, -1)
         assert len(self.grp) == len(self.col) and int(self.grp.max(initial=0)) < self.scale.shape[1] <= 256
 
+    def plastic(self, group, kcs):
+        """Learnable edges: every edge of edge group `group` (pre always one of `kcs`) is scaled by its
+        column's factor for that KC, initially 1, changed only by reward(); factors survive reset()."""
+        self.plastic_group, self.kcs = int(group), np.asarray(kcs, np.int64)
+        self.rank = np.zeros(self.n, np.int64)
+        self.rank[self.kcs] = np.arange(len(self.kcs))
+        self.factor = np.ones((self.flies, len(self.kcs)), np.float32)
+
+    def reward(self, dopamine):
+        """Scale the factor of every KC that spiked since the last reset by 1 - dopamine[column]."""
+        spiked = self.spikes[self.kcs].T > 0
+        self.factor[spiked] *= np.repeat(1 - np.asarray(dopamine, np.float32), spiked.sum(1))
+
     def _write_groups(self, work):
-        for name in ('grp.bin', 'scale.bin'):
+        for name in ('grp.bin', 'scale.bin', 'plastic.bin'):
             (work / name).unlink(missing_ok=True)
         if self.grp is not None:
             self.grp.tofile(work / 'grp.bin')
             self.scale.tofile(work / 'scale.bin')
+        if self.plastic_group is not None:
+            np.concatenate([[self.plastic_group], self.kcs]).astype(np.int32).tofile(work / 'plastic.bin')
 
     def reset(self):
         size = self.n * self.flies
@@ -155,6 +170,9 @@ class ShiuBrain:
                 w = self.w[edges]
                 if self.grp is not None:
                     w = w * self.scale[np.repeat(column, end - start), self.grp[edges]]
+                if self.plastic_group is not None:
+                    learn = self.grp[edges] == self.plastic_group
+                    w[learn] *= self.factor[np.repeat(column, end - start)[learn], self.rank[np.repeat(pre, end - start)[learn]]]
                 self.g += np.bincount(target[keep], w[keep], minlength=self.g.size).astype(np.float32)
             self.ring[t % self.delay] = spike
             hit = entries[(uniform(self.seed, t, keys) < p) & (self.last[entries] != t)]
@@ -252,6 +270,14 @@ class ShiuLive(ShiuGPU):
                                       str(self.work) + '/', str(self.seed), str(self.delay), str(self.refractory), 'resident'],
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1, env=worker_env(self.n, len(self.col), self.flies))
         return self
+
+    def reward(self, dopamine):
+        """Device twin of ShiuBrain.reward for the last sniff; the factors stay on the device."""
+        np.asarray(dopamine, np.float32).tofile(self.work / 'dopamine.bin')
+        self.proc.stdin.write('reward\n')
+        self.proc.stdin.flush()
+        if self.proc.stdout.readline().strip() != 'ok':
+            raise RuntimeError(f'FAIL shiu_worker resident exited {self.proc.wait()}')
 
     def sniff(self, p):
         np.asarray(p, np.float32).tofile(self.work / 'stim_p.bin')
