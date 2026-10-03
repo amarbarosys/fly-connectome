@@ -48,6 +48,8 @@ def probe(world, factor, source=()):
     """Fresh one-column worker with these factors: sniff odour A, then B; counts (2, windows, readout)."""
     pre, post, w, n, grp, kc, approach, avoid, odour = world
     b = brain(ShiuLive, pre, post, w, n, grp, kc, odour, 1)
+    if len(factor) == 2 * len(kc):  # a pain fly: reward and punish planes (agent/verify_pain.py)
+        b.plastic(3, kc, punish=2)
     b.source = source
     b.factor = np.asarray(factor, np.float32)[None]
     b.start(WINDOWS, np.concatenate([kc, approach, avoid]))
