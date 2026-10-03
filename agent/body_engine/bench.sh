@@ -15,9 +15,11 @@ import sys, numpy as np
 from agent.body_engine.model import export, standing, FEET, VSCALE
 from mj_oracle import states, velocities
 m = export('$mjcf', '$d', FEET if $stage == 6 else None)
-q, v = standing(m, $n) if $stage == 6 else (states(m, $n), velocities(m, $n, scale=VSCALE))
-q.astype(np.float32).T.copy().tofile('$d/qpos.bin')
-v.astype(np.float32).T.copy().tofile('$d/qvel.bin')" >/dev/null || { echo "FAIL export $n"; fail=$((fail+1)); continue; }
+import os
+if not os.path.exists('$d/qvel.bin'):  # states are seeded: reuse them, the export is always fresh
+    q, v = standing(m, $n) if $stage == 6 else (states(m, $n), velocities(m, $n, scale=VSCALE))
+    q.astype(np.float32).T.copy().tofile('$d/qpos.bin')
+    v.astype(np.float32).T.copy().tofile('$d/qvel.bin')" >/dev/null || { echo "FAIL export $n"; fail=$((fail+1)); continue; }
     ~/.local/bin/mojo build $(cat "$d/sizes.txt") -DFLIES=$n -DSTAGE=$stage agent/body_engine/smooth.mojo -o "$d/step" 2>&1 | grep -v warning | grep . && { echo "FAIL build $n"; fail=$((fail+1)); } || true
   else
     "$d/step" "$d/" || { echo "FAIL run $n"; fail=$((fail+1)); }

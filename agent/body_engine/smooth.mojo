@@ -33,6 +33,8 @@ comptime NV = get_defined_int["NV"]()
 comptime NC = get_defined_int["NC"]()
 comptime F = get_defined_int["FLIES"]()
 comptime STAGE = get_defined_int["STAGE", 1]()
+comptime STOP = get_defined_int["STOP", 99]()
+comptime LSFLOOR = Float32(get_defined_int["LSFLOOR_E7", 10]()) * 1e-7  # line-search slope floor, relative to alpha = 0  # phase timing (phases.sh): return after phase STOP
 # mi.bin: body_parentid, body_jntadr, body_jntnum, jnt_type, jnt_qposadr, geom_bodyid
 comptime PARENT = 0
 comptime JNTADR = NB
@@ -131,7 +133,8 @@ comptime OSRCH = OGRAD + NV
 comptime OMV = OSRCH + NV
 comptime OHN = OMV + NV
 comptime OHNI = OHN + NC
-comptime NROW = OHNI + NV if STAGE >= 6 else (OCFRC + 6 * NB if STAGE >= 4 else NOUT)
+comptime ODIAG = OHNI + NV  # Newton iterations, line-search evaluations (printed by main)
+comptime NROW = ODIAG + 2 if STAGE >= 6 else (OCFRC + 6 * NB if STAGE >= 4 else NOUT)
 comptime LI = row_major[NI]()
 comptime LF = row_major[NFL]()
 comptime LQ = row_major[NQ * F]()
@@ -604,6 +607,7 @@ def peval(mi: TI, res: TO, f: Int, gauss: PNT, alpha: Float32) -> PNT:
             q0 += 0.5 * D * jar * jar
             q1 += jv * D * jar
             q2 += 0.5 * jv * D * jv
+    res[(ODIAG + 1) * F + f] += 1
     var d1 = 2 * q2
     return PNT(alpha, alpha * alpha * q2 + alpha * q1 + q0, 2 * alpha * q2 + q1, d1 if d1 > 0 else Float32(1e-15))
 
@@ -649,6 +653,7 @@ def search(mi: TI, res: TO, f: Int, scale: Float32, tolerance: Float32, lsiter: 
     var gauss = PNT(g0, g1, g2, 0)
     var it = 0
     var p0 = peval(mi, res, f, gauss, 0); it += 1
+    gtol = max(gtol, LSFLOOR * abs(p0[2]))  # float32: the slope cannot fall below ~1e-7 of its start
     var p1 = peval(mi, res, f, gauss, p0[0] - p0[2] / p0[3]); it += 1
     if abs(p1[2]) < gtol:
         return p1[0]
@@ -719,7 +724,10 @@ def newton(mi: TI, mf: TF, res: TO, f: Int):
     var cost = update(mi, res, f)
     hessian(mi, res, f)
     gradient(mi, res, f)
+    res[ODIAG * F + f] = 0
+    res[(ODIAG + 1) * F + f] = 0
     for _ in range(Int(mi[CITER])):
+        res[ODIAG * F + f] += 1
         var alpha = search(mi, res, f, scale, tol * mf[COPT + 2], Int(mi[CITER + 1]))
         if alpha == 0:
             break
@@ -740,6 +748,11 @@ def newton(mi: TI, mf: TF, res: TO, f: Int):
         for v in range(NV):
             gn += get(res, f, OGRAD + v) * get(res, f, OGRAD + v)
         if scale * (oldcost - cost) < tol or scale * sqrt(gn) < tol:
+            break
+        # float32 stop: MuJoCo's 1e-8 tests sit below float32 noise, so a few animals ran all 100 iterations and
+        # held their wave. A full Newton step that leaves the active set unchanged lands on the minimum of that
+        # quadratic piece, which is the optimum.
+        if not changed and abs(alpha - 1) < 1e-3:
             break
 
 
@@ -829,6 +842,8 @@ def smooth(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO):
     for g in range(NG):
         var b = body(res, f, Int(mi[GBODY + g]))
         put(res, f, OG + 3 * g, rot(b[1], m3(mf, GPOS + 3 * g)) + b[0], 3)
+    comptime if STOP == 1:
+        return
     comptime if STAGE >= 2:
         # mj_comPos: subtree_com = sum(mass x xipos) over the subtree / subtree mass
         for i in range(NB):
@@ -933,15 +948,25 @@ def smooth(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO):
                 first = False
                 adr -= 1
                 j = Int(mi[DPARENT + j])
+    comptime if STOP == 2:
+        return
     comptime if STAGE >= 3:
         for c in range(NC):
             res[(OLD + c) * F + f] = get(res, f, OM + c)
         factorI(mi, res, f, OLD, OLDI)
+    comptime if STOP == 3:
+        return
     comptime if STAGE >= 4:
         velocity(mi, mf, qpos, qvel, res, f)
+    comptime if STOP == 4:
+        return
     comptime if STAGE >= 6:
         contacts(mi, mf, qvel, res, f)
+        comptime if STOP == 5:
+            return
         newton(mi, mf, res, f)
+        comptime if STOP == 6:
+            return
     comptime if STAGE >= 5:
         euler(mi, mf, qpos, qvel, res, f)
 
@@ -983,3 +1008,8 @@ def main() raises:
     with open(dir + "smooth.bin", "w") as file:
         file.write_bytes(Span(unsafe_ptr=host.unsafe_ptr().unsafe_bitcast[UInt8](), length=NOUT * F * 4))
     print(F, "animals, stage", STAGE, ":", us, "us per launch,", Float64(F) / us * 1e6, "animals/s")
+    comptime if STAGE >= 6:
+        var it: Float64 = 0; var ev: Float64 = 0; var itmax: Float32 = 0
+        for a in range(F):
+            it += Float64(host[ODIAG * F + a]); ev += Float64(host[(ODIAG + 1) * F + a]); itmax = max(itmax, host[ODIAG * F + a])
+        print("Newton iterations per animal", it / Float64(F), "max", itmax, "; line-search evaluations", ev / Float64(F))
