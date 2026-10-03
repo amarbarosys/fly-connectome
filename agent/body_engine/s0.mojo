@@ -2,7 +2,8 @@
 
 Reduced fly, enough to carry the real per-step work: a rigid thorax (6 DOF, quaternion, diagonal
 inertia) on 6 kinematic legs of 3 joints (coxa yaw, femur and tibia pitch) that follow a tripod gait
-exactly. Each foot touching the floor (z < 0) pushes back with a soft spring-damper normal force and
+exactly. A stance foot within REACH of the floor is pulled down by ADH (the NeuroMechFly adhesion
+actuator, which also raises its friction limit). Each foot touching the floor (z < 0) pushes back with a soft spring-damper normal force and
 viscous friction capped by mu x normal. Foot velocity is v + w x r from the current body state plus
 the leg's own swing (finite difference of the foot in body frame, rotated): differencing the world
 position instead lags the body term by a step, which pumped the tilt modes until the fly blew up. Semi-implicit Euler at dt 0.1 ms, the NeuroMechFly step.
@@ -30,6 +31,8 @@ comptime KN = Float32(2.0)                 # N/m per foot
 comptime CN = Float32(5e-4)                # N s/m; explicit Euler needs sum(c r^2 / I) dt < 2
 comptime MU = Float32(0.3)                 # no adhesion pads in S0; mu 1 tipped every fly (1 g of thrust at foot height)
 comptime CF = Float32(5e-4)                # viscous friction, capped by MU x normal
+comptime ADH = Float32(40e-6)              # N per stance foot, body-v2 adhesion gain 40 (g mm/s^2), ~4 body weights
+comptime REACH = Float32(0.02e-3)          # adhesion acts within 20 um of the floor (MuJoCo: in contact)
 comptime L1 = Float32(0.7e-3)              # femur, m
 comptime L2 = Float32(0.7e-3)              # tibia, m
 comptime HZ = Float32(10.0)                # stride frequency
@@ -63,21 +66,25 @@ def step(s: TileTensor[DType.float32, type_of(LS), MutAnyOrigin], t0: Int32):
             var ph = phase + Float32(3.14159265 if (leg % 2 == 1) != (leg >= 3) else 0.0)  # tripods
             var yaw = 0.35 * sin(ph)
             var lift = 0.25 * max(cos(ph), 0)                       # swing lifts, stance presses
-            var femur = 0.6 - lift
-            var tibia = Float32(-1.9) + 0.3 * lift
+            var femur = 0.6 + lift                                   # swing raises the femur: foot 0.08 mm
+            var tibia = Float32(-1.9)                                # below the hip vs 0.28 in stance
             var reach = L1 * cos(femur) + L2 * cos(femur + tibia)
             var bx = hx + reach * sin(yaw)
             var by = side * (Float32(0.25e-3) + reach * cos(yaw))
             var bz = L1 * sin(femur) + L2 * sin(femur + tibia)
             var r = rotate(qw, qx, qy, qz, bx, by, bz)
             var x = px + r[0]; var y = py + r[1]; var z = pz + r[2]
+            var stick = lift == 0 and z < REACH   # stance foot at the floor: adhesion pulls it down
+            if stick:
+                fz -= ADH
+                tx -= r[1] * ADH; ty += r[0] * ADH
             if z < 0 and k > 0:
                 var sw = rotate(qw, qx, qy, qz, (bx - prev[3 * leg]) / DT, (by - prev[3 * leg + 1]) / DT, (bz - prev[3 * leg + 2]) / DT)
                 var ux = vx + wy * r[2] - wz * r[1] + sw[0]
                 var uy = vy + wz * r[0] - wx * r[2] + sw[1]
                 var uz = vz + wx * r[1] - wy * r[0] + sw[2]
                 var n = max(-KN * z - CN * uz, 0)
-                var cap = MU * n / max(CF * sqrt(ux * ux + uy * uy), Float32(1e-12))
+                var cap = MU * (n + (ADH if stick else 0)) / max(CF * sqrt(ux * ux + uy * uy), Float32(1e-12))
                 var g = CF * min(cap, 1)
                 var ex = -g * ux; var ey = -g * uy
                 fx += ex; fy += ey; fz += n
@@ -123,10 +130,10 @@ def main() raises:
     var zlo: Float32 = 1; var zhi: Float32 = -1; var xs: Float32 = 0; var up: Float32 = 1
     for f in range(F):
         var z = host[2 * F + f]
-        var ok = z == z and z > 0.05e-3 and z < 2e-3 and abs(host[f]) > 1e-3   # finite, standing, walked > 1 mm
+        var qx = host[7 * F + f]; var qy = host[8 * F + f]
+        var ok = z == z and z > 0.05e-3 and z < 2e-3 and abs(host[f]) > 1e-3 and 1 - 2 * (qx * qx + qy * qy) > 0.9   # finite, upright (< 26 deg tilt), walked > 1 mm
         bad += 0 if ok else 1
         zlo = min(zlo, z); zhi = max(zhi, z); xs += host[f]
-        var qx = host[7 * F + f]; var qy = host[8 * F + f]
         up = min(up, 1 - 2 * (qx * qx + qy * qy))   # cos of tilt
     var steps = Float64(F) * Float64(launches * K)
     print(F, "flies,", launches * K, "steps:", Int(steps / (Float64(ns) / 1e9)), "fly-steps/s;",
