@@ -12,6 +12,7 @@ float32 on the GPU, and every output field must agree to REL of its own scale (m
 
 usage: python -m agent.body_engine.model export MJCF OUT_DIR
        python -m agent.body_engine.model check  MJCF OUT_DIR STAGE [STATES]
+       python -m agent.body_engine.model meshes MJCF OUT_DIR   (renderer tables; fails above 1e-4 decode error)
 """
 import subprocess
 import sys
@@ -124,6 +125,42 @@ def export(mjcf, out, regex=None):
     return m
 
 
+def meshes(mjcf, out):
+    """Renderer tables (docs/plans/RENDERER.md) for every mesh geom: rmi.bin int32 per part (body, vertex offset,
+    vertex count, triangle offset, triangle count), rmf.bin float32 per part (local pos 3, local quat 4, box
+    offset 3, box scale 3, bounding sphere centre 3 and radius 1, rgba 4), rv.bin int16 vertices quantised to the
+    part's box, rt.bin uint16 triangles local to the part, rp.bin uint8 part per triangle. Returns the decode error relative to part size."""
+    m, out = load(mjcf), Path(out)
+    out.mkdir(parents=True, exist_ok=True)
+    ints, floats, verts, tris, part, worst = [], [], [], [], [], 0.0
+    for g in np.flatnonzero(m.geom_type == mujoco.mjtGeom.mjGEOM_MESH):
+        k = m.geom_dataid[g]
+        v = m.mesh_vert[m.mesh_vertadr[k]:m.mesh_vertadr[k] + m.mesh_vertnum[k]].astype(np.float64)
+        f = m.mesh_face[m.mesh_faceadr[k]:m.mesh_faceadr[k] + m.mesh_facenum[k]]
+        if len(v) > 65535 or len(ints) // 5 >= 255:
+            raise SystemExit(f'FAIL meshes: geom {g}: over 65,535 vertices (uint16 triangles) or 255 parts (uint8 part ids)')
+        lo, hi = v.min(0), v.max(0)
+        scale = np.maximum(hi - lo, 1e-12) / 65535
+        qv = np.round((v - lo) / scale - 32768).astype(np.int16)
+        worst = max(worst, float(np.abs((qv.astype(np.float64) + 32768) * scale + lo - v).max() / (hi - lo).max()))
+        rgba = m.mat_rgba[m.geom_matid[g]] if m.geom_matid[g] >= 0 else m.geom_rgba[g]
+        centre = (lo + hi) / 2
+        ints += [m.geom_bodyid[g], len(verts), len(v), len(tris), len(f)]
+        floats += [*m.geom_pos[g], *m.geom_quat[g], *(lo + 32768 * scale), *scale, *centre, np.linalg.norm(v - centre, axis=1).max(), *rgba]
+        verts += list(qv)
+        tris += list(f.astype(np.uint16))
+        part += [len(ints) // 5 - 1] * len(f)
+    np.array(ints, np.int32).tofile(out / 'rmi.bin')
+    np.array(floats, np.float32).tofile(out / 'rmf.bin')
+    np.array(verts, np.int16).tofile(out / 'rv.bin')
+    np.array(tris, np.uint16).tofile(out / 'rt.bin')
+    np.array(part, np.uint8).tofile(out / 'rp.bin')  # part of each triangle (69 parts here; export refuses 256+)
+    (out / 'rsizes.txt').write_text(f'-DNPART={len(ints) // 5} -DNRV={len(verts)} -DNRT={len(tris)}\n')
+    print(f'{mjcf}: {len(ints) // 5} parts, {len(verts)} vertices, {len(tris)} triangles, '
+          f'{(len(verts) * 6 + len(tris) * 6 + len(part) + len(floats) * 4 + len(ints) * 4) / 1024:.0f} KB; decode error {worst:.1e} of part size')
+    return worst
+
+
 def standing(m, count, seed=0):
     """(qpos, qvel) of count states from actuated rollouts of the full model, adhesion on, one state every 2 ms after
     0.2 s of settling: half standing still (all 6 feet down), half with servos jittered +-0.2 rad every 50 ms
@@ -198,4 +235,6 @@ def check(mjcf, out, stage, count=64):
 
 if __name__ == '__main__':
     cmd, args = sys.argv[1], sys.argv[2:]
+    if cmd == 'meshes':
+        sys.exit(0 if meshes(*args) <= 1e-4 else 'FAIL meshes: decode error above 1e-4 of part size')
     export(*args) if cmd == 'export' else check(args[0], args[1], args[2], *map(int, args[3:]))
