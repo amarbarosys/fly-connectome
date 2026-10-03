@@ -1,7 +1,7 @@
 """Plastic KC factors in the Shiu engines: does reward change the right synapses, on CPU and GPU alike?
 
-Graph: ALLN inhibition x12 (no flood), KC -> MBON x4, KC -> avoid-MBON edges plastic (labels in
-agent/mb_valence.py). (a) The CPU oracle and the resident GPU worker run sniff, reward (dopamine
+Graph and odours as agent/learning_loop.py: ALLN inhibition x12 (no flood), KC -> MBON x4,
+KC -> avoid-MBON edges plastic; A = the loop's food (VM2+DM1+VA2), B = its decoy (DA1+VA1d+DL3). (a) The CPU oracle and the resident GPU worker run sniff, reward (dopamine
 1, 0, .5, 0 by column), sniff for 60 ms; KC and MBON counts must agree up to the worker's float
 noise. (b) Learners (dopamine 1) and twins (0) sniff A, get rewarded, then sniff A and B. Pass: at
 200 ms A's avoid MBON spikes fall below half the twins', and A's valence gain over the twins
@@ -14,45 +14,12 @@ import sys
 
 import numpy as np
 
-from agent.brain_bench import ODORS6
-from agent.experiment import cells
-from agent.mb_valence import mbons
+from agent.learning_loop import HZ, SEED, brain, setup
 from agent.neural_connectome import ROOT
-from agent.shiu import ShiuBrain, ShiuLive, graph_dir
-from agent.verify_shiu import _reference_graph
-
-A, B = ODORS6[1], ODORS6[0]  # VM2+DM1+VA2 (rewarded), DA1+VA1d+DL3
-LN, GAIN, HZ, SEED = 12, 4, 200., 91
-
-
-def setup():
-    pre, post, w, _ = _reference_graph()
-    c = cells()
-    names, n = c.klass, len(c.klass)
-    approach, avoid = mbons(c)
-    kc = np.flatnonzero(names == 'Kenyon_Cell')
-    path = graph_dir(pre, post, w, n)  # CSR order = pre order (sorted)
-    is_kc, is_app, is_avo = (np.isin(np.arange(n), x) for x in (kc, approach, avoid))
-    grp = np.zeros(len(pre), np.uint8)
-    grp[(names[pre] == 'ALLN') & (w < 0)] = 1
-    grp[is_kc[pre] & is_app[post]] = 2
-    grp[is_kc[pre] & is_avo[post]] = 3
-    odour = [np.flatnonzero((names == 'olfactory') & np.isin(c.type, ['ORN_' + g for g in o])) for o in (A, B)]
-    return pre, post, w, n, grp, kc, approach, avoid, odour, path
-
-
-def brain(engine, pre, post, w, n, grp, kc, odour, flies):
-    b = engine(pre, post, w, n=n, flies=flies, seed=SEED)
-    for f in range(flies):
-        for ids in odour:
-            b.stimulate(ids, HZ, fly=f)
-    b.edge_groups(grp, np.tile(np.float32([1, LN, GAIN, GAIN]), (flies, 1)))
-    b.plastic(3, kc)
-    return b
-
+from agent.shiu import ShiuBrain, ShiuLive
 
 def main():
-    pre, post, w, n, grp, kc, approach, avoid, odour, _ = setup()
+    pre, post, w, n, grp, kc, approach, avoid, odour = setup()
     watch = np.concatenate([kc, approach, avoid])
     out = {}
 
