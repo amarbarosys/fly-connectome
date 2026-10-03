@@ -28,7 +28,8 @@ readout.bin only (gather.bin, int32 windows x R), then prints "ok"; "q" ends. Sn
 seed + k, so repeated sniffs draw fresh Poisson events.
 
 Per step t, three launches in ShiuBrain's order: integrate + threshold + reset, push delivery
-of the spikes from t - DELAY (atomic adds into g, refractory and just-spiked targets skipped;
+of the spikes from t - DELAY (atomic adds into g; integrate clears g of refractory and just-spiked
+neurons, which equals skipping their arrivals and saves two scattered reads per edge;
 last-spike step is int16 and refractory uint8 to cut integrate bytes, so runs are <= 32000 steps),
 Poisson kicks. Spikes wait in a ring of DELAY + 1 slots so step t never overwrites the slot it
 delivers. A full slot is counted and fails the run; nothing is dropped silently.
@@ -81,6 +82,8 @@ def integrate(
         return
     var since = t - Int32(last[i])
     var r = Int32(rfc[i])
+    if since - 1 < r or since == 1:  # refractory, or spiked last step: the oracle drops these arrivals
+        gg = 0.0                      # (deliver adds unconditionally; g is 0 here in the oracle)
     if since - 1 >= r:
         uu = uu * em + gg * c
         gg = gg * eg
@@ -107,8 +110,6 @@ def deliver(
     rank: TileTensor[DType.int32, type_of(LR), MutAnyOrigin],
     factor: TileTensor[DType.float32, type_of(LF), MutAnyOrigin],
     g: TileTensor[DType.float32, type_of(LS), MutAnyOrigin],
-    last: TileTensor[DType.int16, type_of(LS), MutAnyOrigin],
-    rfc: TileTensor[DType.uint8, type_of(LS), MutAnyOrigin],
     ring: TileTensor[DType.int32, type_of(LRING), MutAnyOrigin],
     fill: TileTensor[DType.int32, type_of(LSLOT), MutAnyOrigin],
     t: Int32, slot: Int32, groups: Int32, plastic: Int32, punish: Int32,
@@ -126,15 +127,13 @@ def deliver(
         var learned = (i // N) * KMAX + Int(rank[pre])  # read only for plastic edges, whose pre is a KC
         for e in range(Int(rows[pre]) + lane, Int(rows[pre + 1]), LANES):
             var j = base + Int(cols[e])
-            var lj = Int32(last[j])
-            if t - lj >= Int32(rfc[j]) and lj != t:
-                var group = Int32(grp[e])
-                var wt = weights[e] * scale[own + Int(group)]
-                if group == plastic:
-                    wt *= factor[learned]
-                elif group == punish:
-                    wt *= factor[C * KMAX + learned]
-                _ = Atomic.fetch_add(g.ptr.unsafe_offset(j), wt)
+            var group = Int32(grp[e])
+            var wt = weights[e] * scale[own + Int(group)]
+            if group == plastic:
+                wt *= factor[learned]
+            elif group == punish:
+                wt *= factor[C * KMAX + learned]
+            _ = Atomic.fetch_add(g.ptr.unsafe_offset(j), wt)
 
 
 def uniform(seed: UInt32, t: UInt32, entry: UInt32) -> Float32:
@@ -422,7 +421,7 @@ def main() raises:
                 var due = Int32((t + 1) % SLOTS)  # == (t - delay) mod SLOTS
                 ctx.enqueue_function(step_integrate, u_t, g_t, last_t, rfc_t, counts_t, ring_t, fill_t,
                     k.unsafe_offset(0)[], k.unsafe_offset(1)[], k.unsafe_offset(2)[], k.unsafe_offset(3)[], Int32(t), slot, grid_dim=(S + BLOCK - 1) // BLOCK, block_dim=BLOCK)
-                ctx.enqueue_function(step_deliver, rows_t, cols_t, w_t, grp_t, scale_t, rank_t, factor_t, g_t, last_t, rfc_t, ring_t, fill_t,
+                ctx.enqueue_function(step_deliver, rows_t, cols_t, w_t, grp_t, scale_t, rank_t, factor_t, g_t, ring_t, fill_t,
                     Int32(t), due, Int32(groups), plastic, punish, grid_dim=DGRID, block_dim=BLOCK)
                 ctx.enqueue_function(step_kick, stim_t, key_t, p_t, u_t, last_t, fill_t, Int32(stim_count), seed + UInt32(sniff), Int32(t),
                     due, k.unsafe_offset(4)[], grid_dim=kick_grid, block_dim=BLOCK)
