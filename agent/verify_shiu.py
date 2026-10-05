@@ -219,6 +219,21 @@ def exact_check(steps=(50, 100, 200), columns=2):
             'pass': rows[0]['cells_differing'] == 0}
 
 
+def flicker_check(steps=(400, 1000, 2000), hz=13.0):
+    """Flicker window (t1 < 0) on the GPU worker against the oracle, same draws: sugar input switched at hz."""
+    pre, post, w, index = _reference_graph()
+    source = (REF / 'code/benchmark.py').read_text()
+    sugar = [index[int(x)] for x in re.findall(r'7205\d{14}', source[source.index("'sugar'"):source.index("'p9'")])]
+    runs = {}
+    for engine in (ShiuBrain, ShiuGPU):
+        brain = engine(pre, post, w, n=len(index), flies=2, seed=7)
+        brain.flicker(sugar, 200.0, hz)
+        runs[engine.__name__] = brain.run(list(steps))
+    rows = [{'steps': s, 'cells_differing': int((a != b).any(axis=1).sum()), 'spikes': int(a.sum())}
+            for s, a, b in zip(steps, runs['ShiuBrain'], runs['ShiuGPU'])]
+    return {'rows': rows, 'pass': rows[0]['cells_differing'] == 0 and rows[0]['spikes'] > 0}
+
+
 def verify_gpu():
     started = time.perf_counter()
     result = {'exact': exact_check(), 'sugar': sugar_check(engine=ShiuGPU)}

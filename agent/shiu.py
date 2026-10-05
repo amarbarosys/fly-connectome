@@ -180,7 +180,8 @@ class ShiuBrain:
         """Poisson input at `rate` Hz on `cells` (all flies unless one is named); with `key`, the
         named fly's events are drawn as column `key`'s would be, so columns can share inputs.
         amount: u added per event (default the Poisson kick W_SYN x F_POI, which also drops the cell's
-        refractory period); window: (t0, t1) steps it is on; p: probability per step instead of rate x dt
+        refractory period); window: (t0, t1) steps it is on (t1 < 0: square-wave flicker of period -t1 steps from t0,
+        on for the first half; flicker(hz) builds it); p: probability per step instead of rate x dt
         (p = 1 with a small amount is a constant injected current, see inject)."""
         for column in range(self.flies) if fly is None else [fly]:
             for cell in np.asarray(cells, np.int64):
@@ -191,6 +192,10 @@ class ShiuBrain:
                     self.drive[e] = (np.float32(W_SYN * F_POI if amount is None else amount), *(window or (0, 2**31 - 1)))
                 else:
                     self.drive.pop(e, None)
+
+    def flicker(self, cells, rate, hz, fly=None, key=None):
+        """Poisson input at `rate` on `cells`, switched on and off as a square wave at `hz` (on half first)."""
+        self.stimulate(cells, rate, fly=fly, key=key, window=(0, -round(1 / (hz * self.dt))))
 
     def inject(self, cells, current, fly=None, window=None):
         """Constant current on `cells`: u += current (mV per ms) x dt every step it is not refractory."""
@@ -260,7 +265,9 @@ class ShiuBrain:
                     keep &= q < 0
                 self.g += np.bincount(target[keep], w[keep], minlength=self.g.size).astype(np.float32)
             self.ring[t % self.delay] = spike
-            on = (uniform(self.seed, t, keys) < p) & (self.last[entries] != t) & (window[:, 0] <= t) & (t < window[:, 1])
+            period = np.maximum(-window[:, 1], 1)  # t1 < 0: flicker of period -t1 (the worker's rule)
+            lit = np.where(window[:, 1] >= 0, t < window[:, 1], (t - window[:, 0]) % period < period // 2)
+            on = (uniform(self.seed, t, keys) < p) & (self.last[entries] != t) & (window[:, 0] <= t) & lit
             np.add.at(self.u, entries[on], amount[on])
             self.t += 1
 

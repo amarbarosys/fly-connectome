@@ -195,7 +195,8 @@ def kick(
         fill[Int(clear)] = 0  # delivered this step; integrate writes it next step
     if k >= Int(count):
         return
-    if t < w0[k] or t >= w1[k]:  # entry's window [t0, t1) in steps
+    var t1 = w1[k]  # entry's window [t0, t1) in steps; t1 < 0: square-wave flicker of period -t1 from t0, on the first half
+    if t < w0[k] or (t1 >= 0 and t >= t1) or (t1 < 0 and (t - w0[k]) % (-t1) >= (-t1) // 2):
         return
     var i = Int(stim[k])
     if Int32(last[i]) != t and uniform(seed, UInt32(t), UInt32(key[k])) < p[k]:
