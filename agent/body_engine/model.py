@@ -220,9 +220,9 @@ def load(mjcf):
         override(m)
     if m.dof_simplenum.any():
         raise SystemExit('FAIL export: simple dofs are not ported')
-    if (m.nflex or m.opt.integrator not in INTEGRATORS or m.body_gravcomp.any() or m.actuator_damping.any()
+    if (m.nflex or m.opt.integrator not in INTEGRATORS or m.actuator_damping.any()
             or m.dof_dampingpoly.any() or m.jnt_stiffnesspoly.any() or m.opt.disableflags):
-        raise SystemExit('FAIL export: only Euler/implicitfast, linear joint springs and dof dampers are ported (no flex, gravcomp, '
+        raise SystemExit('FAIL export: only Euler/implicitfast, linear joint springs and dof dampers are ported (no flex, '
                          'actuator damping, polynomial springs or dampers, disable flags)')
     if (m.wrap_type != mujoco.mjtWrap.mjWRAP_JOINT).any() or m.tendon_limited.any() or m.tendon_frictionloss.any() \
             or m.tendon_stiffnesspoly.any() or m.tendon_dampingpoly.any() or m.tendon_actfrclimited.any():
@@ -478,6 +478,32 @@ def mocap_block(m):
     return np.asarray(m.body_mocapid), np.zeros(0), {'NMOCAP': m.nmocap}
 
 
+def with_gravcomp(mjcf, out):
+    """mjcf with body_gravcomp 1.0, 0.5, 0.0, 0.8 on its bodies in turn (MjSpec, mesh paths made absolute: combine() does the
+    same), written to `out`; the gate body of check.sh gravcomp for the fly and the spider. Returns the path."""
+    spec = mujoco.MjSpec.from_file(str(mjcf))
+    base = Path(mjcf).parent / (spec.meshdir or '')
+    for mesh in spec.meshes:
+        mesh.file = str((base / mesh.file).resolve()) if mesh.file else mesh.file
+    spec.meshdir = ''
+    for i, b in enumerate(b for b in spec.bodies if b.name != 'world'):
+        b.gravcomp = (1.0, 0.5, 0.0, 0.8)[i % 4]
+    Path(out).parent.mkdir(parents=True, exist_ok=True)
+    Path(out).write_text(spec.to_xml())
+    return str(out)
+
+
+def gravcomp_block(m):
+    """Body gravity compensation (engine_passive.c:817), last block: ints jnt_actgravcomp per joint (those joints' share goes to
+    qfrc_actuator, engine_forward.c:770, only when the model has actuators), floats body_gravcomp per body. Refused with joint-level
+    actuator force limits (clampVec on qfrc_actuator, not ported) and with sleeping (not ported anywhere)."""
+    if not m.body_gravcomp.any() or not np.linalg.norm(m.opt.gravity):
+        return None
+    if m.jnt_actfrclimited.any():
+        raise SystemExit('FAIL export: gravcomp with joint actuator force limits (jnt_actfrcrange clamps qfrc_actuator, not ported)')
+    return np.asarray(m.jnt_actgravcomp), np.asarray(m.body_gravcomp), {'GRAVCOMP': 1}
+
+
 def actuators(m):
     """S3 tables: ints per actuator (transmission type, dof or body, ctrllimited, forcelimited, qpos address or -1),
     floats per actuator
@@ -518,9 +544,9 @@ def export(mjcf, out, regex=None, act=False):
     if eq:  # after the other lanes' blocks too: a model without equalities keeps its bytes
         block = eq_block(m, eq, hr[0])
         ints, floats, sizes = ints + [block[0]], floats + [block[1]], sizes | block[2]
-    if mocap_block(m):  # after the equality block: Mojo CMOC follows CEQM
-        block = mocap_block(m)
-        ints, floats, sizes = ints + [block[0]], floats + [block[1]], sizes | block[2]
+    for block in (mocap_block(m), gravcomp_block(m)):  # after the equality block, in Mojo's order: CMOC follows CEQM, CGC follows CMOC
+        if block:
+            ints, floats, sizes = ints + [block[0]], floats + [block[1]], sizes | block[2]
     np.concatenate(ints).astype(np.int32).tofile(out / 'mi.bin')
     np.concatenate(floats).astype(np.float32).tofile(out / 'mf.bin')
     (out / 'sizes.txt').write_text(' '.join(f'-D{k}={v}' for k, v in sizes.items()) + '\n')

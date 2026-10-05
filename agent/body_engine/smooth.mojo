@@ -108,7 +108,10 @@ comptime CEQM = CEQC + NEQCH
 comptime NMOCAP = get_defined_int["NMOCAP", 0]()
 comptime NUC = NU + 7 * NMOCAP
 comptime CMOC = CEQM + NEQCH
-comptime NI = CMOC + (NB if NMOCAP > 0 else 0)
+# gravcomp (model.py gravcomp_block, last): ints jnt_actgravcomp per joint, floats body_gravcomp per body
+comptime GRAVCOMP = get_defined_int["GRAVCOMP", 0]() == 1
+comptime CGC = CMOC + (NB if NMOCAP > 0 else 0)
+comptime NI = CGC + (NJ if GRAVCOMP else 0)
 # mf.bin: body_pos, body_quat, jnt_pos, jnt_axis, qpos0, body_ipos, body_iquat, geom_pos, geom_quat
 comptime BPOS = 0
 comptime BQUAT = 3 * NB
@@ -141,7 +144,8 @@ comptime FLF = NFL1  # fluid floats: density, viscosity, wind 3, then per ellips
 comptime TNF = FLF + (5 + 15 * NFLROW if NFLUID else 0)  # tendon floats: wrap coefs, then stiffness, damping, lengthspring 2 per tendon
 comptime NFL2 = TNF + NWRAP + 4 * NTEN
 comptime CEQF = NFL2  # per equality: anchors 0 and 1, quaternions 0 and 1, torquescale, solref, solimp, invweight 2, joint data 5, qpos0 2
-comptime NFL = CEQF + EQF * NEQ
+comptime CGF = CEQF + EQF * NEQ
+comptime NFL = CGF + (NB if GRAVCOMP else 0)
 # smooth.bin rows (per animal): xpos, xquat, xipos of bodies 1.., geom_xpos, xanchor, xaxis
 comptime OXQ = 3 * (NB - 1)
 comptime OXI = 7 * (NB - 1)
@@ -205,7 +209,8 @@ comptime OEQA = OEQD + NEQR
 comptime OEQJAR = OEQA + NEQR
 comptime OEQJV = OEQJAR + NEQR
 comptime OEQJ = OEQJV + NEQR
-comptime NROW = OEQJ + NEQJ
+comptime OGC = OEQJ + NEQJ  # qfrc_gravcomp (GRAVCOMP)
+comptime NROW = OGC + (NV if GRAVCOMP else 0)
 comptime LI = row_major[NI]()
 comptime LF = row_major[NFL]()
 comptime LQ = row_major[NQ * F]()
@@ -610,6 +615,37 @@ def tendon_passive(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int):
             res[(OPAS + Int(mi[TNI + 2 * NTEN + w])) * F + f] += mf[TNF + w] * frc
 
 
+def gravcomp(mi: TI, mf: TF, res: TO, f: Int):
+    """MuJoCo mj_gravcomp (engine_passive.c:817) and its hand-off (:1012): per body with body_gravcomp the force
+    -gravity mass gravcomp at xipos through mj_applyFT's point Jacobian (cdof_lin + cdof_ang x (xipos - subtree_com of the
+    root), over the body's own and its ancestors' dofs) into qfrc_gravcomp (rows OGC); the dofs of joints without
+    actgravcomp are added to qfrc_passive, the others wait for actuation() (engine_forward.c:770)."""
+    for v in range(NV):
+        res[(OGC + v) * F + f] = 0
+    for i in range(1, NB):
+        var gc = mf[CGF + i]
+        if gc == 0:
+            continue
+        var force = m3(mf, GRAV) * (-(mf[MASS + i] * gc))
+        var r = 3 * Int(mi[ROOT + i])
+        var off = V3(get(res, f, OXI + 3 * (i - 1)), get(res, f, OXI + 3 * (i - 1) + 1), get(res, f, OXI + 3 * (i - 1) + 2), 0) - V3(get(res, f, OSC + r), get(res, f, OSC + r + 1), get(res, f, OSC + r + 2), 0)
+        var b = i
+        while b > 0:
+            for d in range(Int(mi[BDOFADR + b]), Int(mi[BDOFADR + b]) + Int(mi[BDOFNUM + b])):
+                var cd = OCD + 6 * d
+                var ang = V3(get(res, f, cd), get(res, f, cd + 1), get(res, f, cd + 2), 0)
+                var lin = V3(get(res, f, cd + 3), get(res, f, cd + 4), get(res, f, cd + 5), 0)
+                res[(OGC + d) * F + f] += ((lin + cross(ang, off)) * force).reduce_add()
+            b = Int(mi[PARENT + b])
+    for j in range(NJ):
+        if mi[CGC + j] != 0:
+            continue
+        var t = Int(mi[JTYPE + j])
+        var da = Int(mi[DOFADR + j])
+        for d in range(da, da + (6 if t == 0 else (3 if t == 1 else 1))):
+            res[(OPAS + d) * F + f] += get(res, f, OGC + d)
+
+
 def velocity(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int):
     """MuJoCo mj_comVel, mj_passive (joint springs, dof dampers), mj_rne(flg_acc = 0) into qfrc_bias."""
     # mj_comVel: cvel = cvel_parent + cdof qvel, cdof_dot = cvel x cdof with the velocity before the joint
@@ -663,6 +699,8 @@ def velocity(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int):
         tendon_passive(mi, mf, qpos, qvel, res, f)
     comptime if NFLUID:
         fluid(mi, mf, res, f)
+    comptime if GRAVCOMP:
+        gravcomp(mi, mf, res, f)
     # mj_rne: cacc = cacc_parent + cdof_dot qvel (world: -gravity), cfrc = cinert cacc + cvel x* (cinert cvel)
     put6(res, f, OCACC, S6(0, 0, 0, -mf[GRAV], -mf[GRAV + 1], -mf[GRAV + 2], 0, 0))
     for i in range(1, NB):
@@ -931,6 +969,15 @@ def actuation(mi: TI, mf: TF, qpos: TQ, qvel: TV, ctrl: TU, res: TO, f: Int):
                     for k in range(nch):  # normal row = mean of the pyramid's first pair
                         var jn = 0.5 * (get(res, f, jadr + k) + get(res, f, jadr + nch + k))
                         res[(OQACT + Int(mi[CCHAIN + choff + k])) * F + f] += scale * jn
+
+    comptime if GRAVCOMP and NU > 0:  # actuator-level gravcomp (engine_forward.c:770), only where mj_fwdActuation runs (nu > 0)
+        for j in range(NJ):
+            if mi[CGC + j] == 0:
+                continue
+            var t = Int(mi[JTYPE + j])
+            var da = Int(mi[DOFADR + j])
+            for d in range(da, da + (6 if t == 0 else (3 if t == 1 else 1))):
+                res[(OQACT + d) * F + f] += get(res, f, OGC + d)
 
 
 def equality(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int):
