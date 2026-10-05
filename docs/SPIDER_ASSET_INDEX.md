@@ -21,7 +21,7 @@ anatomy, cell types and web physics. Two datasets already carry passing checks
 | 27 KB | `rem2022/REMSleep.rmd`, `REM_retinaAnalysis.m` | same | analysis code; needs datasets S2/S3 |
 | 413 MB | `rem2022/supp/` | same, Europe PMC supplementaryFiles | 9 movies (sm01-09.mp4) + SI appendix PDF + fig 1; NO datasets S2/S3 (retinal-movement CSVs not in this bundle, PNAS hosts them separately); movies can feed the DLC project |
 
-## Papers (full text, `PMC*.txt` plain body, `PMC*.xml` JATS)
+## Papers (full text; `PMC*.txt` plain body, JATS, or BioC XML)
 
 | PMCID | Paper | Topic |
 |:------|:------|:------|
@@ -33,11 +33,38 @@ anatomy, cell types and web physics. Two datasets already carry passing checks
 | PMC9388130 | Rossler 2022 PNAS | REM-like sleep, retinal movements |
 | PMC5940701 | Nabawy 2018 Sci Rep | jump trajectories, P. regius |
 | PMC12604854 | Dahl 2025 eLife | individual recognition |
-| PMC7234261 | Aguilar-Arguello 2020 Curr Zool | detour distance |
+| PMC7234261 | Aguilar-Arguello 2020 Curr Zool | detour route choice in *Marpissa marina* and *Trite planiceps* |
+| PMC5413887 | Cross & Jackson 2017 Interface Focus | *Portia africana* exact prey-number discrimination using an expectancy-violation detour task |
 | PMC3181266 | Girard 2011 PLoS One | peacock spider vibrational courtship |
 | book ch. | Winsor, Morehouse & Jakob 2023, Distributed Vision ch. 10 (doi 10.1007/978-3-031-23216-9_10) | spider vision review: eye roles, retina numbers, secondary->MB and principal->arcuate pathways; local PDF `~/Downloads/Distributed_Vision_Spiders.pdf`, text `winsor2023.txt`, notes `winsor2023-vision-spec.md` |
 
-Not open / not found: Homann 1928 (eye-patch roles; behaviour now covered by Land 1971 / Zurek & Nelson 2012 via Winsor 2023), Cross 2016 Portia detours (PMC4751061, no text),
+The first checked spider evidence packet is built by `tools/spider_corpus.py` into
+`.work/papers/spider/`. It imports these local texts without modifying the
+structural-plasticity corpus, records input and cleaned-text SHA-256 digests,
+deduplicates DOI/PMCID, keeps section-based passage locators, and excludes JATS
+reference lists. Cross & Jackson 2016 (DOI 10.1002/jeab.189, PMCID PMC4751061)
+is retained as unavailable per the reviewed source packet, and is excluded from
+the corpus. Cross & Jackson 2017 is available as open full text (PMCID
+PMC5413887) and supplies the checked Portia primary source. The checked count
+and unavailable count are recorded by the corpus checker. Steck 2024
+(PMC11756594) also remains unavailable. The evidence handoff is
+[`docs/SPIDER_EVIDENCE_CARD.md`](SPIDER_EVIDENCE_CARD.md). See
+[`docs/plans/SPIDER_EVIDENCE.md`](plans/SPIDER_EVIDENCE.md) for packet scope and
+the reproducible gate.
+
+### Portia source search via local crawl4ai
+
+| Work | DOI / identifier | Corpus status | Crawl result |
+|:-----|:-----------------|:--------------|:-------------|
+| Cross & Jackson 2016, planned detours | 10.1002/jeab.189; PMC4751061 | Unavailable by packet decision | No text imported, despite a cached BioC artifact. |
+| Cross & Jackson 2017, exact prey numbers | 10.1098/rsfs.2016.0035; PMC5413887 | Available | Full article markdown retrieved from PMC and checked. |
+| Tarsitano & Jackson 1992, simple detours | 10.1163/156853992X00147 | Unavailable | Citation metadata found; Brill view/download crawl returned HTTP 502. |
+| Tarsitano & Jackson 1994, predatory detours | 10.1163/156853994X00217 | Unavailable | Citation metadata found; Brill view/download crawl returned HTTP 502. |
+| Tarsitano & Jackson 1997, route discrimination | 10.1006/anbe.1996.0372 | Unavailable | Citation metadata found; no full text through local crawl4ai. |
+| Harland & Jackson 2000, prey cues | 10.1242/jeb.203.22.3485; PMID 11044386 | Unavailable | PubMed abstract found; publisher crawl blocked by security verification. |
+| Harland & Jackson 2002, anterior medial eye cues | 10.1242/jeb.205.13.1861; PMID 12077162 | Unavailable | PubMed abstract found; publisher crawl blocked by security verification. |
+
+Not open / not found: Homann 1928 (eye-patch roles; behaviour now covered by Land 1971 / Zurek & Nelson 2012 via Winsor 2023),
 Steck 2024 (PMC11756594, no text), 2013 reversal learning, 2021 silk toughness.
 
 ## Notes and search logs
