@@ -159,7 +159,7 @@ comptime OMV = OSRCH + NV
 comptime OHN = OMV + NV
 comptime OHNI = OHN + NH
 comptime ODIAG = OHNI + NV  # Newton iterations, line-search evaluations (printed by main)
-comptime OFRC = ODIAG + 2  # noslip: per-row force, z = L^-T J' f, two rows' w = L^-T J'
+comptime OFRC = ODIAG + 3  # Newton diagnostics, then noslip scratch
 comptime OZ = OFRC + NEFC
 comptime OW = OZ + NV
 comptime OWC = OW + 2 * NV  # noslip per step: w of every valid row (laid out as J), then per row pair A 00 01 11, base 0 1
@@ -740,6 +740,7 @@ def hessian(mi: TI, res: TO, f: Int):
     """MuJoCo MakeHessian + FactorizeHessian: H = M + J' D J over active rows, in H's pattern (model.py hpattern: M's
     plus the fill of pairs coupling two limbs; a pair's dof chain is exactly the pattern of its deepest row),
     factored L'DL with mj_factorI."""
+    res[(ODIAG + 2) * F + f] += 1
     for c in range(NH):
         res[(OHN + c) * F + f] = 0
     for c in range(NC):
@@ -924,14 +925,19 @@ def newton(mi: TI, mf: TF, res: TO, f: Int):
     scale = 1 / scale
     res[ONCON * F + f] = get(res, f, OACT)
     var tol = mf[COPT + 1]
+    res[ODIAG * F + f] = 0
+    res[(ODIAG + 1) * F + f] = 0
+    res[(ODIAG + 2) * F + f] = 0
     var cost = start(mi, res, f, OQACCS)
     comptime if K > 0:  # mj warmstart: the last step's qacc unless qacc_smooth costs less
         var cw = start(mi, res, f, OWARM)
         cost = start(mi, res, f, OQACCS) if cw > cost else cw
     hessian(mi, res, f)
+    comptime if STOP == 9:
+        return
     gradient(mi, res, f)
-    res[ODIAG * F + f] = 0
-    res[(ODIAG + 1) * F + f] = 0
+    comptime if STOP == 8:
+        return
     for _ in range(Int(mi[CITER])):
         res[ODIAG * F + f] += 1
         var alpha = search(mi, res, f, scale, tol * mf[COPT + 2], Int(mi[CITER + 1]))
@@ -1360,6 +1366,8 @@ def step(mi: TI, mf: TF, qpos: TQ, qvel: TV, ctrl: TU, res: TO, f: Int):
         comptime if STOP == 5:
             return
         newton(mi, mf, res, f)
+        comptime if STOP == 8 or STOP == 9:
+            return
         noslip(mi, mf, res, f)
         comptime if K > 0:
             for v in range(NV):
@@ -1428,7 +1436,8 @@ def main() raises:
         file.write_bytes(Span(unsafe_ptr=host.unsafe_ptr().unsafe_bitcast[UInt8](), length=NOUT * F * 4))
     print(F, "animals, stage", STAGE, ", K", max(K, 1), ":", us, "us per launch,", Float64(F * max(K, 1)) / us * 1e6, "animal-steps/s")
     comptime if STAGE >= 6:
-        var it: Float64 = 0; var ev: Float64 = 0; var itmax: Float32 = 0
+        var it: Float64 = 0; var ev: Float64 = 0; var hb: Float64 = 0; var slots: Float64 = 0; var itmax: Float32 = 0
         for a in range(F):
-            it += Float64(host[ODIAG * F + a]); ev += Float64(host[(ODIAG + 1) * F + a]); itmax = max(itmax, host[ODIAG * F + a])
+            it += Float64(host[ODIAG * F + a]); ev += Float64(host[(ODIAG + 1) * F + a]); hb += Float64(host[(ODIAG + 2) * F + a]); slots += Float64(host[ONCON * F + a]); itmax = max(itmax, host[ODIAG * F + a])
         print("Newton iterations per animal", it / Float64(F), "max", itmax, "; line-search evaluations", ev / Float64(F))
+        print("Hessian rebuilds per animal", hb / Float64(F), "; active slots", slots / Float64(F))
