@@ -352,6 +352,16 @@ if [ "$stage" = flylink3 ]; then  # brain-driven fly, ONE DeviceContext (live.mo
   [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
   echo "PASS all flylink3 checks"; exit 0
 fi
+if [ "$stage" = hudclip ]; then  # one 300-frame clip with every HUD overlay on (follow camera, game-state bars from the engine rows, plume text, mini-map), checked frame by frame
+  # (hud_clip.py), hooks off byte-equal to main's live.mojo. Mutants: the mini-map source x and y swapped (marker at the wrong place), a state bar one pixel short
+  export PYTHONPATH=$PWD
+  H="$M -m agent.body_engine.hud_clip"
+  $H || { echo "FAIL hudclip"; fail=$((fail+1)); }
+  ~/iTools/bin/mutant-check agent/body_engine/spectate.mojo 's|project_source(src\[5 \* k\], src\[5 \* k + 1\], tx, ty,|project_source(src[5 * k + 1], src[5 * k], tx, ty,|' -- $H || fail=$((fail+1))
+  ~/iTools/bin/mutant-check agent/body_engine/spectate.mojo 's|Float32(x - BAR_X) + 0.5 < fill.width|Float32(x - BAR_X) + 1.5 < fill.width|' -- $H || fail=$((fail+1))
+  [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
+  echo "PASS all hudclip checks"; exit 0
+fi
 if [ "$stage" = fluid ]; then  # Flybody flight model: mj_fluid (ellipsoid wings + inertia boxes) inside qfrc_passive, wing velocities up to flapping rate
   R=~/Projects/science/fly-connectome; FL=${FLIGHT:-$R/.work/flight-body}
   [ -f $FL/flight.xml ] || $R/.work/neural-flies/flight-venv/bin/python agent/body_engine/models/flight_export.py $FL
