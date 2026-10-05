@@ -3,7 +3,7 @@
   gpu-wait run --shared --vram 4 --priority 60 --timeout 1200 --env PYTHONPATH=$PWD -- .venv/bin/python -m agent.verify_shiu_resident
 
 The fly_link brain (real FlyWire wiring, LC4 + LPLC2 looming drive at 150 Hz on both eyes, seed 71, one column) runs 100 + 100 ticks twice: in the resident
-worker process (ShiuLive.advance twice, then snapshot()) and in shiu_resident_check.mojo (Resident.advance twice, one DeviceContext, no worker). The per-neuron spike
+worker process (ShiuLive.advance twice, then snapshot()) and in body_engine/shiu_resident_check.mojo (Resident.advance twice, one DeviceContext, no worker). The per-neuron spike
 counts must be identical (and the brain must have spiked: DN counts > 0). Membrane voltages are not bit-exact even between two runs of the worker itself (deliver
 adds float32 with atomics: order varies, 182 of 138,639 voltages differ by up to 2.9e-6 mV), so the bar is that run-to-run floor: the worker is run twice, and the resident
 brain's voltages must lie within max(1e-5, 4 x floor) of the first. check.sh shiures adds the mutant (a tick counter that skips ticks).
@@ -22,7 +22,7 @@ from agent.shiu import ShiuLive
 
 A, B, SEED = 100, 100, 71
 HZ = 150.0
-SRC = [ROOT / 'agent' / f for f in ('shiu_resident_check.mojo', 'shiu_resident.mojo', 'shiu_worker.mojo')]
+SRC = [ROOT / 'agent/body_engine' / f for f in ('shiu_resident_check.mojo', 'shiu_resident.mojo')] + [ROOT / 'agent/shiu_worker.mojo']  # body_engine/shiu_worker.mojo is a symlink to it
 
 
 def binary(n, edges):
@@ -30,7 +30,7 @@ def binary(n, edges):
     b = ROOT / f'.work/agent/shiu/build/shiu_resident_check_{n}_{edges}_{h}'
     if not b.is_file():
         b.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run([str(Path.home() / '.local/bin/mojo'), 'build', '-I', str(ROOT / 'agent'), f'-DSHIU_N={n}', f'-DSHIU_E={edges}', '-DSHIU_C=1',
+        subprocess.run([str(Path.home() / '.local/bin/mojo'), 'build', '-I', str(ROOT / 'agent/body_engine'), f'-DSHIU_N={n}', f'-DSHIU_E={edges}', '-DSHIU_C=1',
                         str(SRC[0]), '-o', str(b)], check=True, capture_output=True, cwd=ROOT)
     return b
 

@@ -57,8 +57,7 @@ def build(d, tag, flags, k=K, src=None, brain=2, flies=1, extra_inc=()):
     """Content-addressed build (mutant-check restores old mtimes): live.mojo `src` (default the current one), every engine
     module it may import, and the model's sizes (a re-export with other sizes, e.g. convex pairs on, needs its own binary)."""
     src = src or ENGINE / 'live.mojo'
-    deps = [src] + sorted(f for f in ENGINE.glob('*.mojo') if f != src)
-    deps += sorted(Path(x) / f for x in extra_inc for f in ('shiu_worker.mojo', 'shiu_resident.mojo'))  # BRAIN=3 imports the Shiu kernels from agent/
+    deps = [src] + sorted(f for f in ENGINE.glob('*.mojo') if f != src)  # includes shiu_resident.mojo and the shiu_worker.mojo symlink (agent/)
     sz = (d / 'sizes.txt').read_text().split() + (d / 'rsizes.txt').read_text().split()
     sz += ['-DTERRAIN=1'] if any(f.startswith('-DHFGEOM') for f in sz) else []  # as live.build: a heightfield model
     h = hashlib.sha1(b''.join(f.read_bytes() for f in deps) + ' '.join(flags + sz + [f'F{flies}']).encode() + bytes([brain])).hexdigest()[:8]

@@ -20,8 +20,8 @@ spectator (docs/plans/RENDERER.md; each flag compiles none of its block when 0):
        between phases and, with arg 12 = FILE, writes the root trace FILE (float32 frame, root, xyz; arg 13 = game rows + effort sums per frame under GAME) and prints one COST line
        (ms per frame: physics, neural_control, render, copy, display; the syncs cost, the run is for the split, not for fps).
 
-BRAIN=3 (unit 5b; the fly's whole loop on this context: fly_brain.mojo = agent/shiu_resident.mojo brain + DN readout + FlyGym gait kernel, no host copy per step, nothing
-       on stdin; env FLY3_WORK / FLY3_GRAPH name the brain's files, DIR/gait.* the gait tables; build -I agent -DSHIU_N= -DSHIU_E= -DSHIU_C=1 -DFLY_NDN= -DFLY_NDNL= -DGSEG=;
+BRAIN=3 (unit 5b; the fly's whole loop on this context: fly_brain.mojo = agent/body_engine/shiu_resident.mojo brain + DN readout + FlyGym gait kernel, no host copy per step, nothing
+       on stdin; env FLY3_WORK / FLY3_GRAPH name the brain's files, DIR/gait.* the gait tables; build (no extra -I: body_engine/shiu_worker.mojo is a symlink to agent/shiu_worker.mojo) -DSHIU_N= -DSHIU_E= -DSHIU_C=1 -DFLY_NDN= -DFLY_NDNL= -DGSEG=;
        packets and frames as BRAIN=1/2; prints REF left right on exit).
 
 usage: live DIR/ FRAMES ex ey ez tx ty tz fovy_deg [OUT]

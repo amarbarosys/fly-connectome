@@ -333,11 +333,11 @@ if [ "$stage" = flygait ]; then  # the FlyGym gait on the card (fly_gait.mojo, l
   [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
   echo "PASS all flygait checks"; exit 0
 fi
-if [ "$stage" = shiures ]; then  # the resident Shiu brain on a caller-owned DeviceContext (agent/shiu_resident.mojo) vs ShiuLive.advance: counts and voltages bit-equal. Mutant: a tick counter that skips ticks
+if [ "$stage" = shiures ]; then  # the resident Shiu brain on a caller-owned DeviceContext (agent/body_engine/shiu_resident.mojo) vs ShiuLive.advance: counts and voltages bit-equal. Mutant: a tick counter that skips ticks
   export PYTHONPATH=$PWD
   R="$M -m agent.verify_shiu_resident"
   $R || { echo "FAIL shiures"; fail=$((fail+1)); }
-  ~/iTools/bin/mutant-check agent/shiu_resident.mojo 's|            self.t += 1|            self.t += 2|' -- $R || fail=$((fail+1))
+  ~/iTools/bin/mutant-check agent/body_engine/shiu_resident.mojo 's|            self.t += 1|            self.t += 2|' -- $R || fail=$((fail+1))
   [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
   echo "PASS all shiures checks"; exit 0
 fi

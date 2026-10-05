@@ -3,7 +3,7 @@
   python -m agent.body_engine.fly_link3 build
   gpu-wait run --shared --vram 4 --priority 60 --timeout 3000 --env PYTHONPATH=$PWD -- .venv/bin/python -m agent.body_engine.fly_link3 check
 
-fly_link.py's loop with the host taken out: the resident Shiu brain (agent/shiu_resident.mojo, the shiu_worker kernels imported), the descending-neuron
+fly_link.py's loop with the host taken out: the resident Shiu brain (agent/body_engine/shiu_resident.mojo, the shiu_worker kernels imported), the descending-neuron
 readout, the two drives and the FlyGym gait (fly_gait.mojo, parity-gated against HybridTurningController by `check.sh flygait`) all run on live.mojo's DeviceContext,
 in the same launch stream as the K-step body launch and the renderer; the host sends nothing and reads nothing per step. Conditions (one live process each, run one
 after the other): sym (both eyes 150 Hz; the reference rate of each side is measured on the card at the end of the first 50 control steps and printed), left (left
@@ -70,7 +70,7 @@ def write_cfg(w, ref, silence=0, freeze=-1):
 
 
 def binary(d, flags, tag='fly3'):
-    return sc.build(d, tag, ['-DPROFILE=1', *flags], K, brain=3, extra_inc=[ROOT / 'agent'])
+    return sc.build(d, tag, ['-DPROFILE=1', *flags], K, brain=3)
 
 
 def run(d, exe, work, graph, steps, render, packets, env_extra=None):
