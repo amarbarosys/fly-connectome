@@ -196,13 +196,14 @@ def onfaces(q, v, side):
     return q, v
 
 
-INTEGRATORS = (mujoco.mjtIntegrator.mjINT_EULER, mujoco.mjtIntegrator.mjINT_IMPLICITFAST)  # ported (RK4, full implicit: not yet)
+INTEGRATORS = (mujoco.mjtIntegrator.mjINT_EULER, mujoco.mjtIntegrator.mjINT_RK4, mujoco.mjtIntegrator.mjINT_IMPLICITFAST)  # ported (full implicit: not)
+STALE_RK4 = ('qH', 'qHDiagInv')  # mj_RungeKutta never factors qH: MuJoCo's d->qH after an RK4 step is stale, not compared
 
 
 def override(m):
     """ENGINE_OPT='integrator=3,kv=0.5': test-only option overrides applied to the model the engine AND MuJoCo both load.
     integrator: mjtIntegrator value. kv: velocity feedback on every affine-bias joint actuator (biasprm[2] = -kv), so
-    implicitfast's actuator qDeriv is not zero (the shipped servos have kv 0)."""
+    implicitfast's actuator qDeriv is not zero (the shipped servos have kv 0). kp: servo gain and bias stiffness scale."""
     for kv in filter(None, os.environ.get('ENGINE_OPT', '').split(',')):
         key, val = kv.split('=')
         if key == 'integrator':
@@ -210,6 +211,12 @@ def override(m):
         elif key == 'kv':
             joint = (m.actuator_trntype == mujoco.mjtTrn.mjTRN_JOINT) & (m.actuator_biastype == mujoco.mjtBias.mjBIAS_AFFINE)
             m.actuator_biasprm[joint, 2] = -float(val)
+        elif key == 'dt':  # timestep: explicit RK4 damps dofs explicitly, h B / M reaches 5.9 on the fly at h 1e-4 (stable below 2.8)
+            m.opt.timestep = float(val)
+        elif key == 'kp':  # servo stiffness scale: explicit RK4 at the shipped kp (h 1e-4, light limbs) is unstable in MuJoCo itself
+            joint = (m.actuator_trntype == mujoco.mjtTrn.mjTRN_JOINT) & (m.actuator_biastype == mujoco.mjtBias.mjBIAS_AFFINE)
+            m.actuator_gainprm[joint, 0] *= float(val)
+            m.actuator_biasprm[joint, 1] *= float(val)
         else:
             raise SystemExit(f'FAIL ENGINE_OPT: unknown key {key}')
 
@@ -625,11 +632,11 @@ def standing(m, count, seed=0):
     return np.array(q), np.array(v)
 
 
-def airborne(mjcf, out, count=64, lift=5.0):
+def airborne(mjcf, out, lift=5.0, count=64):
     """STATES file of count contact-free poses: the standing rollout (always run with Euler, so the states do not depend on
     the integrator under test) with every free joint lifted by `lift` along z. No contact rows, so qacc_euler and
     qpos_next carry the integrator alone, without the active-set float32 noise of contact states."""
-    m = load(mjcf)
+    m = load(mjcf)  # with ENGINE_OPT (a kv rollout is calmer than the shipped one: see check.sh integrator), forced to Euler
     m.opt.integrator = mujoco.mjtIntegrator.mjINT_EULER
     q, v = standing(m, count)
     for j in np.flatnonzero(m.jnt_type == mujoco.mjtJoint.mjJNT_FREE):  # every animal of a combined model
@@ -794,7 +801,8 @@ def check(mjcf, out, stage, count=64, k=0, oracle=None):
         compare({'qfrc_constraint (ambiguous states)': (want['qfrc_constraint'].reshape(count, -1)[flip], got[i][flip])}, 1.0) if flip.any() else None
         want['qfrc_constraint'] = want['qfrc_constraint'].reshape(count, -1)[~flip]
         got[i] = got[i][~flip]
-    bad += [b for f, g in zip(fields, got) for b in compare({f: (want[f].reshape(len(g), -1), g)}, max(REL, FLOOR_X * floor.get(f, 0)))]
+    skip = STALE_RK4 if m.opt.integrator == mujoco.mjtIntegrator.mjINT_RK4 else ()
+    bad += [b for f, g in zip(fields, got) if f not in skip for b in compare({f: (want[f].reshape(len(g), -1), g)}, max(REL, FLOOR_X * floor.get(f, 0)))]
     if bad:
         print(f'FAIL {len(bad)}/{len(fields)} {stage} fields: {" ".join(bad)}')
         sys.exit(1)
@@ -805,7 +813,7 @@ def check(mjcf, out, stage, count=64, k=0, oracle=None):
 if __name__ == '__main__':
     cmd, args = sys.argv[1], sys.argv[2:]
     if cmd == 'airborne':
-        sys.exit(print(airborne(args[0], args[1])))
+        sys.exit(print(airborne(args[0], args[1], *map(float, args[2:]))))
     if cmd == 'meshes':
         sys.exit(0 if meshes(*args) <= 1e-4 else 'FAIL meshes: decode error above 1e-4 of part size')
     import os
