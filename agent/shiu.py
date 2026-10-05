@@ -339,7 +339,7 @@ def worker_binary(n, edges, flies, source=ROOT / 'agent/shiu_worker.mojo'):
     binary = out / f'shiu_worker_{n}_{edges}_c{flies}'
     if not binary.is_file() or binary.stat().st_mtime < source.stat().st_mtime:
         binary.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run([str(Path.home() / '.local/bin/mojo'), 'build', f'-DSHIU_N={n}', f'-DSHIU_E={edges}',
+        subprocess.run([str(Path.home() / 'iTools/bin/mojo-cached'), 'build', f'-DSHIU_N={n}', f'-DSHIU_E={edges}',
                         f'-DSHIU_C={flies}', str(source), '-o', str(binary)], check=True, cwd=ROOT)
     return binary
 

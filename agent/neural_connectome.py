@@ -219,7 +219,7 @@ def worker_binary(flies):
     binary = ROOT/f'.work/neural-flies/build/neural_worker_c{flies}'
     if not binary.is_file() or binary.stat().st_mtime < source.stat().st_mtime:
         binary.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run([str(Path.home()/'.local/bin/mojo'), 'build', f'-DFLY_NEURAL_FLIES={flies}',
+        subprocess.run([str(Path.home()/'iTools/bin/mojo-cached'), 'build', f'-DFLY_NEURAL_FLIES={flies}',
                         str(source), '-o', str(binary)], check=True, cwd=ROOT)
     return binary
 

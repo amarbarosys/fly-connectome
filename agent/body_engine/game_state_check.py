@@ -14,7 +14,7 @@ MODULE = ROOT / "agent/body_engine/game_state.mojo"
 
 
 def main() -> None:
-    mojo = Path.home() / ".local/bin/mojo"
+    mojo = Path.home() / "iTools/bin/mojo-cached"
     build_dir = ROOT / ".work/gamestate-check"
     build_dir.mkdir(parents=True, exist_ok=True)
     binary = build_dir / "game_state"

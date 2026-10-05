@@ -33,7 +33,7 @@ NS = N1 * F12 + N2 * F12 + NM * FM
 S, REFR, SUB, V_TH, KICK, GAIN, P_NOISE, ETA = 20, 5, 5e-4, 7.0, np.float32(0.275 * 250), 400.0, np.float32(30 * 5e-4), 0.01
 THETA, WMAX, FRAC = 0.02, 0.3, 0.3
 DIR = ROOT / '.work/agent/spider/pool-gpu'
-MOJO = Path.home() / '.local/bin/mojo'
+MOJO = Path.home() / 'iTools/bin/mojo-cached'
 
 
 def init(seed=2):

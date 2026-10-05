@@ -207,7 +207,7 @@ if [ "$stage" = loop ]; then  # K steps per launch, state kept on the card. K=1 
   # gate: the engine's ~5e-6 per-step float32 error grows ~12x in 10 steps on contact-rich states (diag/k_floor.py)
   F=.work/agent/gpu-body-port/body-v2/body.xml
   $M -m agent.body_engine.model check $F $X/fly actuated 64 1 || { echo "FAIL fly loop K=1"; fail=$((fail+1)); }
-  ~/.local/bin/mojo build $(cat $X/fly/sizes.txt) -DFLIES=64 -DSTAGE=7 -DK=10 -DWAVE=${WAVE:-0} agent/body_engine/smooth.mojo -o $X/fly/k10
+  ~/iTools/bin/mojo-cached build $(cat $X/fly/sizes.txt) -DFLIES=64 -DSTAGE=7 -DK=10 -DWAVE=${WAVE:-0} agent/body_engine/smooth.mojo -o $X/fly/k10
   cp $X/fly/state10.bin $X/fly/k1x10.bin && $X/fly/k10 $X/fly/
   cmp $X/fly/state.bin $X/fly/k1x10.bin && echo "PASS K=10 launch == 10 K=1 launches, byte-equal" || { echo "FAIL loop K=10 vs 10 x K=1"; fail=$((fail+1)); }
   # the gate must fail with the velocity write-back dropped (each step restarts from the launch's qvel)
@@ -243,7 +243,7 @@ if [ "$stage" = loopk ]; then  # engine vs ITSELF, no MuJoCo: one K=10 launch ==
   B=${BODY:-.work/agent/gpu-body-port/body-v2/body.xml}; D=$X/loopk-$(basename $B .xml)
   ST=actuated; [ "$(basename $B)" = spider_test.xml ] && ST=step  # the spider test body has no actuators
   ENGINE_ONLY=1 $M -m agent.body_engine.model check $B $D $ST 64 1 | tail -1
-  ~/.local/bin/mojo build $(cat $D/sizes.txt) -DFLIES=64 -DSTAGE=$($M -c "from agent.body_engine.model import STAGES; print(STAGES['$ST'][0])") -DK=10 -DWAVE=${WAVE:-0} agent/body_engine/smooth.mojo -o $D/k10
+  ~/iTools/bin/mojo-cached build $(cat $D/sizes.txt) -DFLIES=64 -DSTAGE=$($M -c "from agent.body_engine.model import STAGES; print(STAGES['$ST'][0])") -DK=10 -DWAVE=${WAVE:-0} agent/body_engine/smooth.mojo -o $D/k10
   cp $D/state10.bin $D/k1x10.bin && $D/k10 $D/ >/dev/null
   cmp $D/state.bin $D/k1x10.bin && echo "PASS loopk $(basename $B .xml) ${ENGINE_OPT:-defaults}: K=10 launch == 10 K=1 launches, byte-equal (engine vs engine, not MuJoCo)" || { echo "FAIL loopk $(basename $B .xml)"; exit 1; }
   exit 0

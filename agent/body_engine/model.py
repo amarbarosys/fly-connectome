@@ -992,7 +992,7 @@ def check(mjcf, out, stage, count=64, k=0, oracle=None):
     v.astype(np.float32).T.copy().tofile(out / 'qvel.bin')  # (nv, flies)
     binary = out / f'{stage}_{count}'
     flags = (out / 'sizes.txt').read_text().split()
-    subprocess.run([str(Path.home() / '.local/bin/mojo'), 'build', *flags, f'-DFLIES={count}', f'-DSTAGE={number}', f'-DK={k}', f"-DWAVE={os.environ.get('WAVE', 0)}", f"-DDUMP={os.environ.get('DUMP', 0)}", str(ENGINE / 'smooth.mojo'), '-o', str(binary)], check=True)
+    subprocess.run([str(Path.home() / 'iTools/bin/mojo-cached'), 'build', *flags, f'-DFLIES={count}', f'-DSTAGE={number}', f'-DK={k}', f"-DWAVE={os.environ.get('WAVE', 0)}", f"-DDUMP={os.environ.get('DUMP', 0)}", str(ENGINE / 'smooth.mojo'), '-o', str(binary)], check=True)
     subprocess.run([str(binary), str(out) + '/'], check=True)
     if os.environ.get('ENGINE_ONLY'):  # engine run only (loopk: K=10 vs 10 x K=1 byte equality), no MuJoCo comparison
         print(f'engine only: {stage} K={k} ran, nothing compared with MuJoCo')

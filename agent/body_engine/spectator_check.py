@@ -4,7 +4,7 @@ import subprocess
 
 ROOT = Path(__file__).resolve().parent
 BUILD = ROOT / ".work" / "spectator_check"
-MOJO = Path.home() / ".local/bin/mojo"
+MOJO = Path.home() / "iTools/bin/mojo-cached"
 SOURCE = ROOT / "follow_camera.mojo"
 HUD = ROOT / "hud.mojo"
 

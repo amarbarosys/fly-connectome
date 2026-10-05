@@ -91,7 +91,7 @@ def run(kind, n, prec='f64', bar=1e-9, seed=0, mutant=None, verbose=True):
     hv.tofile(work / 'hverts.f32'); hf.tofile(work / 'hfirst.i32'); he.tofile(work / 'hedges.i32'); hm.tofile(work / 'hmeta.i32')
     exe = work / 'ct'
     flags = ['-DCCD64=1'] if prec == 'f64' else []
-    p = subprocess.run(['/home/<user>/.local/bin/mojo', 'build', *flags, 'agent/body_engine/convex_test.mojo', '-o', str(exe)], capture_output=True, text=True)
+    p = subprocess.run(['/home/<user>/iTools/bin/mojo-cached', 'build', *flags, 'agent/body_engine/convex_test.mojo', '-o', str(exe)], capture_output=True, text=True)
     if p.returncode:
         print('FAIL build convex_test:', p.stderr[-2000:])
         return False
@@ -227,7 +227,7 @@ def arena_poses(count, prec='f32'):
     np.array(rows).tofile(work / 'cases.f64')
     hv.tofile(work / 'hverts.f32'); hf.tofile(work / 'hfirst.i32'); he.tofile(work / 'hedges.i32'); hm.tofile(work / 'hmeta.i32')
     exe = work / 'ct'
-    p = subprocess.run(['/home/<user>/.local/bin/mojo', 'build', *(['-DCCD64=1'] if prec == 'f64' else []), 'agent/body_engine/convex_test.mojo', '-o', str(exe)], capture_output=True, text=True)
+    p = subprocess.run(['/home/<user>/iTools/bin/mojo-cached', 'build', *(['-DCCD64=1'] if prec == 'f64' else []), 'agent/body_engine/convex_test.mojo', '-o', str(exe)], capture_output=True, text=True)
     if p.returncode or subprocess.run([str(exe), str(work) + '/']).returncode:
         print('FAIL build or run', p.stderr[-800:])
         return False
