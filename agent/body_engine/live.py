@@ -65,7 +65,7 @@ def prepare(out=OUT, pairs=FEET, mjcf=MJCF, dist=DIST, flat=None):
     m.opt.noslip_iterations = 0  # normal friction: noslip 5 makes the standing fly tremble, in MuJoCo too (Brain 2026-10-05)
     m = export(m, out, pairs, True)
     meshes(mjcf, out)
-    q, v = standing(load(flat) if flat else m, 2)
+    q, v = standing(load(flat or mjcf), 2)  # shipped noslip 5: with noslip 0 the settling rollout collapses onto the belly
     q, v = q[:1], v[:1]
     if flat:  # every free root (fly, spider) lifted above its own ground
         t = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_NUMERIC, 'terrain')
