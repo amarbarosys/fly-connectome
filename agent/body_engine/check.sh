@@ -389,6 +389,27 @@ if [ "$stage" = cone ]; then  # elliptic friction cone on the walking fly: Newto
   [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
   echo "PASS all cone checks"; exit 0
 fi
+if [ "$stage" = spidereye ]; then  # native vision (docs/plans/SPIDER_BRAIN.md unit 2): rendered prey vs an independent analytic pinhole,
+  # own-body occlusion vs MuJoCo ray casting, per-animal separation, environment-moved prey. Mutants: eye axis yaw flipped in the kernel,
+  # prey path sign flipped, eye table yaw flipped (caught against the gate's own hand-written INTENDED geometry)
+  L="$M -m agent.body_engine.spider_eyes check"
+  $L || { echo "FAIL spidereye"; fail=$((fail+1)); }
+  ~/iTools/bin/mutant-check agent/body_engine/eyes.mojo 's/var tgt = eye + rot(bq, ax)/var tgt = eye + rot(bq, V3(ax[0], -ax[1], ax[2], 0))/' -- $L || fail=$((fail+1))
+  ~/iTools/bin/mutant-check agent/body_engine/eyes.mojo 's/= env\[k \* F + f\] + v0 \* dt/= -env[k * F + f] + v0 * dt/' -- $L || fail=$((fail+1))
+  ~/iTools/bin/mutant-check agent/body_engine/spider_eyes.py 's/t\[i, 3:6\] = (np.cos(np.radians(yaw)), np.sin/t[i, 3:6] = (np.cos(np.radians(yaw)), -np.sin/' -- $L || fail=$((fail+1))
+  [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
+  echo "PASS all spidereye checks"; exit 0
+fi
+if [ "$stage" = jump ]; then  # spider jump (docs/plans/SPIDER_BRAIN.md unit 3): engine vs MuJoCo on the same ctrl stream, published take-off ranges,
+  # ballistic flight and distance. Mutants: burst scaled to 0, weak servos (JUMP_S 1), ctrl write skipped
+  L="$M -m agent.body_engine.spider_jump check"
+  $L || { echo "FAIL jump"; fail=$((fail+1)); }
+  ~/iTools/bin/mutant-check agent/body_engine/spider_jump.py 's/^BURST_SCALE = 1.0/BURST_SCALE = 0.0/' -- $L || fail=$((fail+1))
+  ~/iTools/bin/mutant-check agent/body_engine/models/spider.py 's/^JUMP_S = 95.6/JUMP_S = 1.0/' -- $L || fail=$((fail+1))
+  ~/iTools/bin/mutant-check agent/body_engine/live.mojo 's/ctx.enqueue_copy(u_b, ctrl_h)/pass/' -- $L || fail=$((fail+1))
+  [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
+  echo "PASS all jump checks"; exit 0
+fi
 B=${BODY:-.work/agent/gpu-body-port/body-v2/body.xml}  # BODY=path checks another MJCF (e.g. the spider from models/spider.py)
 $M -m agent.body_engine.model check $B $X/body-$(basename $B .xml) "$stage" 64 || { echo "FAIL $(basename $B .xml) $stage"; fail=$((fail+1)); }
 if [ "$stage" = contact ] || [ "$stage" = actuated ]; then  # plane-mesh foot pairs; the spider test body has none

@@ -31,11 +31,11 @@ DT = 1e-4
 BODY_MM = 5.6  # prosoma + opisthosoma, models/spider.py
 
 
-def files(F, name=None):
+def files(F, name=None, prey=False):
     """Engine + mesh files for F copies of the spider standing (prepare's state), servos at the stance, drives speed 1 turn 0."""
     d = OUT / (name or f'f{F}')
     if not (d / 'drive.bin').exists():
-        cam, m = prepare(d, mjcf=str(spider_build()), dist=15.0)
+        cam, m = prepare(d, mjcf=str(spider_build(prey=prey)), dist=15.0)
         for n in ('qpos', 'qvel', 'ctrl'):
             a = np.fromfile(d / f'{n}.bin', np.float32).reshape(-1, 1)
             np.tile(a, (1, F)).astype(np.float32).tofile(d / f'{n}.bin')
@@ -43,15 +43,15 @@ def files(F, name=None):
     return d
 
 
-def build(d, F, k, brain, w=64, h=64):
+def build(d, F, k, brain, w=64, h=64, eyes=False):
     flags = (d / 'sizes.txt').read_text().split() + (d / 'rsizes.txt').read_text().split()
     nb = int([f for f in flags if f.startswith('-DNBODY=')][0][8:])
-    src = [ENGINE / f for f in ('live.mojo', 'smooth.mojo', 'render.mojo', 'spider_brain.mojo')]
+    src = [ENGINE / f for f in ('live.mojo', 'smooth.mojo', 'render.mojo', 'spider_brain.mojo', 'eyes.mojo')]
     tag = hashlib.sha1(b''.join(f.read_bytes() for f in src)).hexdigest()[:8]  # content, not mtime: mutant-check restores old mtimes
-    b = d / f'link_b{brain}_k{k}_{w}x{h}_{tag}'
+    b = d / f'link_b{brain}_k{k}_{w}x{h}{"_eyes" if eyes else ""}_{tag}'
     if not b.is_file():
         subprocess.run([MOJO, 'build', '-I', str(ENGINE), *flags, f'-DFLIES={F}', '-DSTAGE=7', f'-DK={k}', '-DWAVE=1', f'-DW={w}', f'-DH={h}',
-                        f'-DPROWS={7 * (nb - 1)}', '-DBOX_MM=0', f'-DBRAIN={brain}', str(ENGINE / 'live.mojo'), '-o', str(b)], check=True,
+                        f'-DPROWS={7 * (nb - 1)}', '-DBOX_MM=0', f'-DBRAIN={brain}', f'-DEYES={int(eyes)}', str(ENGINE / 'live.mojo'), '-o', str(b)], check=True,
                        capture_output=True)
     return b
 
@@ -61,11 +61,11 @@ def sizes(d):
     return int(s['NQ']), int(s['NV']), int(s['NSLOT'])
 
 
-def run(d, F, k, brain, steps, packet=0, ctrl=None):
+def run(d, F, k, brain, steps, packet=0, ctrl=None, eyes=False):
     """Run `steps` control steps; returns the packets [(u, q, v, valid)] (every `packet`-th step and the last) and seconds.
     brain 1: ctrl(step) -> (F, NU) written to stdin each step."""
     nq, nv, ns = sizes(d)
-    p = subprocess.Popen([str(build(d, F, k, brain)), str(d) + '/', str(steps), *CAM, '0', str(packet)], stdin=subprocess.PIPE if brain == 1 else None,
+    p = subprocess.Popen([str(build(d, F, k, brain, eyes=eyes)), str(d) + '/', str(steps), *CAM, '0', str(packet)], stdin=subprocess.PIPE if brain == 1 else None,
                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     row = lambda n: np.empty((n, F), np.float32)
     sent = [i for i in range(steps) if (packet and i % packet == 0) or i + 1 == steps]
@@ -75,7 +75,10 @@ def run(d, F, k, brain, steps, packet=0, ctrl=None):
             p.stdin.write(np.ascontiguousarray(ctrl(i).T, np.float32).tobytes())
             p.stdin.flush()
         if i in sent:
-            out.append(tuple(np.frombuffer(p.stdout.read(4 * n * F), np.float32).reshape(n, F) for n in (NU, nq, nv, ns)))
+            pk = tuple(np.frombuffer(p.stdout.read(4 * n * F), np.float32).reshape(n, F) for n in (NU, nq, nv, ns))
+            if eyes:  # retinas, uint8 [animal][eye][H x W] (eyes.mojo)
+                pk += (np.frombuffer(p.stdout.read(F * 6 * 64 * 64), np.uint8).reshape(F, 6, 64, 64),)
+            out.append(pk)
     dt = time.perf_counter() - t0
     if p.wait() != 0:
         raise SystemExit(f'FAIL link: engine exited {p.returncode}')
@@ -165,7 +168,6 @@ def timing():
 
 def watch(k=10):
     """One spider circling under the on-card brain (speed 0.6, turn 0.8), drawn every control step into mpv (K steps = K x 0.1 ms per frame)."""
-    import os
     w, h = 960, 540
     d = files(1, 'watch')
     np.array([0.6, 0.8], np.float32).tofile(d / 'drive.bin')
@@ -174,8 +176,8 @@ def watch(k=10):
     cam = [str(x) for x in (*(look + np.array([0.0, -22.0, 14.0])), *look, 45)]
     mpv = subprocess.Popen(['mpv', '--demuxer=rawvideo', f'--demuxer-rawvideo-w={w}', f'--demuxer-rawvideo-h={h}',
                             '--demuxer-rawvideo-mp-format=rgba', '--no-cache', '-'], stdin=subprocess.PIPE)
-    eng = subprocess.Popen([str(build(d, 1, k, 2, w, h)), str(d) + '/', '0', *cam, '1', '0'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                           pass_fds=(mpv.stdin.fileno(),), preexec_fn=lambda: os.dup2(mpv.stdin.fileno(), 4))
+    eng = subprocess.Popen(['/usr/bin/bash', '-c', f'exec "$@" 4>&{mpv.stdin.fileno()}', 'engine', str(build(d, 1, k, 2, w, h)), str(d) + '/', '0', *cam, '1', '0'],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, pass_fds=(mpv.stdin.fileno(),))
     mpv.wait()
     eng.terminate()
 

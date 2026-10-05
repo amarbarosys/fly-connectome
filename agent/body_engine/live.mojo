@@ -9,7 +9,8 @@ brain link (-DBRAIN=1 or 2, docs/plans/SPIDER_BRAIN.md unit 1; BRAIN=0 compiles 
        step. BRAIN=1: the ctrl for the step arrives on stdin (NU x F float32, [servo][animal]) and goes to the engine's
        ctrl buffer; BRAIN=2: spider_brain.mojo's gait kernel writes it on the card (drives from DIR/drive.bin, 2 x F float32:
        speed, turn). After the launch a sensor packet goes to stdout every PACKET-th step (arg 11, 0 = never, and at the last step):
-       ctrl, qpos, qvel, valid contact slots (OVALID.., NSLOT rows), each float32 [row][animal]. Frames (arg 10 = every n-th
+       ctrl, qpos, qvel, valid contact slots (OVALID.., NSLOT rows), each float32 [row][animal]; with -DEYES=1 then the retinas, uint8
+       [animal][eye][H x W] (eyes.mojo; DIR/eyes.bin the eye table, DIR/env.bin the prey's path). Frames (arg 10 = every n-th
        step, 0 = never) go to fd 4 instead of stdout. No target state anywhere in the packet.
 
 spectator (docs/plans/RENDERER.md; each flag compiles none of its block when 0): -DFOLLOW=1 follows the root bodies of DIR/roots.bin
@@ -37,6 +38,7 @@ from max.gpu.host import DeviceContext
 from layout import TileTensor
 import spider_brain as brain
 import spectate as spec
+import eyes
 
 comptime BRAIN = get_defined_int["BRAIN", 0]()
 comptime NVALID = eng.NSLOT
@@ -44,6 +46,8 @@ comptime FOLLOW = get_defined_int["FOLLOW", 0]()
 comptime HUD = get_defined_int["HUD", 0]()
 comptime PROFILE = get_defined_int["PROFILE", 0]()
 comptime WORLD = get_defined_int["WORLD", 0]()
+comptime EYES = get_defined_int["EYES", 0]() == 1  # BRAIN > 0: eyes.mojo retinas in the packet, prey moved by DIR/env.bin
+comptime NRET = eyes.F * eyes.NE * eyes.W * eyes.H if EYES else 1
 
 
 def write_all(fd: Int, p: Pointer[UInt8, MutUntrackedOrigin], n: Int) -> Bool:
@@ -148,6 +152,22 @@ def main() raises:
     var pkt_s = ctx.enqueue_create_host_buffer[DType.float32](max(NVALID, 1) * eng.F)
     var kb = ctx.compile_function[brain.gait]()  # launched only when BRAIN == 2
     var drive_b = ctx.enqueue_create_buffer[DType.float32](2 * eng.F)
+    var k_ec = ctx.compile_function[eyes.eye_cam]()  # the eye kernels launch only when EYES
+    var k_ecl = ctx.compile_function[eyes.eye_clear]()
+    var k_er = ctx.compile_function[eyes.eye_raster]()
+    var k_es = ctx.compile_function[eyes.eye_shade]()
+    var k_pr = ctx.compile_function[eyes.prey_set]()
+    var ecam_b = ctx.enqueue_create_buffer[DType.float32](eyes.F * ren.NCAM if EYES else 1)
+    var evis_b = ctx.enqueue_create_buffer[DType.uint64](eyes.F * eyes.W * eyes.H if EYES else 1)
+    var eyet_b = ctx.enqueue_create_buffer[DType.float32](eyes.NE * 8)
+    var env_b = ctx.enqueue_create_buffer[DType.float32](6 * eng.F)
+    var ret_b = ctx.enqueue_create_buffer[DType.uint8](NRET)
+    var pkt_r = ctx.enqueue_create_host_buffer[DType.uint8](NRET)
+    comptime if EYES:
+        var et = eng.load(dir + "eyes.bin", eyes.NE * 8)
+        var ev = eng.load(dir + "env.bin", 6 * eng.F)
+        ctx.enqueue_copy(eyet_b, et.unsafe_ptr().unsafe_bitcast[Float32]())
+        ctx.enqueue_copy(env_b, ev.unsafe_ptr().unsafe_bitcast[Float32]())
     comptime if BRAIN == 2:
         var dr = eng.load(dir + "drive.bin", 2 * eng.F)
         ctx.enqueue_copy(drive_b, dr.unsafe_ptr().unsafe_bitcast[Float32]())
@@ -196,6 +216,9 @@ def main() raises:
     var fr = 0
     while frames == 0 or fr < frames:
         var tp = perf_counter_ns()
+        comptime if EYES:
+            ctx.enqueue_function(k_pr, TileTensor(q_b, eng.LQ), TileTensor(v_b, eng.LV), TileTensor(env_b, eyes.LENV), Float32(fr * max(eng.K, 1)) * Float32(1e-4),
+                grid_dim=(eng.F + 63) // 64, block_dim=64)
         comptime if BRAIN == 1:
             if not read_all(0, ctrl_h.unsafe_ptr().unsafe_bitcast[UInt8](), max(eng.NU, 1) * eng.F * 4):
                 return  # brain gone
@@ -213,6 +236,15 @@ def main() raises:
             ctx.synchronize()
             ms[1] += Float64(perf_counter_ns() - tp)
             tp = perf_counter_ns()
+        comptime if EYES:
+            var tecam = TileTensor(ecam_b, eyes.LECAM)
+            var tevis = TileTensor(evis_b, eyes.LEVIS)
+            var tret = TileTensor(ret_b, eyes.LRET)
+            for e in range(eyes.NE):
+                ctx.enqueue_function(k_ec, tecam, tpose, TileTensor(eyet_b, eyes.LEYE), Int32(e), grid_dim=(eng.F + 63) // 64, block_dim=64)
+                ctx.enqueue_function(k_ecl, tevis, grid_dim=(eyes.F * eyes.W * eyes.H + 255) // 256, block_dim=256)
+                ctx.enqueue_function(k_er, tevis, tecam, tpi, tpf, trv, trt, trp, tpose, tcam, grid_dim=(eyes.F * ren.NTRI + 255) // 256, block_dim=256)
+                ctx.enqueue_function(k_es, tevis, tret, Int32(e), tpi, tpf, trv, trt, trp, tpose, tcam, grid_dim=(eyes.F * eyes.W * eyes.H + 255) // 256, block_dim=256)
         var draw = render_every > 0 and fr % render_every == 0 if BRAIN > 0 else True
         comptime if WORLD > 0:  # the plume at the odor sites of this step's pose: the HUD text, the trace and a brain's sense packet read it
             ctx.enqueue_function(ksn, tplume, tpose, tsite, tsrc, grid_dim=1, block_dim=64)
@@ -239,6 +271,8 @@ def main() raises:
                 ctx.enqueue_copy(pkt_u, u_b)
                 ctx.enqueue_copy(pkt_q, q_b)
                 ctx.enqueue_copy(pkt_v, v_b)
+                comptime if EYES:
+                    ctx.enqueue_copy(pkt_r, ret_b)
                 comptime if NVALID > 0:
                     ctx.enqueue_copy(pkt_s, o_b.create_sub_buffer[DType.float32](eng.OVALID * eng.F, NVALID * eng.F))
         ctx.synchronize()
@@ -284,6 +318,9 @@ def main() raises:
                     or not write_all(1, pkt_v.unsafe_ptr().unsafe_bitcast[UInt8](), eng.NV * eng.F * 4) \
                     or not write_all(1, pkt_s.unsafe_ptr().unsafe_bitcast[UInt8](), NVALID * eng.F * 4):
                     return
+                comptime if EYES:
+                    if not write_all(1, pkt_r.unsafe_ptr(), NRET):
+                        return
         if draw:
             if not write_all(4 if BRAIN > 0 else 1, out_h.unsafe_ptr().unsafe_bitcast[UInt8](), ren.W * ren.H * 4):
                 return  # reader gone
