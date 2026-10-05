@@ -16,6 +16,7 @@ trap 'git -C "$R" worktree remove --force "$W"' EXIT
 ln -s "$R/.venv" "$W/.venv"
 mkdir -p "$W/.work/agent/body_engine"
 ln -s "$R/.work/agent/gpu-body-port" "$W/.work/agent/gpu-body-port"
+cp -rsn "$R/data/." "$W/data/"  # untracked data (annotation TSVs, 69 GB) as symlinks; tracked files keep the commit's copy
 for d in spider-body mujoco-src; do [ -e "$R/.work/agent/body_engine/$d" ] && ln -s "$R/.work/agent/body_engine/$d" "$W/.work/agent/body_engine/$d"; done
 fail=0; bad=""
 for s in "$@"; do
