@@ -69,9 +69,13 @@ def prepare(out=OUT, pairs=FEET, mjcf=MJCF, dist=DIST, flat=None):
     q, v = q[:1], v[:1]
     if flat:  # every free root (fly, spider) lifted above its own ground
         t = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_NUMERIC, 'terrain')
-        for a in roots(m):
-            g = np.mgrid[-4:4:33j, -4:4:33j].reshape(2, -1) + q[0, a:a + 2, None]
-            q[0, a + 2] += float(height_grad(g[0], g[1], m.numeric_data[m.numeric_adr[t]:m.numeric_adr[t] + 16])[0].max()) + 0.05
+        d = mujoco.MjData(m)
+        d.qpos[:] = q[0]
+        mujoco.mj_kinematics(m, d)
+        for a, j in zip(roots(m), np.flatnonzero(m.jnt_type == mujoco.mjtJoint.mjJNT_FREE)):
+            b = np.flatnonzero(m.body_rootid == m.body_rootid[m.jnt_bodyid[j]])  # this animal's bodies: the ground under
+            h = height_grad(d.xpos[b, 0], d.xpos[b, 1], m.numeric_data[m.numeric_adr[t]:m.numeric_adr[t] + 16])[0]
+            q[0, a + 2] += float(h.max()) + 0.05  # them, not the highest within 4 mm (a 0.57 mm drop on a 0.1 ramp)
     u = np.where(m.actuator_trntype == mujoco.mjtTrn.mjTRN_BODY, 1.0, q[0][m.jnt_qposadr[np.minimum(m.actuator_trnid[:, 0], m.njnt - 1)]])
     q.astype(np.float32).T.copy().tofile(out / 'qpos.bin')
     v.astype(np.float32).T.copy().tofile(out / 'qvel.bin')
@@ -171,7 +175,8 @@ def upright(out, m, cam, frames=300, flip=False):
 def upright_check(terrain_mjcf, flat=MJCF):
     """Stands on terrain: dropped from the lifted flat pose, after 300 frames (3000 steps) the root has tilted under
     30 deg from its start pose (the standing thorax frame is itself pitched, up z 0.42) and the thorax clears the
-    ground by at least half its flat standing clearance (flat 0.48 mm; a fly lying on its belly, feet down or not,
+    ground by at least half its flat standing clearance and 0.2 mm (flat 0.48 mm; the floor catches a flat run that
+    itself lies down, 74485d5; a fly lying on its belly, feet down or not,
     is at 0: 0.3 mm bumps measured 0.002). The same gate must PASS on the flat floor and FAIL started upside down.
     (ctrl 0 is no negative control: angle 0 is near the standing pose, the fly stood with it.)"""
     res, ref = {}, None
@@ -181,7 +186,7 @@ def upright_check(terrain_mjcf, flat=MJCF):
         got = upright(out, m, cam, flip=off)
         ref = [c for _, c in got] if ref is None else ref
         res[name] = {'cos_tilt': [t for t, _ in got], 'clearance': [c for _, c in got], 'flat_clearance': ref,
-                     'pass': bool(all(t > np.cos(np.radians(30)) and c > 0.5 * r for (t, c), r in zip(got, ref)))}
+                     'pass': bool(all(t > np.cos(np.radians(30)) and c > max(0.5 * r, 0.2) for (t, c), r in zip(got, ref)))}
         print(('PASS' if res[name]['pass'] else 'FAIL'), name, json.dumps(res[name]))
     good = res['flat']['pass'] and res['terrain']['pass'] and not res['terrain flipped (must fail)']['pass']
     print('PASS upright on terrain' if good else 'FAIL upright on terrain')
