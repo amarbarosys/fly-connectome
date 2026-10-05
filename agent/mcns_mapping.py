@@ -7,7 +7,15 @@ import numpy as np
 import pandas as pd
 
 from agent import mcns
-from agent.neural_connectome import ANNOTATIONS
+from agent.neural_connectome import ANNOTATIONS, ROOT
+
+FLYWIRE_ANNOTATIONS = ANNOTATIONS
+if not FLYWIRE_ANNOTATIONS.is_file():
+    # Worktrees share the checkout's untracked FlyWire annotation asset, but do not inherit it.
+    shared_asset = (ROOT.parents[2] / 'data/annotations/flyconnectome-flywire_annotations-a83b277'
+                    / 'supplemental_files/Supplemental_file1_neuron_annotations.tsv')
+    if shared_asset.is_file():
+        FLYWIRE_ANNOTATIONS = shared_asset
 
 
 def annotation_table():
@@ -21,7 +29,7 @@ def annotation_table():
 def descending_name_sets():
     """MCNS graph indices by FlyWire-compatible DN type and side, plus coverage counts."""
     m = annotation_table()
-    fw = pd.read_csv(ANNOTATIONS, sep='\t', usecols=['super_class', 'cell_type', 'side'])
+    fw = pd.read_csv(FLYWIRE_ANNOTATIONS, sep='\t', usecols=['super_class', 'cell_type', 'side'])
     fw = fw[fw.super_class == 'descending'].copy()
     fw['cell_type'] = fw.cell_type.fillna('')
     m['type'] = m.type.fillna('')
