@@ -65,6 +65,7 @@ FEET = '.'  # every plane-mesh pair (55 on the fly: each body part on the floor)
 VSCALE = float(os.environ.get('VSCALE', 10))  # random qvel in +-VSCALE per dof (10: velocity terms well above float32 noise; qpos moves ~1e-3 per fly step); the flight gate draws up to flapping rate
 REL = float(os.environ.get('REL', 1e-5))  # check.sh sets a measured bar for `arena` (3e-3) and `terrain_exact` (4e-4), reasons there
 EQ_EULER_BAR = 1e-4  # equality stage, qacc_euler only: see check()
+CHAOS_SEEDS = int(os.environ.get('CHAOS_SEEDS', 12))  # k-step gate: MuJoCo reruns of each start under a 1e-6 perturbation (see check())
 FLOOR_X = 3  # contact stage: bar = max(REL, 3 x the field's float32 input floor), see check()
 FLOOR_X_CONE = 15  # elliptic cone: the converged nonlinear cone solve amplifies float32 rounding of D, J and jar: measured 4e-5 (noslip 0) and 5.3e-5 (noslip 5) on qfrc_constraint, floor 4.3e-6
 WORLD_FIRST = ('xpos', 'xquat', 'xipos', 'cinert', 'crb', 'cvel')  # body-indexed fields whose row 0 is the world
@@ -300,6 +301,28 @@ def arena(m, q, v, seed=0):
         q[n] = qn
         v[n, :3] = R @ v[n, :3]
     return q, v
+
+
+STONES = (('stone_box', 'box', (1.0, 1.0, 0.3), (4.56, 3.04, -0.28)), ('stone_ell', 'ellipsoid', (1.5, 1.5, 0.5), (-1.27, 4.2, -0.48)),
+          ('stone_box2', 'box', (1.0, 1.0, 0.3), (-4.37, -2.58, -0.28)))  # spider (mm): tops 0.02 above the floor under the tarsi of l1, l3, r4
+
+
+def stones(mjcf, out):
+    """Copy of an MJCF with static box and ellipsoid stones (STONES) and a contact pair from every stone to every mesh geom that
+    has a floor pair (the floor pair's margin, solref, solimp and friction): the spider's legs meet box-mesh and ellipsoid-mesh
+    contacts like the fly meets its arena's. Written next to the source so the mesh paths hold. Returns the new path."""
+    G = mujoco.mjtGeom
+    spec = mujoco.MjSpec.from_file(str(mjcf))
+    ref = next(p for p in spec.pairs)
+    meshes = [p.geomname2 for p in spec.pairs if spec.geom(p.geomname1).type == G.mjGEOM_PLANE]
+    for name, kind, size, pos in STONES:
+        g = spec.worldbody.add_geom(name=name, type=G.mjGEOM_BOX if kind == 'box' else G.mjGEOM_ELLIPSOID, size=list(size), pos=list(pos))
+        g.rgba = [0.5, 0.5, 0.5, 1]
+        for mg in meshes:
+            spec.add_pair(geomname1=name, geomname2=mg, margin=ref.margin, solref=ref.solref, solimp=ref.solimp, friction=ref.friction)
+    path = Path(mjcf).with_name(Path(out).name if str(out).endswith('.xml') else 'stones.xml')
+    path.write_text(spec.to_xml())
+    return str(path)
 
 
 def load(mjcf):
@@ -950,7 +973,7 @@ def check(mjcf, out, stage, count=64, k=0, oracle=None):
     near = stage in ('equality', 'mocap') and os.environ.get('EQSPREAD') != 'far'
     far = not near
     q, v = nearby(m, count) if near else standing(load(oracle) if oracle else m, count) if feet else (states(m, count), velocities(m, count, scale=VSCALE))
-    if convex or os.environ.get('ARENA_STATES'):  # ARENA_STATES: the same states without the convex pairs (isolates what the pairs add)
+    if (convex and not os.environ.get('STONES')) or os.environ.get('ARENA_STATES'):  # STONES: the model already carries its stones (model.stones), the standing rollout meets them; ARENA_STATES: the same states without the convex pairs (isolates what the pairs add)
         q, v = arena(m, q, v)
     if os.environ.get('STATES'):  # saved states instead (e.g. grooming poses: legs on the head, .work/.../groom_states.npz)
         z = np.load(os.environ['STATES'])
@@ -1007,6 +1030,11 @@ def check(mjcf, out, stage, count=64, k=0, oracle=None):
                 depth = ((s.mesh_vert[a:a + c] @ d.geom_xmat[g2].reshape(3, 3).T + d.geom_xpos[g2] - d.geom_xpos[g1]) @ d.geom_xmat[g1].reshape(3, 3)[:, 2]).min()
                 ambiguous[n] += abs(depth - s.pair_margin[i]) < 4 * np.spacing(np.float32(np.abs(d.geom_xpos[g2]).max()))
         s.opt.noslip_iterations = noslip
+        if convex:  # the gate must meet convex contacts: no vacuous pass on states that touch no stone or wall
+            ok, need = int((nconv > 0).sum()), int(os.environ.get('CONVEX_MIN', count // 4))
+            print(f"{'PASS' if ok >= need else 'FAIL'} convex contacts present in {ok}/{count} states (at least {need})")
+            if ok < need:
+                sys.exit(1)
         # float32 floor: MuJoCo on the float32-rounded state (the engine's actual input) vs MuJoCo on the float64 state.
         # A contact force at solref 2e-4 moves 2.4e-5 of its scale from input rounding alone, so a field's bar is
         # max(REL, FLOOR_X x its floor); every field still has to beat 1e-5 unless float32 inputs cannot.
@@ -1024,6 +1052,17 @@ def check(mjcf, out, stage, count=64, k=0, oracle=None):
             want = ref(s, chain, ('qpos', 'qvel'), q, v, u)
             alt = ref(s, chain, ('qpos', 'qvel'), r32(q), r32(v), r32(u))
             floor = {f: float(np.abs(alt[f] - want[f]).max() / np.abs(want[f]).max()) for f in alt}
+            # Contact chains are chaotic: a state whose own MuJoCo trajectory moves by more than the bar when the START is perturbed by
+            # a 1e-6 relative amount (the engine's per-step float32 error) cannot be compared after k steps (a wall contact lost or
+            # gained a step earlier changes qvel by 10-40 % of its range; the float32-rounding floor above misses it for states whose
+            # rounding happens not to tip). Such states are dropped, at most half, and printed.
+            dev = np.zeros(count)
+            for sd in range(CHAOS_SEEDS):  # a contact-count flip (1 vs 5 contacts) is rare per draw: many draws, not three
+                r = np.random.default_rng(100 + sd)
+                pert = reference(s, chain, ('qpos', 'qvel'), q * (1 + 1e-6 * r.uniform(-1, 1, q.shape)), v * (1 + 1e-6 * r.uniform(-1, 1, v.shape)), u)
+                for f in ('qpos', 'qvel'):
+                    dev = np.maximum(dev, np.abs(pert[f] - want[f]).max(1) / np.abs(want[f]).max() / max(REL, FLOOR_X * floor[f]))
+            unstable = dev > 1
             fields = ('qpos', 'qvel')
         print('float32 input floor: ' + ', '.join(f'{f} {e:.2e}' for f, e in floor.items()))
     elif stage in ('equality', 'mocap'):
@@ -1076,12 +1115,24 @@ def check(mjcf, out, stage, count=64, k=0, oracle=None):
         print(f'engine only: {stage} K={k} ran, nothing compared with MuJoCo')
         return
     rows = np.fromfile(out / ('state.bin' if k else 'smooth.bin'), np.float32).reshape(-1, count).T
+    if k and os.environ.get('SAVE_STATES'):  # the engine's own state after k steps, as a STATES file for a force check on states the engine reached
+        np.savez(os.environ['SAVE_STATES'], qpos=rows[:, :m.nq].astype(np.float64), qvel=rows[:, m.nq:m.nq + m.nv].astype(np.float64))
     sizes = [want[f][0].size for f in fields]
     if rows.shape[1] != sum(sizes):
         raise SystemExit(f'FAIL {stage}: engine wrote {rows.shape[1]} values per fly, MuJoCo {sum(sizes)}')
     got = np.split(rows, np.cumsum(sizes)[:-1], axis=1)
     floor = locals().get('floor', {})
+    if os.environ.get('DIAG') and k:  # per state: error of each field vs the field's largest value, worst states first, with the convex contacts there
+        for f, g in zip(fields, got):
+            e = np.abs(g - want[f].reshape(count, -1)).max(1) / max(np.abs(want[f]).max(), 1e-30)
+            print(f'  DIAG {f} K={k}: median {np.median(e):.1e}, worst states ' + ', '.join(f'{n} {e[n]:.1e} (convex {nconv[n]}{", chaotic" if unstable[n] else ""})' for n in np.argsort(-e)[:6]))
     bad = []
+    if k and 'unstable' in locals():
+        print(f"{'PASS' if unstable.mean() <= 0.5 else 'FAIL'} chaotic states dropped {int(unstable.sum())}/{count} (MuJoCo itself moves by more than the bar over {k} steps under a 1e-6 relative start perturbation; at most half)")
+        if unstable.mean() > 0.5:
+            sys.exit(1)
+        want = {f: np.asarray(a).reshape(count, -1)[~unstable] if f in ('qpos', 'qvel') else a for f, a in want.items()}
+        got = [g[~unstable] for g in got]
     if 'ambiguous' in locals() and 'ncon' in fields:  # a contact at the margin to within float32 resolution may go either way, up to 3 rows
         i = fields.index('ncon')
         off = np.abs(got[i][:, 0] - want['ncon'].reshape(count)) > 3 * ambiguous
