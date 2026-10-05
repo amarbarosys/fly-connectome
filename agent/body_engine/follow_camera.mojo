@@ -5,7 +5,7 @@ The camera format is eye xyz, target xyz, and vertical field of view in degrees,
 matching render.mojo's existing camera arguments.
 """
 
-from std.math import atan, sin, sqrt, tan
+from std.math import atan, cos, sin, sqrt, tan
 
 @fieldwise_init
 struct Camera:
@@ -16,6 +16,21 @@ struct Camera:
     var ty: Float32
     var tz: Float32
     var fovy: Float32
+
+
+comptime DIR_X: Float32 = 0.655  # eye offset direction: (DIR_X, -DIR_X, DIR_Z), unit length
+comptime DIR_Z: Float32 = 0.376
+
+
+# Distance at which a sphere of `radius` around the target fits the limiting (smaller) field of view with 5 % margin.
+# Shared by fit_camera (host) and spectate.follow (device), so one formula frames both.
+@always_inline
+def fit_distance(radius: Float32, width: Int, height: Int, fovy: Float32) -> Float32:
+    # sin(half of the limiting angle) without atan/tan: libm is CPU-only, and spectate.follow runs this on the card
+    var half = fovy * 0.00872664626
+    var t = sin(half) / cos(half)
+    var tl = min(t, t * Float32(width) / Float32(height))
+    return 1.05 * radius * sqrt(1.0 + tl * tl) / tl
 
 
 # `roots` is xyz triples and `radii` has one conservative world-space radius
@@ -42,16 +57,11 @@ def fit_camera(roots: List[Float32], radii: List[Float32], width: Int,
         var d = sqrt(dx * dx + dy * dy + dz * dz) + radii[i]
         if d > radius:
             radius = d
-    var aspect = Float32(width) / Float32(height)
-    var hfov = 2.0 * atan(tan(fovy * 0.00872664626) * aspect)
-    var limiting = fovy
-    if hfov < limiting:
-        limiting = hfov
-    var distance = 1.05 * radius / sin(limiting * 0.00872664626)
+    var distance = fit_distance(radius, width, height, fovy)
     # Fixed elevated oblique view. The target remains the exact fitted center.
-    var ex = tx + distance * 0.655
-    var ey = ty - distance * 0.655
-    var ez = tz + distance * 0.376
+    var ex = tx + distance * DIR_X
+    var ey = ty - distance * DIR_X
+    var ez = tz + distance * DIR_Z
     return Camera(ex, ey, ez, tx, ty, tz, fovy)
 
 
@@ -69,11 +79,12 @@ def main() raises:
         var dz = cam.ez - cam.tz
         var distance = sqrt(dx * dx + dy * dy + dz * dz)
         var aspect = Float32(dims[0]) / Float32(dims[1])
-        var hfov = 2.0 * atan(tan(cam.fovy * 0.00872664626) * aspect)
-        var limiting = cam.fovy
-        if hfov < limiting:
-            limiting = hfov
-        var required = sin(limiting * 0.00872664626) * distance
+        var half_v = cam.fovy * 0.00872664626  # half angles in radians
+        var half_h = atan(tan(half_v) * aspect)
+        var limiting = half_v
+        if half_h < limiting:
+            limiting = half_h
+        var required = sin(limiting) * distance
         var needed: Float32 = 0.0
         for i in range(len(radii)):
             var rx = roots[3 * i] - cam.tx
