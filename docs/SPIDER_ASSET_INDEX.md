@@ -45,7 +45,8 @@ reference lists. Portia detour planning (Cross & Jackson 2016, DOI
 10.1002/jeab.189, PMCID PMC4751061) is now locally available as an NCBI BioC
 full-text export. The index's prior “no text” note below is superseded for this
 paper. The checked count is 10 primary sources plus 2 reviews; Steck 2024
-(PMC11756594) remains unavailable and is not counted. See
+(PMC11756594) remains unavailable and is not counted. The evidence handoff is
+[`docs/SPIDER_EVIDENCE_CARD.md`](SPIDER_EVIDENCE_CARD.md). See
 [`docs/plans/SPIDER_EVIDENCE.md`](plans/SPIDER_EVIDENCE.md) for packet scope and
 the reproducible gate.
 

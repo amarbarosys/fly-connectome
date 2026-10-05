@@ -12,6 +12,7 @@ import json
 import re
 import xml.etree.ElementTree as ET
 import urllib.request
+import urllib.error
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -193,6 +194,41 @@ def build(docs: Path, out: Path) -> dict:
             'unavailable': sum(x['status'] == 'unavailable' for x in manifest), 'passages': len(passages)}
 
 
+def fetch_sources(docs: Path) -> dict:
+    """Fetch only missing PMCID full texts into the ignored source cache."""
+    docs.mkdir(parents=True, exist_ok=True)
+    fetched, present, unavailable = [], [], []
+    for source in SOURCES:
+        if not source.get('pmcid'):
+            continue
+        filename = source.get('filename')
+        xml_name = source.get('xml_file') or (filename.replace('.txt', '.xml') if filename else f"{source['pmcid']}.xml")
+        txt_path = docs / filename if filename else None
+        xml_path = docs / xml_name
+        if (txt_path and txt_path.is_file()) or xml_path.is_file():
+            present.append(source['id'])
+            continue
+        urls = [
+            f"https://www.ebi.ac.uk/europepmc/webservices/rest/{source['pmcid']}/fullTextXML",
+            f"https://www.ncbi.nlm.nih.gov/research/bionlp/RESTful/pmcoa.cgi/BioC_XML/{source['pmcid']}/Unicode",
+        ]
+        failure = None
+        for url in urls:
+            try:
+                request = urllib.request.Request(url, headers={'User-Agent': 'spider-corpus/1.0'})
+                data = urllib.request.urlopen(request, timeout=45).read()
+                ET.fromstring(data)
+                xml_path.write_bytes(data)
+                fetched.append(source['id'])
+                failure = None
+                break
+            except (urllib.error.URLError, ET.ParseError, TimeoutError) as exc:
+                failure = str(exc)
+        if failure is not None:
+            unavailable.append({'id': source['id'], 'reason': failure})
+    return {'fetched': fetched, 'already_present': present, 'unavailable': unavailable}
+
+
 def validate_audit(out: Path, audit_path: Path) -> dict:
     sources = {row['id']: row for row in json.loads((out / 'manifest.json').read_text())}
     passages = [json.loads(line) for line in (out / 'passages.jsonl').read_text().splitlines()]
@@ -336,13 +372,15 @@ def verify_queries(out: Path) -> dict:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument('command', choices=['build', 'check', 'embed', 'query'])
+    ap.add_argument('command', choices=['fetch', 'build', 'check', 'embed', 'query'])
     ap.add_argument('--docs', type=Path, default=DEFAULT_DOCS)
     ap.add_argument('--out', type=Path, default=DEFAULT_OUT)
     ap.add_argument('--question', default='')
     ap.add_argument('-k', type=int, default=5)
     args = ap.parse_args()
-    if args.command == 'build':
+    if args.command == 'fetch':
+        result = fetch_sources(args.docs)
+    elif args.command == 'build':
         result = build(args.docs, args.out)
     elif args.command == 'check':
         result = check(args.out, ROOT / 'tools/spider_numeric_audit.jsonl')
