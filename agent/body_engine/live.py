@@ -61,7 +61,9 @@ def prepare(out=OUT, pairs=FEET, mjcf=MJCF, dist=DIST, flat=None):
     MJCF instead and lift the animal 0.05 mm above the highest ground within 4 mm of it (MuJoCo's own rollout on the
     sampled heightfield jams thin feet through its prisms: root 2.05 mm up, feet 0.81 mm under the surface)."""
     out.mkdir(parents=True, exist_ok=True)
-    m = export(mjcf, out, pairs, True)
+    m = load(mjcf)
+    m.opt.noslip_iterations = 0  # normal friction: noslip 5 makes the standing fly tremble, in MuJoCo too (Brain 2026-10-05)
+    m = export(m, out, pairs, True)
     meshes(mjcf, out)
     q, v = standing(load(flat) if flat else m, 2)
     q, v = q[:1], v[:1]

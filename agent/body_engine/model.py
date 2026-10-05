@@ -172,7 +172,7 @@ def onfaces(q, v, side):
 
 
 def load(mjcf):
-    m = mujoco.MjModel.from_xml_path(str(mjcf))
+    m = mjcf if isinstance(mjcf, mujoco.MjModel) else mujoco.MjModel.from_xml_path(str(mjcf))
     if m.nmocap or m.ntendon or m.dof_simplenum.any():
         raise SystemExit('FAIL export: mocap bodies, tendons and simple dofs are not ported')
     if (m.nflex or m.opt.integrator or m.opt.density or m.opt.viscosity or m.body_gravcomp.any() or m.actuator_damping.any()
