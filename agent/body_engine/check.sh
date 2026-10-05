@@ -6,14 +6,17 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 stage=${1:-kinematics}; M=.venv/bin/python; X=.work/agent/body_engine; fail=0
 if [ "$stage" = convex ]; then  # GJK + EPA narrowphase (convex.mojo, CPU build) vs MuJoCo mj_collision, per pair kind: float64 exact, float32 bars
-  KINDS=${KINDS:-ellipsoid}
+  KINDS=${KINDS:-ellipsoid box}
   for kind in $KINDS; do
     $M -m agent.body_engine.convex_check $kind 6000 f64 1e-9 1 || { echo "FAIL convex $kind f64"; fail=$((fail+1)); }
     $M -m agent.body_engine.convex_check $kind 6000 f32 1e-4 1 || { echo "FAIL convex $kind f32"; fail=$((fail+1)); }
   done
   # the gate must fail with the EPA contact normal flipped
   ~/iTools/bin/mutant-check agent/body_engine/convex.mojo 's/return normalize3(st.x1 - st.x2)/return normalize3(st.x2 - st.x1)/' -- \
-    $M -m agent.body_engine.convex_check ${KINDS%% *} 600 f64 1e-9 3 || fail=$((fail+1))
+    $M -m agent.body_engine.convex_check ellipsoid 600 f64 1e-9 3 || fail=$((fail+1))
+  # box-mesh only: the gate must fail with the perturbation search's negative tilt dropped (contact count)
+  case " $KINDS " in *" box "*) ~/iTools/bin/mutant-check agent/body_engine/convex.mojo 's/var sgn = S(-1) if angle_id == 0 else S(1)/var sgn = S(1)/' -- \
+    $M -m agent.body_engine.convex_check box 600 f64 1e-9 3 || fail=$((fail+1));; esac
   [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
   echo "PASS all convex checks"; exit 0
 fi

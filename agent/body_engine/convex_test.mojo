@@ -5,8 +5,8 @@ from std.sys import argv
 from std.memory import UnsafePointer
 from convex import *
 
-comptime CW = 40  # case: kind1 kind2, size1 3, pos1 3, mat1 9, pos2 3, mat2 9, hull, margin, tol, maxcon
-comptime OW = 32  # out: ncon, dist, 5 x (pos 3, normal 3)
+comptime CW = 40  # case: kind1 kind2, size1 3, pos1 3, mat1 9, pos2 3, mat2 9, hull, margin, tol, rbound
+comptime OW = 36  # out: ncon, then 5 x (dist, pos 3, normal 3)
 
 
 def read_f64(path: String) raises -> List[Float64]:
@@ -53,7 +53,10 @@ def main() raises:
     var hmeta = read_i32(dir + "hmeta.i32")  # per hull: vertex offset, first-edge offset, edge offset
     var n = len(cases) // CW
     var out = List[Float64](length=n * OW, fill=0)
+    var only = Int(String(argv()[2])) if len(argv()) > 2 else -1  # debug: run one case
     for c in range(n):
+        if only >= 0 and c != only:
+            continue
         var b = c * CW
         var h = Int(cases[b + 29])
         var pv = hverts.unsafe_ptr().unsafe_mut_cast[True]().unsafe_origin_cast[MutAnyOrigin]() + 3 * Int(hmeta[3 * h])
@@ -69,27 +72,16 @@ def main() raises:
         o1.r1 = v3(cases, b + 11)
         o1.r2 = v3(cases, b + 14)
         o2.pos = v3(cases, b + 17)
-        var org = o2.pos  # work relative to the mesh centre: positions are mm-sized, float32 resolves the 1e-6 tolerance
-        o1.pos = o1.pos - org
-        o2.pos = V(0)
         o2.r0 = v3(cases, b + 20)
         o2.r1 = v3(cases, b + 23)
         o2.r2 = v3(cases, b + 26)
-        var margin = S(cases[b + 30])
-        o1.margin = margin
-        o2.margin = margin
-        var st = Status()
-        st.tolerance = S(cases[b + 31])
-        st.max_contacts = Int(cases[b + 32])
-        var d = ccd(st, o1, o2)
+        var cs = collide(o1, o2, S(cases[b + 30]), S(cases[b + 31]), S(cases[b + 32]))
         var r = c * OW
-        if d < 0:
-            var nrm = contact_normal(st)
-            var pos = (st.x1 + st.x2) * S(0.5) + org
-            out[r] = 1
-            out[r + 1] = Float64(margin + d)
+        out[r] = Float64(cs.n)
+        for i in range(cs.n):
+            out[r + 1 + 7 * i] = Float64(cs.dist[i])
             for k in range(3):
-                out[r + 2 + k] = Float64(pos[k])
-                out[r + 5 + k] = Float64(nrm[k])
+                out[r + 2 + 7 * i + k] = Float64(cs.pos[i][k])
+                out[r + 5 + 7 * i + k] = Float64(cs.normal[i][k])
     with open(dir + "out.f64", "w") as f:
         f.write_bytes(Span(unsafe_ptr=out.unsafe_ptr().unsafe_bitcast[UInt8](), length=len(out) * 8))

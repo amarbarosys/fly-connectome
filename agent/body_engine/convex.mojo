@@ -15,6 +15,7 @@ from std.sys import get_defined_int
 from std.memory import UnsafePointer
 from std.math import sqrt
 
+comptime CCD_DEBUG = get_defined_int["CCD_DEBUG", 0]() == 1
 comptime CCD64 = get_defined_int["CCD64", 0]() == 1
 comptime T = DType.float64 if CCD64 else DType.float32
 comptime S = Scalar[T]
@@ -840,6 +841,7 @@ def epa(mut st: Status, mut pt: Polytope, mut o1: Sp, mut o2: Sp) -> Int:
     comptime if CCD64:
         if discrete:
             tolerance = MINVAL
+    var repeat_stops = not CCD64  # float32: the 1e-6 tolerance is below the resolution of mm-sized vertices; a repeated vertex ends EPA as for discrete geoms
     var kmax = st.max_iterations if st.max_iterations < 1000 else 1000
     var k = 0
     while k < kmax:
@@ -851,6 +853,8 @@ def epa(mut st: Status, mut pt: Polytope, mut o1: Sp, mut o2: Sp) -> Int:
                 face = fm
                 lower2 = pt.faces[fm].dist2
         if lower2 > upper2 or face < 0:
+            comptime if CCD_DEBUG:
+                print('epa: lower2 > upper2', lower2, upper2, 'k', k, 'pface', pface)
             face = pface
             break
         if lower2 <= 0:
@@ -863,7 +867,7 @@ def epa(mut st: Status, mut pt: Polytope, mut o1: Sp, mut o2: Sp) -> Int:
             upper2 = upper * upper
         if upper - lower < tolerance:
             break
-        if discrete:
+        if discrete or (repeat_stops and (o1.kind != ELLIPSOID and o2.kind != ELLIPSOID)):
             var i = 0
             var nverts = pt.nverts - 1
             while i < nverts:
@@ -875,11 +879,15 @@ def epa(mut st: Status, mut pt: Polytope, mut o1: Sp, mut o2: Sp) -> Int:
         pt.w = pt.verts[wi].vert
         horizon(pt, face)
         if pt.nedges < 3:
+            comptime if CCD_DEBUG:
+                print('epa: horizon nedges', pt.nedges, 'k', k)
             face = -1
             break
         var nfaces = pt.nfaces
         var nedges = pt.nedges
         if nedges > 24 or nedges > MAXF - pt.nfaces:
+            comptime if CCD_DEBUG:
+                print('epa: out of faces/edges', nedges, pt.nfaces, 'k', k)
             break
         var hi = Int(pt.hindex[0])
         var he = Int(pt.hedges[0])
@@ -893,6 +901,8 @@ def epa(mut st: Status, mut pt: Polytope, mut o1: Sp, mut o2: Sp) -> Int:
             pt.faces[hi].adj2 = nfaces
         var dist2 = attach_face(pt, wi, hv2, hv1, nfaces + nedges - 1, hi, nfaces + 1)
         if dist2 == 0:
+            comptime if CCD_DEBUG:
+                print('epa: attach dist2 0 (first) k', k)
             face = -1
             break
         if dist2 >= lower2 and dist2 <= upper2:
@@ -915,6 +925,8 @@ def epa(mut st: Status, mut pt: Polytope, mut o1: Sp, mut o2: Sp) -> Int:
                 pt.faces[hi].adj2 = cur
             dist2 = attach_face(pt, wi, hv2, hv1, cur - 1, hi, nxt)
             if dist2 == 0:
+                comptime if CCD_DEBUG:
+                    print('epa: attach dist2 0 edge', i, 'k', k)
                 face = -1
                 break
             if dist2 >= lower2 and dist2 <= upper2:
@@ -1153,3 +1165,154 @@ def ccd(mut st: Status, mut o1: Sp, mut o2: Sp) -> S:
 def contact_normal(st: Status) -> V:
     """mjc_penetration (engine_collision_convex.c:87): contact normal = normalized x1 - x2 of the witness points."""
     return normalize3(st.x1 - st.x2)
+
+
+struct Con(Copyable):
+    """One contact: n = 0 or 1, dist, pos, normal."""
+    var n: Int
+    var dist: S
+    var pos: V
+    var normal: V
+
+    def __init__(out self):
+        self.n = 0
+        self.dist = 0
+        self.pos = V(0)
+        self.normal = V(0)
+
+
+def penetration(mut o1: Sp, mut o2: Sp, margin: S, tol: S, max_contacts: Int) -> Con:
+    """mjc_penetration (engine_collision_convex.c:87), native CCD, one contact: both geoms inflated by margin / 2 (their
+    margin field), mjc_ccd, a contact where the inflated geoms penetrate (dist < 0): dist margin + depth, pos the witness
+    midpoint, normal x1 - x2."""
+    o1.margin = margin
+    o2.margin = margin
+    var st = Status()
+    st.tolerance = tol
+    st.max_contacts = max_contacts
+    var d = ccd(st, o1, o2)
+    comptime if CCD_DEBUG:
+        print('ccd: gjk_it', st.gjk_iterations, 'nsimplex', st.nsimplex, 'dist', d, 'epa_status', st.epa_status, 'epa_it', st.epa_iterations)
+    var c = Con()
+    if d < 0:
+        c.n = 1
+        c.dist = margin + d
+        c.pos = (st.x1 + st.x2) * S(0.5)
+        c.normal = contact_normal(st)
+    return c^
+
+
+struct ConSet(Copyable):
+    """The contacts of a pair, at most 5 (the first plus four perturbed)."""
+    var n: Int
+    var dist: InlineArray[S, 5]
+    var pos: InlineArray[V, 5]
+    var normal: InlineArray[V, 5]
+
+    def __init__(out self):
+        self.n = 0
+        self.dist = InlineArray[S, 5](fill=0)
+        self.pos = InlineArray[V, 5](fill=V(0))
+        self.normal = InlineArray[V, 5](fill=V(0))
+
+
+@always_inline
+def rotate_frame(origin: V, rot: InlineArray[S, 9], mut o: Sp):
+    """mju_rotateFrame (engine_collision_convex.c:818): mat = rot mat, pos -= rot (origin - pos) - (origin - pos)."""
+    var a = o.r0
+    var b = o.r1
+    var c = o.r2
+    o.r0 = a * rot[0] + b * rot[1] + c * rot[2]
+    o.r1 = a * rot[3] + b * rot[4] + c * rot[5]
+    o.r2 = a * rot[6] + b * rot[7] + c * rot[8]
+    var rel = origin - o.pos
+    var vec = V(rot[0] * rel[0] + rot[1] * rel[1] + rot[2] * rel[2], rot[3] * rel[0] + rot[4] * rel[1] + rot[5] * rel[2],
+                rot[6] * rel[0] + rot[7] * rel[1] + rot[8] * rel[2], 0) - rel
+    o.pos = o.pos - vec
+
+
+def tilt(axis: V, sgn: S) -> InlineArray[S, 9]:
+    """mji_axisAngle2Quat + mju_quat2Mat for an angle of sgn * 1e-3 rad."""
+    var w = S(0.99999987500000260416)  # cos(5e-4)
+    var sn = sgn * S(4.9999997916666693e-4)  # sin(+-5e-4)
+    var x = axis[0] * sn
+    var y = axis[1] * sn
+    var z = axis[2] * sn
+    var m = InlineArray[S, 9](fill=0)
+    m[0] = w * w + x * x - y * y - z * z
+    m[1] = 2 * (x * y - w * z)
+    m[2] = 2 * (x * z + w * y)
+    m[3] = 2 * (x * y + w * z)
+    m[4] = w * w - x * x + y * y - z * z
+    m[5] = 2 * (y * z - w * x)
+    m[6] = 2 * (x * z - w * y)
+    m[7] = 2 * (y * z + w * x)
+    m[8] = w * w - x * x - y * y + z * z
+    return m^
+
+
+def collide(mut o1: Sp, mut o2: Sp, margin: S, tol: S, rbound: S) -> ConSet:
+    """mjc_Convex (engine_collision_convex.c:857) for a pair with margin > 0, where maxContacts is 1: the first contact,
+    then (not for sphere/ellipsoid) the perturbation search of :874-927: both geoms rotated by -+1e-3 rad about the two
+    tangent axes of the first contact, around its point, a new contact kept when it is farther than 1e-3 rbound (rbound =
+    min of the two geoms' bounding radii) from the earlier ones, its depth set to the first's. The solve runs
+    relative to geom 2's centre (translation invariant; keeps float32 coordinates mm-sized so the 1e-6 tolerance is
+    resolvable); positions are returned in the caller's frame. Mesh hill-climb state persists across the calls."""
+    var org = o2.pos
+    o1.pos = o1.pos - org
+    o2.pos = V(0)
+    var cs = ConSet()
+    var c0 = penetration(o1, o2, margin, tol, 1)
+    if c0.n > 0:
+        cs.n = 1
+        cs.dist[0] = c0.dist
+        cs.pos[0] = c0.pos
+        cs.normal[0] = c0.normal
+        if o1.kind != ELLIPSOID and o2.kind != ELLIPSOID:
+            var p1 = o1.pos
+            var q1 = (o1.r0, o1.r1, o1.r2)
+            var p2 = o2.pos
+            var q2 = (o2.r0, o2.r1, o2.r2)
+            var tol_d = S(1e-3) * rbound
+            # frame of the first contact: mju_makeFrame(normal)
+            var nrm = c0.normal
+            var yax = V(0, 1, 0, 0) if (nrm[1] < 0.5 and nrm[1] > -0.5) else V(0, 0, 1, 0)
+            yax = yax - nrm * dot(nrm, yax)
+            yax = normalize3(yax)
+            var zax = cross(nrm, yax)
+            for axis_id in range(2):
+                for angle_id in range(2):
+                    var axis = yax if axis_id == 0 else zax
+                    var sgn = S(-1) if angle_id == 0 else S(1)
+                    var rot = tilt(axis, sgn)
+                    var inv = InlineArray[S, 9](fill=0)  # transpose
+                    for a in range(3):
+                        for b in range(3):
+                            inv[3 * a + b] = rot[3 * b + a]
+                    rotate_frame(c0.pos, rot, o1)
+                    rotate_frame(c0.pos, inv, o2)
+                    var c = penetration(o1, o2, margin, tol, 1)
+                    if c.n > 0:
+                        var distinct = True  # mjc_isDistinctContact: the new one against every earlier
+                        for i in range(cs.n):
+                            var dd = c.pos - cs.pos[i]
+                            if sqrt(dot(dd, dd)) <= tol_d:
+                                distinct = False
+                        if distinct:
+                            cs.dist[cs.n] = c0.dist
+                            cs.pos[cs.n] = c.pos
+                            cs.normal[cs.n] = c.normal
+                            cs.n += 1
+                    o1.pos = p1
+                    o1.r0 = q1[0]
+                    o1.r1 = q1[1]
+                    o1.r2 = q1[2]
+                    o2.pos = p2
+                    o2.r0 = q2[0]
+                    o2.r1 = q2[1]
+                    o2.r2 = q2[2]
+    for i in range(cs.n):
+        cs.pos[i] = cs.pos[i] + org
+    o1.pos = o1.pos + org
+    o2.pos = org
+    return cs^
