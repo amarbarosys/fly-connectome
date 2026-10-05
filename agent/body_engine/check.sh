@@ -75,6 +75,35 @@ print(f'MEASURED MuJoCo merged vs separate qfrc_constraint per animal: max rel e
   [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
   echo "PASS all world checks"; exit 0
 fi
+if [ "$stage" = equality ] || [ "$stage" = equality_contact ]; then  # connect, weld, joint equalities (models/eq_test.xml: random
+  # states violate them; Jdot v needs velocities) and, for equality_contact, with an active sphere-sphere contact and noslip 5
+  # in the same Newton solve (mixed H rows); both vs mj_step, float32-floor bars as the contact stage
+  E=agent/body_engine/models/eq_test.xml; [ "$stage" = equality_contact ] && E=agent/body_engine/models/eq_contact.xml
+  $M -m agent.body_engine.model check $E $X/$stage equality 64 || { echo "FAIL $stage"; fail=$((fail+1)); }
+  S=agent/body_engine/smooth.mojo
+  # the gate must fail with: the anchor sign flipped, the weld rotation conjugate dropped, the joint polynomial sign flipped,
+  # the Jdot v correction sign flipped, the reference acceleration dropped
+  for mut in 's/var p0 = rot(B0\[1\], m3(mf, ef))/var p0 = rot(B0[1], -m3(mf, ef))/' \
+             's/var nq1 = Q4(qb\[0\], -qb\[1\], -qb\[2\], -qb\[3\])/var nq1 = Q4(qb[0], qb[1], qb[2], qb[3])/' \
+             's/cpos\[0\] -= mf\[ef + 25\] \* dif/cpos[0] += mf[ef + 25] * dif/' \
+             's/jdv\[k\] = jd0\[k\] - jd1\[k\]/jdv[k] = jd0[k] + jd1[k]/' \
+             's/ - get(res, f, OEQA + rbase + k)/ - 0 * get(res, f, OEQA + rbase + k)/'; do
+    ~/iTools/bin/mutant-check $S "$mut" -- $M -m agent.body_engine.model check $E $X/mutant equality 64 || fail=$((fail+1))
+  done
+  [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
+  echo "PASS all $stage checks"; exit 0
+fi
+if [ "$stage" = mocap ]; then  # two mocap bodies (random mocap_pos/quat per state, quats unnormalised) welded/connected to the animal
+  E=agent/body_engine/models/eq_mocap.xml
+  $M -m agent.body_engine.model check $E $X/mocap mocap 64 || { echo "FAIL mocap"; fail=$((fail+1)); }
+  # the gate must fail with every mocap body reading the first one's pose, and with the quaternion components swapped
+  for mut in 's/var mrow = NU + 7 \* mid/var mrow = NU + 7 * 0/' \
+             's/xquat = Q4(ctrl\[(mrow + 3) \* F + f\], ctrl\[(mrow + 4) \* F + f\]/xquat = Q4(ctrl[(mrow + 4) * F + f], ctrl[(mrow + 3) * F + f]/'; do
+    ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo "$mut" -- $M -m agent.body_engine.model check $E $X/mutant mocap 64 || fail=$((fail+1))
+  done
+  [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
+  echo "PASS all mocap checks"; exit 0
+fi
 if [ "$stage" = loop ]; then  # K steps per launch, state kept on the card. K=1 vs mj_step (one step: the accuracy
   # gate); one K=10 launch must equal ten K=1 launches byte for byte (the loop). K=10 vs ten chained mj_step is not a
   # gate: the engine's ~5e-6 per-step float32 error grows ~12x in 10 steps on contact-rich states (diag/k_floor.py)

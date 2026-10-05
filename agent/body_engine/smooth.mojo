@@ -84,7 +84,7 @@ comptime CITER = MTOH + NC
 comptime NU = get_defined_int["NU", 0]()
 comptime CACT = CITER + 3  # STAGE 7 (model.py actuators): per actuator trntype, dof or body, ctrllimited, forcelimited, qpos address
 comptime NI1 = CACT + 5 * NU if STAGE >= 7 else (CITER + 3 if STAGE >= 6 else NI0)
-# model.py fluid() then tendons(), appended last: fluid ints per ellipsoid row (body, geom) then the inertia-box bodies
+# model.py fluid() then tendons(), appended after the actuators: fluid ints per ellipsoid row (body, geom) then the inertia-box bodies
 comptime NFLROW = get_defined_int["NFLROW", -1]()  # -1: no fluid block (walking models: the code below folds out)
 comptime NFLBOX = get_defined_int["NFLBOX", 0]()
 comptime NFLUID = NFLROW >= 0
@@ -92,7 +92,23 @@ comptime FLI = NI1
 comptime NTEN = get_defined_int["NTEN", 0]()  # fixed tendons; tendon ints: wrap start and count per tendon, then each wrap's dof, then its qpos address
 comptime NWRAP = get_defined_int["NWRAP", 0]()
 comptime TNI = FLI + (2 * NFLROW + NFLBOX if NFLUID else 0)
-comptime NI = TNI + 2 * NTEN + 2 * NWRAP
+comptime NI2 = TNI + 2 * NTEN + 2 * NWRAP
+# equality constraints (model.py eq_block, last block): per constraint 12 ints, then every chain, then its masks
+comptime NEQ = get_defined_int["NEQ", 0]()
+comptime NEQR = get_defined_int["NEQR", 0]()  # rows: connect 3, weld 6, joint 1
+comptime NEQCH = get_defined_int["NEQCH", 0]()
+comptime NEQJ = get_defined_int["NEQJ", 0]()  # Jacobian entries: rows x chain length, summed
+comptime EQH = 12
+comptime EQF = 31
+comptime CEQH = NI2
+comptime CEQC = CEQH + EQH * NEQ
+comptime CEQM = CEQC + NEQCH
+# mocap bodies (model.py mocap_block, after the equality block): body_mocapid per body; each animal's mocap pose (pos 3,
+# quat 4 per mocap body) rides in rows NU.. of ctrl.bin
+comptime NMOCAP = get_defined_int["NMOCAP", 0]()
+comptime NUC = NU + 7 * NMOCAP
+comptime CMOC = CEQM + NEQCH
+comptime NI = CMOC + (NB if NMOCAP > 0 else 0)
 # mf.bin: body_pos, body_quat, jnt_pos, jnt_axis, qpos0, body_ipos, body_iquat, geom_pos, geom_quat
 comptime BPOS = 0
 comptime BQUAT = 3 * NB
@@ -123,7 +139,9 @@ comptime CACF = HFO + (NP if HFG >= 0 else 0)  # STAGE 7: per actuator gain, bia
 comptime NFL1 = CACF + 9 * NU if STAGE >= 7 else (CACF if STAGE >= 6 else NFL0)
 comptime FLF = NFL1  # fluid floats: density, viscosity, wind 3, then per ellipsoid row semi-axes 3 and the 12 geom_fluid coefs
 comptime TNF = FLF + (5 + 15 * NFLROW if NFLUID else 0)  # tendon floats: wrap coefs, then stiffness, damping, lengthspring 2 per tendon
-comptime NFL = TNF + NWRAP + 4 * NTEN
+comptime NFL2 = TNF + NWRAP + 4 * NTEN
+comptime CEQF = NFL2  # per equality: anchors 0 and 1, quaternions 0 and 1, torquescale, solref, solimp, invweight 2, joint data 5, qpos0 2
+comptime NFL = CEQF + EQF * NEQ
 # smooth.bin rows (per animal): xpos, xquat, xipos of bodies 1.., geom_xpos, xanchor, xaxis
 comptime OXQ = 3 * (NB - 1)
 comptime OXI = 7 * (NB - 1)
@@ -181,7 +199,13 @@ comptime OAC = OWC + NJE
 comptime OACT = OAC + 10 * NSLOT  # valid slots: count, then their ids ascending (row loops skip the ~95 % empty)
 comptime OPART = OACT + 1 + NSLOT  # WAVE: per-lane partial sums, 3 x LN
 comptime OWARM = OPART + 3 * LN  # K > 0: last step's qacc (MuJoCo qacc_warmstart), persists across launches
-comptime NROW = OWARM + NV if STAGE >= 6 else (OVALID if STAGE >= 4 else NOUT)
+comptime NROW1 = OWARM + NV if STAGE >= 6 else (OVALID if STAGE >= 4 else NOUT)
+comptime OEQD = NROW1  # equality rows: D, aref, jar, jv, then the Jacobian entries (like OJ)
+comptime OEQA = OEQD + NEQR
+comptime OEQJAR = OEQA + NEQR
+comptime OEQJV = OEQJAR + NEQR
+comptime OEQJ = OEQJV + NEQR
+comptime NROW = OEQJ + NEQJ
 comptime LI = row_major[NI]()
 comptime LF = row_major[NFL]()
 comptime LQ = row_major[NQ * F]()
@@ -219,7 +243,7 @@ comptime TI = TileTensor[DType.int32, type_of(LI), MutAnyOrigin]
 comptime TF = TileTensor[DType.float32, type_of(LF), MutAnyOrigin]
 comptime TQ = TileTensor[DType.float32, type_of(LQ), MutAnyOrigin]
 comptime TV = TileTensor[DType.float32, type_of(LV), MutAnyOrigin]
-comptime LU = row_major[max(NU, 1) * F]()
+comptime LU = row_major[max(NUC, 1) * F]()
 comptime TU = TileTensor[DType.float32, type_of(LU), MutAnyOrigin]
 comptime TO = TileTensor[DType.float32, type_of(LO), MutAnyOrigin]
 
@@ -660,11 +684,11 @@ def velocity(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int):
 
 
 @always_inline
-def jdot(mi: TI, res: TO, f: Int, jadr: Int, nch: Int, choff: Int, X: Int) -> Float32:
+def jdot(mi: TI, res: TO, f: Int, jadr: Int, nch: Int, choff: Int, X: Int, ch: Int = CCHAIN) -> Float32:
     """Sparse Jacobian row (chain order) dotted with the dof vector in rows X.."""
     var acc: Float32 = 0
     for c in range(nch):
-        acc += get(res, f, jadr + c) * get(res, f, X + Int(mi[CCHAIN + choff + c]))
+        acc += get(res, f, jadr + c) * get(res, f, X + Int(mi[ch + choff + c]))
     return acc
 
 
@@ -690,6 +714,24 @@ def powi(a: Float32, b: Float32) -> Float32:
     for _ in range(Int(b)):
         r *= a
     return r
+
+
+@always_inline
+def impedance(s0: Float32, s1: Float32, s2: Float32, s3: Float32, s4: Float32, pos: Float32) -> Float32:
+    """MuJoCo getimpedance (engine_core_constraint.c:2017), solimp already clamped, pos = violation minus margin."""
+    if s0 == s1 or s2 <= 1e-15:
+        return 0.5 * (s0 + s1)
+    var x = abs(pos / s2)
+    if x >= 1 or x <= 0:
+        return s1 if x >= 1 else s0
+    var yy: Float32
+    if s4 == 1:
+        yy = x
+    elif x <= s3:
+        yy = powi(x, s4) / powi(s3, s4 - 1)
+    else:
+        yy = 1 - powi(1 - x, s4) / powi(1 - s3, s4 - 1)
+    return s0 + yy * (s1 - s0)
 
 
 @always_inline
@@ -810,22 +852,7 @@ def contacts(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int):
             var s0 = min(Float32(0.9999), max(Float32(1e-4), mf[pf + 6])); var s1 = min(Float32(0.9999), max(Float32(1e-4), mf[pf + 7]))
             var s2 = max(Float32(0), mf[pf + 8]); var s3 = min(Float32(0.9999), max(Float32(1e-4), mf[pf + 9])); var s4 = max(Float32(1), mf[pf + 10])
             var imargin = margin - gap
-            var imp: Float32
-            if s0 == s1 or s2 <= 1e-15:
-                imp = 0.5 * (s0 + s1)
-            else:
-                var x = abs((dist - imargin) / s2)
-                if x >= 1 or x <= 0:
-                    imp = s1 if x >= 1 else s0
-                else:
-                    var yy: Float32
-                    if s4 == 1:
-                        yy = x
-                    elif x <= s3:
-                        yy = powi(x, s4) / powi(s3, s4 - 1)
-                    else:
-                        yy = 1 - powi(1 - x, s4) / powi(1 - s3, s4 - 1)
-                    imp = s0 + yy * (s1 - s0)
+            var imp = impedance(s0, s1, s2, s3, s4, dist - imargin)
             var tran = mf[pf + 11]
             var R0 = max(Float32(1e-15), (1 - imp) * (tran + f0 * f0 * tran) / imp)
             var R1 = R0 / max(Float32(1e-15), impratio)
@@ -906,6 +933,123 @@ def actuation(mi: TI, mf: TF, qpos: TQ, qvel: TV, ctrl: TU, res: TO, f: Int):
                         res[(OQACT + Int(mi[CCHAIN + choff + k])) * F + f] += scale * jn
 
 
+def equality(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int):
+    """MuJoCo mj_instantiateEquality (engine_core_constraint.c:513) for connect, weld and joint constraints, mj_diagApprox
+    (:1637), mj_makeImpedance (:2069) and mj_referenceConstraint (:3048) with its mj_Jdotv correction (:973): per constraint
+    the rows' residual, Jacobian over the constraint's chain (mj_jacDifPair, anchors 0 minus 1, weld rotation corrected
+    by 0.5 neg(q1) J q0 relpose), D and aref. Positions are relative to the floating origin of the animal (a body of the
+    world tree is shifted into it); the impedance of a connect or weld is a function of the norm of its residual."""
+    var h = mf[TSTEP]
+    for e in range(NEQ):
+        var eh = CEQH + EQH * e
+        var typ = Int(mi[eh]); var b0 = Int(mi[eh + 1]); var b1 = Int(mi[eh + 2]); var size = Int(mi[eh + 3])
+        var nch = Int(mi[eh + 4]); var choff = Int(mi[eh + 5]); var rbase = Int(mi[eh + 6]); var jb = OEQJ + Int(mi[eh + 7])
+        var ef = CEQF + EQF * e
+        var cpos = S6(0)
+        var jdv = S6(0)  # Jdot qvel of the rows, subtracted from aref
+        var posn: Float32
+        if typ == 2:  # joint: q0 - qpos0 - c0 - poly(q1 - qpos1_0) (engine_core_constraint.c:808)
+            var d0 = Int(mi[eh + 8]); var d1 = Int(mi[eh + 9])
+            cpos[0] = qpos[Int(mi[eh + 10]) * F + f] - mf[ef + 29] - mf[ef + 24]
+            var deriv: Float32 = 0
+            if d1 >= 0:
+                var dif = qpos[Int(mi[eh + 11]) * F + f] - mf[ef + 30]
+                cpos[0] -= mf[ef + 25] * dif + mf[ef + 26] * dif * dif + mf[ef + 27] * dif * dif * dif + mf[ef + 28] * dif * dif * dif * dif
+                deriv = mf[ef + 25] + 2 * mf[ef + 26] * dif + 3 * mf[ef + 27] * dif * dif + 4 * mf[ef + 28] * dif * dif * dif
+            for c in range(nch):
+                var d = Int(mi[CEQC + choff + c])
+                res[(jb + c) * F + f] = (Float32(1) if d == d0 else Float32(0)) - (deriv if d == d1 else Float32(0))
+            posn = cpos[0]
+        else:
+            var weld = typ == 1
+            var o0 = origin(mi, qpos, f, b0); var o1 = origin(mi, qpos, f, b1)
+            var frame = origin(mi, qpos, f, Int(mi[eh + 8]))
+            var sh0 = o0 - frame; var sh1 = o1 - frame
+            var B0 = body(res, f, b0); var B1 = body(res, f, b1)
+            var p0 = rot(B0[1], m3(mf, ef)) + B0[0] + sh0
+            var p1 = rot(B1[1], m3(mf, ef + 3)) + B1[0] + sh1
+            var r0 = 3 * Int(mi[ROOT + b0]); var r1 = 3 * Int(mi[ROOT + b1])
+            var off0 = p0 - V3(get(res, f, OSC + r0), get(res, f, OSC + r0 + 1), get(res, f, OSC + r0 + 2), 0) - sh0
+            var off1 = p1 - V3(get(res, f, OSC + r1), get(res, f, OSC + r1 + 1), get(res, f, OSC + r1 + 2), 0) - sh1
+            var d01 = p0 - p1
+            for k in range(3):
+                cpos[k] = d01[k]
+            var qa = mul(B0[1], m4(mf, ef + 6)); var qb = mul(B1[1], m4(mf, ef + 10))
+            var nq1 = Q4(qb[0], -qb[1], -qb[2], -qb[3])
+            var ts = mf[ef + 14]
+            if weld:  # neg(q1) q0 relpose, axis components scaled by torquescale
+                var qq = mul(nq1, qa)
+                for k in range(3):
+                    cpos[3 + k] = qq[1 + k] * ts
+            var cv0 = get6(res, f, OCV + 6 * (b0 - 1)) if b0 > 0 else S6(0)
+            var cv1 = get6(res, f, OCV + 6 * (b1 - 1)) if b1 > 0 else S6(0)
+            var om0 = V3(cv0[0], cv0[1], cv0[2], 0); var om1 = V3(cv1[0], cv1[1], cv1[2], 0)
+            # point velocity (mju_transformSpatial from the root's com to the anchor)
+            var pv0 = V3(cv0[3], cv0[4], cv0[5], 0) - cross(off0, om0)
+            var pv1 = V3(cv1[3], cv1[4], cv1[5], 0) - cross(off1, om1)
+            var jd0 = V3(0); var jd1 = V3(0); var jr0 = V3(0); var jr1 = V3(0)
+            for c in range(nch):
+                var d = Int(mi[CEQC + choff + c]); var mk = Int(mi[CEQM + choff + c])
+                var cd = OCD + 6 * d
+                var ang = V3(get(res, f, cd), get(res, f, cd + 1), get(res, f, cd + 2), 0)
+                var lin = V3(get(res, f, cd + 3), get(res, f, cd + 4), get(res, f, cd + 5), 0)
+                var jp = V3(0); var jr = V3(0)
+                var qv = qvel[d * F + f]
+                var cdot = get6(res, f, OCDD + 6 * d)
+                if mk & 4 != 0:  # mj_jacDot: a quaternion dof takes its body's final velocity
+                    cdot = cross_motion(get6(res, f, OCV + 6 * (Int(mi[DBODY + d]) - 1)), get6(res, f, cd))
+                var cda = V3(cdot[0], cdot[1], cdot[2], 0); var cdl = V3(cdot[3], cdot[4], cdot[5], 0)
+                if mk & 1 != 0:
+                    jp += lin + cross(ang, off0)
+                    jr += ang
+                    jd0 += (cdl + cross(cda, off0) + cross(ang, pv0)) * qv
+                    jr0 += cda * qv
+                if mk & 2 != 0:
+                    jp -= lin + cross(ang, off1)
+                    jr -= ang
+                    jd1 += (cdl + cross(cda, off1) + cross(ang, pv1)) * qv
+                    jr1 += cda * qv
+                for k in range(3):
+                    res[(jb + k * nch + c) * F + f] = jp[k]
+                if weld:  # 0.5 neg(q1) (J0 - J1) q0 relpose, axis components
+                    var q3 = mul(mul(nq1, Q4(0, jr[0], jr[1], jr[2])), qa)
+                    for k in range(3):
+                        res[(jb + (3 + k) * nch + c) * F + f] = 0.5 * q3[1 + k] * ts
+            for k in range(3):
+                jdv[k] = jd0[k] - jd1[k]
+            if weld:  # mj_Jdotv rotational part: product rule on 0.5 neg(q1) (omega0 - omega1) q0 relpose
+                var dom = om0 - om1
+                var qd0 = Q4(0.5 * (-om0[0] * qa[1] - om0[1] * qa[2] - om0[2] * qa[3]), 0.5 * (om0[0] * qa[0] + om0[1] * qa[3] - om0[2] * qa[2]),
+                             0.5 * (-om0[0] * qa[3] + om0[1] * qa[0] + om0[2] * qa[1]), 0.5 * (om0[0] * qa[2] - om0[1] * qa[1] + om0[2] * qa[0]))
+                var qd1 = Q4(0.5 * (-om1[0] * qb[1] - om1[1] * qb[2] - om1[2] * qb[3]), 0.5 * (om1[0] * qb[0] + om1[1] * qb[3] - om1[2] * qb[2]),
+                             0.5 * (-om1[0] * qb[3] + om1[1] * qb[0] + om1[2] * qb[1]), 0.5 * (om1[0] * qb[2] - om1[1] * qb[1] + om1[2] * qb[0]))
+                var dj = jr0 - jr1
+                var t1 = mul(mul(Q4(qd1[0], -qd1[1], -qd1[2], -qd1[3]), Q4(0, dom[0], dom[1], dom[2])), qa)
+                var t2 = mul(mul(nq1, Q4(0, dj[0], dj[1], dj[2])), qa)
+                var t3 = mul(mul(nq1, Q4(0, dom[0], dom[1], dom[2])), qd0)
+                for k in range(3):
+                    jdv[3 + k] = 0.5 * (t1[1 + k] + t2[1 + k] + t3[1 + k]) * ts
+            var sq = cpos[0] * cpos[0] + cpos[1] * cpos[1] + cpos[2] * cpos[2]
+            if weld:
+                sq += cpos[3] * cpos[3] + cpos[4] * cpos[4] + cpos[5] * cpos[5]
+            posn = sqrt(sq)
+        # mj_diagApprox, getsolparam, getimpedance, makeImpedance, referenceConstraint
+        var ref0 = max(mf[ef + 15], 2 * h); var ref1 = mf[ef + 16]
+        var s0 = min(Float32(0.9999), max(Float32(1e-4), mf[ef + 17])); var s1 = min(Float32(0.9999), max(Float32(1e-4), mf[ef + 18]))
+        var s2 = max(Float32(0), mf[ef + 19]); var s3 = min(Float32(0.9999), max(Float32(1e-4), mf[ef + 20])); var s4 = max(Float32(1), mf[ef + 21])
+        var imp = impedance(s0, s1, s2, s3, s4, posn)
+        var K = 1 / max(Float32(1e-15), s1 * s1 * ref0 * ref0 * ref1 * ref1)
+        var B = 2 / max(Float32(1e-15), s1 * ref0)
+        for k in range(size):
+            var row = rbase + k
+            var dA = mf[ef + 23] if typ == 1 and k >= 3 else mf[ef + 22]
+            res[(OEQD + row) * F + f] = 1 / max(Float32(1e-15), (1 - imp) * dA / imp)
+            var vel: Float32 = 0
+            for c in range(nch):
+                vel += get(res, f, jb + k * nch + c) * qvel[Int(mi[CEQC + choff + c]) * F + f]
+            res[(OEQA + row) * F + f] = -B * vel - K * imp * cpos[k] - jdv[k]
+
+
 def update(mi: TI, res: TO, f: Int) -> Float32:
     """MuJoCo PrimalUpdateConstraint, pyramidal rows: state = jar < 0, force = -D jar, qfrc_constraint = J' force,
     returns cost = sum 0.5 D jar^2 over active rows + Gauss."""
@@ -930,6 +1074,17 @@ def update(mi: TI, res: TO, f: Int) -> Float32:
                     for c in range(nch):
                         var v = Int(mi[CCHAIN + choff + c])
                         res[(OQFC + v) * F + f] += get(res, f, jadr + c) * force
+    comptime if NEQ > 0:  # equality rows are always active (quadratic)
+        for e in range(NEQ):
+            var eh = CEQH + EQH * e
+            var nch = Int(mi[eh + 4]); var choff = Int(mi[eh + 5]); var rbase = Int(mi[eh + 6]); var jb = OEQJ + Int(mi[eh + 7])
+            for k in range(Int(mi[eh + 3])):
+                var jar = get(res, f, OEQJAR + rbase + k)
+                var D = get(res, f, OEQD + rbase + k)
+                cost += 0.5 * D * jar * jar
+                var force = -D * jar
+                for c in range(nch):
+                    res[(OQFC + Int(mi[CEQC + choff + c])) * F + f] += get(res, f, jb + k * nch + c) * force
     for v in range(NV):
         cost += 0.5 * (get(res, f, OMA + v) - get(res, f, OQSM + v)) * (get(res, f, OCQACC + v) - get(res, f, OQACCS + v))
     return cost
@@ -958,6 +1113,21 @@ def hessian(mi: TI, res: TO, f: Int):
                 var jadr = OJ + jbase(mi, p) + (4 * sl + k) * nch
                 for a in range(nch):  # lane owns H row d (d % LN): every row the same lane, no race across pairs
                     var d = Int(mi[CCHAIN + choff + a])
+                    if d % LN != lane():
+                        continue
+                    var ja = get(res, f, jadr + a) * D
+                    var ra = Int(mi[HADR + d])
+                    for bb in range(a + 1):
+                        res[(OHN + ra + bb) * F + f] += ja * get(res, f, jadr + bb)
+    comptime if NEQ > 0:  # equality rows: always in H
+        for e in range(NEQ):
+            var eh = CEQH + EQH * e
+            var nch = Int(mi[eh + 4]); var choff = Int(mi[eh + 5]); var rbase = Int(mi[eh + 6]); var jb = OEQJ + Int(mi[eh + 7])
+            for k in range(Int(mi[eh + 3])):
+                var D = get(res, f, OEQD + rbase + k)
+                var jadr = jb + k * nch
+                for a in range(nch):
+                    var d = Int(mi[CEQC + choff + a])
                     if d % LN != lane():
                         continue
                     var ja = get(res, f, jadr + a) * D
@@ -1042,6 +1212,12 @@ def peval(mi: TI, res: TO, f: Int, gauss: PNT, alpha: Float32) -> PNT:
             q0 += 0.5 * D * jar * jar
             q1 += jv * D * jar
             q2 += 0.5 * jv * D * jv
+    comptime if NEQ > 0:  # equality rows: active at every alpha
+        for r in range(lane(), NEQR, LN):
+            var jar = get(res, f, OEQJAR + r); var jv = get(res, f, OEQJV + r); var D = get(res, f, OEQD + r)
+            q0 += 0.5 * D * jar * jar
+            q1 += jv * D * jar
+            q2 += 0.5 * jv * D * jv
     comptime if WAVE:
         res[(OPART + lane()) * F + f] = q0
         res[(OPART + LN + lane()) * F + f] = q1
@@ -1089,6 +1265,12 @@ def search(mi: TI, res: TO, f: Int, scale: Float32, tolerance: Float32, lsiter: 
                 continue
             for k in range(4):
                 res[(OJV + 4 * (sbase(mi, p) + sl) + k) * F + f] = jdot(mi, res, f, OJ + jbase(mi, p) + (4 * sl + k) * nch, nch, choff, OSRCH)
+    comptime if NEQ > 0:
+        for e in range(NEQ):
+            var eh = CEQH + EQH * e
+            var nch = Int(mi[eh + 4]); var choff = Int(mi[eh + 5]); var rbase = Int(mi[eh + 6]); var jb = OEQJ + Int(mi[eh + 7])
+            for k in range(Int(mi[eh + 3])):
+                res[(OEQJV + rbase + k) * F + f] = jdot(mi, res, f, jb + k * nch, nch, choff, OSRCH, CEQC)
     var g1: Float32 = 0; var g2: Float32 = 0; var g0: Float32 = 0
     for v in range(NV):
         var sv = get(res, f, OSRCH + v)
@@ -1154,6 +1336,12 @@ def start(mi: TI, res: TO, f: Int, src: Int) -> Float32:
             for k in range(4):
                 var row = 4 * (sbase(mi, p) + sl) + k
                 res[(OJAR + row) * F + f] = jdot(mi, res, f, OJ + jbase(mi, p) + (4 * sl + k) * nch, nch, choff, OCQACC) - get(res, f, OAREF + row)
+    comptime if NEQ > 0:
+        for e in range(NEQ):
+            var eh = CEQH + EQH * e
+            var nch = Int(mi[eh + 4]); var choff = Int(mi[eh + 5]); var rbase = Int(mi[eh + 6]); var jb = OEQJ + Int(mi[eh + 7])
+            for k in range(Int(mi[eh + 3])):
+                res[(OEQJAR + rbase + k) * F + f] = jdot(mi, res, f, jb + k * nch, nch, choff, OCQACC, CEQC) - get(res, f, OEQA + rbase + k)
     return update(mi, res, f)
 
 
@@ -1199,6 +1387,9 @@ def newton(mi: TI, mf: TF, res: TO, f: Int):
             res[(OJAR + r) * F + f] += alpha * get(res, f, OJV + r)
             if (get(res, f, OJAR + r) < 0) != (get(res, f, OST + r) != 0):
                 changed = True
+        comptime if NEQ > 0:
+            for r in range(NEQR):
+                res[(OEQJAR + r) * F + f] += alpha * get(res, f, OEQJV + r)
         var cheap = True
         if changed:
             comptime if WAVE:  # one sequential walk per animal on lane 0; its verdict shared so all lanes agree
@@ -1265,6 +1456,9 @@ def noslip(mi: TI, mf: TF, res: TO, f: Int):
             fr = -D * get(res, f, OJAR + r)
             imp0 += 0.5 * fr * fr / D
         res[(OFRC + r) * F + f] = fr
+    comptime if NEQ > 0:  # solNoSlip's iteration-0 correction sums every row, equality rows included
+        for r in range(NEQR):
+            imp0 += 0.5 * get(res, f, OEQD + r) * get(res, f, OEQJAR + r) * get(res, f, OEQJAR + r)
     for v in range(NV):
         res[(OZ + v) * F + f] = get(res, f, OQFC + v)
     for i in range(NV - 1, -1, -1):  # z = L^-T J' f
@@ -1479,6 +1673,12 @@ def step(mi: TI, mf: TF, qpos: TQ, qvel: TV, ctrl: TU, res: TO, f: Int):
             var p = body(res, f, pid)
             xpos = rot(p[1], m3(mf, BPOS + 3 * i)) + p[0] if pid else m3(mf, BPOS + 3 * i)  # a fixed tree's origin is 0
             xquat = mul(p[1], m4(mf, BQUAT + 4 * i)) if pid else m4(mf, BQUAT + 4 * i)
+            comptime if NMOCAP > 0:  # mj_kinematics (engine_core_smooth.c:86): a mocap body takes its pose from mocap_pos/quat, a world child
+                var mid = Int(mi[CMOC + i])
+                if mid >= 0:
+                    var mrow = NU + 7 * mid
+                    xpos = V3(ctrl[mrow * F + f], ctrl[(mrow + 1) * F + f], ctrl[(mrow + 2) * F + f], 0)
+                    xquat = Q4(ctrl[(mrow + 3) * F + f], ctrl[(mrow + 4) * F + f], ctrl[(mrow + 5) * F + f], ctrl[(mrow + 6) * F + f])
             for j in range(ja, ja + jn):
                 var a = Int(mi[QADR + j])
                 var t = mi[JTYPE + j]
@@ -1632,6 +1832,8 @@ def step(mi: TI, mf: TF, qpos: TQ, qvel: TV, ctrl: TU, res: TO, f: Int):
                 res[(OACT + 1 + na) * F + f] = Float32(sl)
                 na += 1
         res[OACT * F + f] = Float32(na)
+        comptime if NEQ > 0:
+            equality(mi, mf, qpos, qvel, res, f)
         comptime if STAGE >= 7:
             actuation(mi, mf, qpos, qvel, ctrl, res, f)
         comptime if STOP == 5:
@@ -1664,14 +1866,14 @@ def main() raises:
     var mf_b = ctx.enqueue_create_buffer[DType.float32](NFL)
     var q_b = ctx.enqueue_create_buffer[DType.float32](NQ * F)
     var v_b = ctx.enqueue_create_buffer[DType.float32](NV * F)
-    var u_b = ctx.enqueue_create_buffer[DType.float32](max(NU, 1) * F)
+    var u_b = ctx.enqueue_create_buffer[DType.float32](max(NUC, 1) * F)
     var o_b = ctx.enqueue_create_buffer[DType.float32](NROW * F)
     o_b.enqueue_fill(0)  # warm start reads OWARM before the first step writes it
     var mi = load(dir + "mi.bin", NI)
     var mf = load(dir + "mf.bin", NFL)
     var qp = load(dir + "qpos.bin", NQ * F)
     var qv = load(dir + "qvel.bin", NV * F)
-    var uv = load(dir + "ctrl.bin", NU * F) if NU > 0 else List[UInt8](length=4 * F, fill=0)
+    var uv = load(dir + "ctrl.bin", NUC * F) if NUC > 0 else List[UInt8](length=4 * F, fill=0)
     ctx.enqueue_copy(mi_b, mi.unsafe_ptr().unsafe_bitcast[Int32]())
     ctx.enqueue_copy(mf_b, mf.unsafe_ptr().unsafe_bitcast[Float32]())
     ctx.enqueue_copy(q_b, qp.unsafe_ptr().unsafe_bitcast[Float32]())
