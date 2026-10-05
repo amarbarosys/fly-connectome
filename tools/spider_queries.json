@@ -1,0 +1,42 @@
+[
+  {
+    "id": "secondary_eye_motion",
+    "query": "Menemerus semilimbatus eye-pair-specific responses to moving visual stimuli ALE PLE eye masking behavioral results",
+    "relevant_sources": [
+      "winsor2023",
+      "deagro2024"
+    ]
+  },
+  {
+    "id": "principal_eye_projection",
+    "query": "principal eyes retinal projection field of view and eye tube movement",
+    "relevant_sources": [
+      "winsor2023",
+      "cross2016",
+      "deagro2024"
+    ]
+  },
+  {
+    "id": "phidippus_takeoff",
+    "query": "Phidippus regius measured jump take-off velocity and trajectory",
+    "relevant_sources": [
+      "nabawy2018"
+    ]
+  },
+  {
+    "id": "portia_detours",
+    "query": "Portia planning detours route choice prey hidden walkthrough tower 15 spider-eating species",
+    "relevant_sources": [
+      "cross2016"
+    ]
+  },
+  {
+    "id": "anatomy_vs_hypothesis",
+    "query": "Uloborus diversus 3D brain atlas observed neuropils central nervous system and anatomical mapping versus proposed visual pathways",
+    "relevant_sources": [
+      "artiushin2026",
+      "jin2023",
+      "winsor2023"
+    ]
+  }
+]

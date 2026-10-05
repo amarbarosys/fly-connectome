@@ -11,6 +11,8 @@ import hashlib
 import json
 import re
 import xml.etree.ElementTree as ET
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,13 +24,13 @@ DEFAULT_OUT = Path('/home/<user>/Projects/science/fly-connectome/.work/papers/sp
 SOURCES = [
     dict(id='nabawy2018', title='Jumping performance of Phidippus regius', species=['Phidippus regius'],
          doi='10.1038/s41598-018-25227-9', pmcid='PMC5940701', filename='PMC5940701.txt', kind='primary'),
-    dict(id='deagro2024', title='Multi-eye motion in jumping spiders', species=['Salticidae'],
+    dict(id='deagro2024', title='Multi-eye motion in jumping spiders', species=['Menemerus semilimbatus'],
          doi=None, pmcid='PMC11418026', filename='PMC11418026.txt', kind='primary'),
-    dict(id='rossler2022', title='REM sleep in jumping spiders', species=['Salticidae'],
+    dict(id='rossler2022', title='REM sleep in jumping spiders', species=['Evarcha arcuata'],
          doi=None, pmcid='PMC9388130', filename='PMC9388130.txt', kind='primary'),
     dict(id='dahl2025', title='Individual recognition in Phidippus regius', species=['Phidippus regius'],
          doi=None, pmcid='PMC12604854', filename='PMC12604854.txt', kind='primary'),
-    dict(id='aguilararguello2020', title='Detour distance in Portia spiders', species=['Portia'],
+    dict(id='aguilararguello2020', title='Detour route choice in Marpissa and Trite', species=['Marpissa marina', 'Trite planiceps'],
          doi=None, pmcid='PMC7234261', filename='PMC7234261.txt', kind='primary'),
     dict(id='girard2011', title='Vibrational courtship in Maratus volans', species=['Maratus volans'],
          doi=None, pmcid='PMC3181266', filename='PMC3181266.txt', kind='primary'),
@@ -36,7 +38,7 @@ SOURCES = [
          doi=None, pmcid='PMC10697844', filename='PMC10697844.txt', kind='primary'),
     dict(id='artiushin2026', title='Uloborus brain atlas', species=['Uloborus'],
          doi=None, pmcid='PMC12919972', filename='PMC12919972.txt', kind='primary'),
-    dict(id='hung2026', title='Vibration-guided prey capture in Uloborus', species=['Uloborus'],
+    dict(id='hung2026', title='Vibration-guided prey capture in Uloborus', species=['Uloborus diversus', 'Drosophila melanogaster', 'Drosophila virilis'],
          doi=None, pmcid='PMC13592698', filename='PMC13592698.txt', kind='primary'),
     dict(id='barth2021', title='Spider sensory guidance and slit sensilla', species=['spider'],
          doi=None, pmcid='PMC8046691', filename='PMC8046691.txt', kind='review'),
@@ -191,7 +193,56 @@ def build(docs: Path, out: Path) -> dict:
             'unavailable': sum(x['status'] == 'unavailable' for x in manifest), 'passages': len(passages)}
 
 
-def check(out: Path) -> dict:
+def validate_audit(out: Path, audit_path: Path) -> dict:
+    sources = {row['id']: row for row in json.loads((out / 'manifest.json').read_text())}
+    passages = [json.loads(line) for line in (out / 'passages.jsonl').read_text().splitlines()]
+    rows = [json.loads(line) for line in audit_path.read_text().splitlines() if line.strip()]
+    schema = json.loads((ROOT / 'tools/spider_evidence_schema.json').read_text())
+    required = set(schema['required'])
+
+    def validate(row: dict) -> None:
+        assert required <= row.keys(), f"{row.get('id')}: missing schema fields {sorted(required - row.keys())}"
+        assert not (row.keys() - schema['properties'].keys()), f"{row.get('id')}: extra schema fields"
+        assert row['source_id'] in sources, f"{row.get('id')}: unknown source"
+        source = sources[row['source_id']]
+        assert source['status'] == 'checked', f"{row['id']}: source is unavailable"
+        taxa = {name.casefold() for name in source['species']}
+        assert row['species'].casefold() in taxa, f"{row['id']}: species {row['species']} mismatches {source['species']}"
+        quote = ' '.join(row['quote'].split())
+        corpus = ' '.join((out / 'clean' / f"{row['source_id']}.txt").read_text().split())
+        assert quote in corpus, f"{row['id']}: quote not present in cleaned source"
+        assert row['unit'].casefold() in quote.casefold(), f"{row['id']}: unit not supported by quote"
+        assert any(p['source_id'] == row['source_id'] and p['locator'] == row['locator'] and
+                   quote in ' '.join(p['text'].split()) for p in passages), f"{row['id']}: locator does not contain quote"
+        values = row['value'] if isinstance(row['value'], list) else [row['value']]
+        for value in values:
+            assert str(value) in quote, f"{row['id']}: value {value} not present in quote"
+        for key in ('sex_stage', 'eye_identity', 'stimulus', 'measured_quantity', 'unit', 'methods', 'limitations'):
+            assert isinstance(row[key], str) and row[key].strip(), f"{row['id']}: empty {key}"
+
+    ids = set()
+    for row in rows:
+        assert row['id'] not in ids, f"duplicate audit id {row['id']}"
+        ids.add(row['id'])
+        validate(row)
+    assert len(rows) >= 10, f"need ten independent numeric audit rows, got {len(rows)}"
+    import copy
+    bad_species = copy.deepcopy(rows[0])
+    bad_species['species'] = 'Portia fimbriata'
+    bad_unit = copy.deepcopy(next(r for r in rows if r['id'] == 'nabawy-duration'))
+    bad_unit['unit'] = 'm/s'
+    for mutant, label in ((bad_species, 'wrong-species'), (bad_unit, 'swapped-unit')):
+        try:
+            validate(mutant)
+        except AssertionError:
+            continue
+        raise AssertionError(f'{label} mutant unexpectedly passed')
+    return {'numeric_audit_rows': len(rows), 'source_species': 'PASS', 'quote_locators': 'PASS',
+            'numeric_units': 'PASS', 'wrong_species_mutant': 'FAIL as expected',
+            'swapped_unit_mutant': 'FAIL as expected'}
+
+
+def check(out: Path, audit_path: Path | None = None) -> dict:
     manifest = json.loads((out / 'manifest.json').read_text())
     ids, keys = set(), {}
     for r in manifest:
@@ -219,18 +270,88 @@ def check(out: Path) -> dict:
             assert not REF_HEAD.search(p['text']), f"reference passage: {p['locator']}"
             count += 1
     assert count == sum(r['passage_count'] for r in manifest)
-    return {'sources': len(manifest), 'checked': sum(x['status'] == 'checked' for x in manifest),
+    result = {'sources': len(manifest), 'checked': sum(x['status'] == 'checked' for x in manifest),
             'unavailable': sum(x['status'] == 'unavailable' for x in manifest), 'passages': count,
             'dedup_keys': len(keys), 'stable_hashes': 'PASS', 'reference_filter': 'PASS', 'locators': 'PASS'}
+    if audit_path is not None:
+        result.update(validate_audit(out, audit_path))
+    if (out / 'vectors.f16').is_file():
+        result['query_gate'] = verify_queries(out)
+    return result
+
+
+def embed_texts(texts: list[str]) -> 'object':
+    import numpy as np
+    req = urllib.request.Request('http://127.0.0.1:8098/v1/embeddings',
+        json.dumps({'input': texts}).encode(), {'Content-Type': 'application/json'})
+    with urllib.request.urlopen(req, timeout=600) as response:
+        vectors = np.asarray([item['embedding'] for item in json.load(response)['data']], dtype=np.float32)
+    return vectors / np.linalg.norm(vectors, axis=1, keepdims=True)
+
+
+def build_embeddings(out: Path) -> dict:
+    import numpy as np
+    rows = [json.loads(line) for line in (out / 'passages.jsonl').read_text().splitlines()]
+    titles = {row['id']: row['title'] for row in json.loads((out / 'manifest.json').read_text())}
+    batches = [rows[i:i + 24] for i in range(0, len(rows), 24)]
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        vectors = list(pool.map(lambda batch: embed_texts([
+            f"{titles[row['source_id']]}\n{row['section']}\n{row['text']}" for row in batch]), batches))
+    matrix = np.concatenate(vectors).astype(np.float16)
+    matrix.tofile(out / 'vectors.f16')
+    return {'passages': len(rows), 'dimensions': int(matrix.shape[1]),
+            'vector_bytes': matrix.nbytes, 'norm_min': float(np.linalg.norm(matrix.astype(np.float32), axis=1).min())}
+
+
+def query(out: Path, question: str, k: int = 5) -> list[dict]:
+    import numpy as np
+    rows = [json.loads(line) for line in (out / 'passages.jsonl').read_text().splitlines()]
+    matrix = np.fromfile(out / 'vectors.f16', np.float16).reshape(len(rows), -1).astype(np.float32)
+    scores = matrix @ embed_texts([question])[0]
+    best = []
+    used = set()
+    for ix in np.argsort(-scores):
+        row = rows[int(ix)]
+        if row['source_id'] in used:
+            continue
+        used.add(row['source_id'])
+        best.append({'score': float(scores[ix]), **row})
+        if len(best) >= k:
+            break
+    return best
+
+
+def verify_queries(out: Path) -> dict:
+    expectations = json.loads((ROOT / 'tools/spider_queries.json').read_text())
+    results = {}
+    for item in expectations:
+        hits = query(out, item['query'], 5)
+        matched = [hit for hit in hits if hit['source_id'] in item['relevant_sources']]
+        assert matched, f"query {item['id']} missed expected sources {item['relevant_sources']}"
+        top = matched[0]
+        results[item['id']] = {'source_id': top['source_id'], 'score': round(top['score'], 3),
+                               'locator': top['locator']}
+    return results
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument('command', choices=['build', 'check'])
+    ap.add_argument('command', choices=['build', 'check', 'embed', 'query'])
     ap.add_argument('--docs', type=Path, default=DEFAULT_DOCS)
     ap.add_argument('--out', type=Path, default=DEFAULT_OUT)
+    ap.add_argument('--question', default='')
+    ap.add_argument('-k', type=int, default=5)
     args = ap.parse_args()
-    result = build(args.docs, args.out) if args.command == 'build' else check(args.out)
+    if args.command == 'build':
+        result = build(args.docs, args.out)
+    elif args.command == 'check':
+        result = check(args.out, ROOT / 'tools/spider_numeric_audit.jsonl')
+    elif args.command == 'embed':
+        result = build_embeddings(args.out)
+    else:
+        if not args.question:
+            ap.error('query requires --question')
+        result = query(args.out, args.question, args.k)
     print(json.dumps(result, sort_keys=True))
 
 
