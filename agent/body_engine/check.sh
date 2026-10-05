@@ -312,6 +312,16 @@ if [ "$stage" = world_hud ]; then  # plume world in the live frame (-DWORLD=1, d
   [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
   echo "PASS all world_hud checks"; exit 0
 fi
+if [ "$stage" = worldgame ]; then  # `live.py watch K world-game` as a user meets it (watch_world.py check): follow camera, bars from the engine's own game rows, plume text, mini-map in one frame.
+  # Mutants: the HUD reads a zero buffer instead of the engine rows, the mini-map launch dropped
+  export PYTHONPATH=$PWD
+  W="$M -m agent.body_engine.watch_world check"
+  $W || { echo "FAIL worldgame"; fail=$((fail+1)); }
+  ~/iTools/bin/mutant-check agent/body_engine/live.mojo 's|gs_src = o_b.create_sub_buffer\[DType.float32\](eng.OGAME \* eng.F, 4 \* eng.F)|gs_src = gs_b|' -- $W || fail=$((fail+1))
+  ~/iTools/bin/mutant-check agent/body_engine/live.mojo 's|ctx.enqueue_function(kmm, img, tpose, troot, tsrc, grid_dim=(spec.MAP \* spec.MAP + 63) // 64, block_dim=64)|pass|' -- $W || fail=$((fail+1))
+  [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
+  echo "PASS all worldgame checks"; exit 0
+fi
 if [ "$stage" = fluid ]; then  # Flybody flight model: mj_fluid (ellipsoid wings + inertia boxes) inside qfrc_passive, wing velocities up to flapping rate
   R=~/Projects/science/fly-connectome; FL=${FLIGHT:-$R/.work/flight-body}
   [ -f $FL/flight.xml ] || $R/.work/neural-flies/flight-venv/bin/python agent/body_engine/models/flight_export.py $FL

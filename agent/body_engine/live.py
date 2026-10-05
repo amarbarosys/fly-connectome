@@ -8,7 +8,7 @@ check (under gpu-wait):
          100 frames is < 0.02 (settled). Control arm: the same fly with only the 6 feet colliding (FEET 'tarsus5',
          which sinks through the floor in MuJoCo too) must fail
   leak   10,000 streamed frames, verify_render_leak's sampler at 100 and 10,000: fds equal, VRAM not up, RSS < +1 MB
-fps: live.py fps K [...as watch]: 300 frames, ms per frame. watch: live.py watch [K] [cube] [spider] [world [SEED]]  -> mpv window (cube: inside the closed 40 mm cube of model.cube, walls
+fps: live.py fps K [...as watch]: 300 frames, ms per frame. watch: live.py watch [K] [cube] [spider] [world [SEED]] | [world-game]  -> mpv window (world-game: watch_world.py, everything on, fps reported) (cube: inside the closed 40 mm cube of model.cube, walls
        drawn; spider: the body from models/spider.py instead of the fly) (slow motion: the engine is ~140x slower than real time at one fly)
 
 usage: gpu-wait run --priority 90 --timeout 1800 -- .venv/bin/python -m agent.body_engine.live check
@@ -228,6 +228,9 @@ def leak_check(out, m, cam, frames=10_000, early=100):
 def main(cmd, *args):
     if cmd in ('watch', 'fps'):  # fps: live.py fps K [world ...]: 300 frames to a file, prints ms per frame
         k = int(args[0]) if args else 10
+        if 'world-game' in args:  # spider under the card brain + follow camera + game bars + plume text and mini-map, one window (watch_world.py)
+            from agent.body_engine import watch_world
+            return (watch_world.watch if cmd == 'watch' else watch_world.fps)(k)
         box = 40 if 'cube' in args else 0
         body = MJCF
         if 'spider' in args:
