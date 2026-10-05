@@ -45,6 +45,7 @@ comptime LN = 32 if WAVE else 1  # alike; loops written range(lane(), n, LN) spl
 comptime BLOCK = 32 if WAVE else 64
 comptime GRID = F if WAVE else (F + 63) // 64
 comptime STOP = get_defined_int["STOP", 99]()
+comptime INTEGRATOR = get_defined_int["INTEGRATOR", 0]()  # opt.integrator: 0 Euler, 3 implicitfast (model.py export; absent = Euler)
 comptime K = get_defined_int["K", 0]()  # K > 0 (STAGE >= 5): K steps per launch, qpos/qvel written back in place
 comptime STEPTOL = Float32(get_defined_int["STEPTOL_E7", 10]()) * 1e-7  # Newton stops when a step moves qacc less than this
 comptime LSFLOOR = Float32(get_defined_int["LSFLOOR_E7", 10]()) * 1e-7  # line-search slope floor, relative to alpha = 0  # phase timing (phases.sh): return after phase STOP
@@ -1321,13 +1322,26 @@ def noslip(mi: TI, mf: TF, res: TO, f: Int):
         res[(OCQACC + v) * F + f] += get(res, f, OW + v)
 
 def euler(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int):
-    """MuJoCo mj_Euler with implicit dof damping (contact-free: qfrc = qfrc_passive - qfrc_bias): qH = M + h diag(damping),
+    """MuJoCo mj_Euler (or, INTEGRATOR 3, mj_implicitSkip implicitfast) with implicit dof damping (contact-free: qfrc = qfrc_passive - qfrc_bias): qH = M + h diag(damping),
     factor, solve qH qacc = qfrc (mj_solveLD), qvel += h qacc, mj_integratePos. qvel is read, not written back."""
     var h = mf[TSTEP]
     for c in range(NC):
         res[(OQH + c) * F + f] = get(res, f, OM + c)
     for v in range(NV):
         res[(OQH + Int(mi[MADR + v]) + Int(mi[MNNZ + v]) - 1) * F + f] += h * mf[DAMP + v]
+    comptime if INTEGRATOR == 3 and STAGE >= 7:
+        # mj_implicitSkip (engine_forward.c:1864) implicitfast: qH = M - h qDeriv. The dof damping above is -qDeriv of mjd_passive_vel;
+        # mjd_actuator_vel adds moment' bias_vel moment per joint actuator (diagonal: gear^2 biasprm[2]), skipped where forcerange clamps
+        for u in range(NU):
+            var a = CACT + 5 * u
+            if mi[a] != 0:
+                continue
+            var af = CACF + 9 * u
+            var force = get(res, f, OAF + u)
+            if mi[a + 3] != 0 and (force <= mf[af + 6] or force >= mf[af + 7]):
+                continue
+            var dof = Int(mi[a + 1])
+            res[(OQH + Int(mi[MADR + dof]) + Int(mi[MNNZ + dof]) - 1) * F + f] -= h * mf[af + 8] * mf[af + 8] * mf[af + 3]
     factorI(mi, res, f, OQH, OQHI)
     for v in range(NV):
         res[(OQACC + v) * F + f] = get(res, f, OPAS + v) - get(res, f, OBIAS + v)

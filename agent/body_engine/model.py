@@ -171,17 +171,44 @@ def onfaces(q, v, side):
     return q, v
 
 
+INTEGRATORS = (mujoco.mjtIntegrator.mjINT_EULER, mujoco.mjtIntegrator.mjINT_IMPLICITFAST)  # ported (RK4, full implicit: not yet)
+
+
+def override(m):
+    """ENGINE_OPT='integrator=3,kv=0.5': test-only option overrides applied to the model the engine AND MuJoCo both load.
+    integrator: mjtIntegrator value. kv: velocity feedback on every affine-bias joint actuator (biasprm[2] = -kv), so
+    implicitfast's actuator qDeriv is not zero (the shipped servos have kv 0)."""
+    for kv in filter(None, os.environ.get('ENGINE_OPT', '').split(',')):
+        key, val = kv.split('=')
+        if key == 'integrator':
+            m.opt.integrator = int(val)
+        elif key == 'kv':
+            joint = (m.actuator_trntype == mujoco.mjtTrn.mjTRN_JOINT) & (m.actuator_biastype == mujoco.mjtBias.mjBIAS_AFFINE)
+            m.actuator_biasprm[joint, 2] = -float(val)
+        else:
+            raise SystemExit(f'FAIL ENGINE_OPT: unknown key {key}')
+
+
 def load(mjcf):
     m = mjcf if isinstance(mjcf, mujoco.MjModel) else mujoco.MjModel.from_xml_path(str(mjcf))
+    if not isinstance(mjcf, mujoco.MjModel):
+        override(m)
     if m.nmocap or m.dof_simplenum.any():
         raise SystemExit('FAIL export: mocap bodies and simple dofs are not ported')
-    if (m.nflex or m.opt.integrator or m.body_gravcomp.any() or m.actuator_damping.any()
+    if (m.nflex or m.opt.integrator not in INTEGRATORS or m.body_gravcomp.any() or m.actuator_damping.any()
             or m.dof_dampingpoly.any() or m.jnt_stiffnesspoly.any() or m.opt.disableflags):
-        raise SystemExit('FAIL export: only Euler, linear joint springs and dof dampers are ported (no flex, gravcomp, '
+        raise SystemExit('FAIL export: only Euler/implicitfast, linear joint springs and dof dampers are ported (no flex, gravcomp, '
                          'actuator damping, polynomial springs or dampers, disable flags)')
     if (m.wrap_type != mujoco.mjtWrap.mjWRAP_JOINT).any() or m.tendon_limited.any() or m.tendon_frictionloss.any() \
             or m.tendon_stiffnesspoly.any() or m.tendon_dampingpoly.any() or m.tendon_actfrclimited.any():
         raise SystemExit('FAIL export: only fixed tendons (joint wraps), unlimited, no friction loss, linear spring and damper are ported')
+    if m.opt.integrator == mujoco.mjtIntegrator.mjINT_IMPLICITFAST:
+        if m.opt.density or m.opt.viscosity or m.tendon_damping.any():  # mjd_passive_vel fluid and tendon-damper terms of qDeriv: not ported
+            raise SystemExit('FAIL export: implicitfast needs the fluid and tendon-damping velocity derivatives (mjd_passive_vel), not ported')
+        for j in np.flatnonzero(m.jnt_type == mujoco.mjtJoint.mjJNT_FREE):  # engine_forward.c midpoint_eligible: mj_midpoint integrates these
+            b = m.jnt_bodyid[j]
+            if m.tree_dofnum[m.dof_treeid[m.jnt_dofadr[j]]] == 6 and m.body_subtreemass[b] == m.body_mass[b]:
+                raise SystemExit(f'FAIL export: implicitfast integrates the standalone free body {b} by implicit midpoint (mj_midpoint), not ported')
     return m
 
 
@@ -360,6 +387,8 @@ def export(mjcf, out, regex=None, act=False):
     ints = [getattr(m, f).ravel() for f in INTS]
     floats = [np.ravel(getattr(m.opt, f[4:]) if f.startswith('opt.') else getattr(m, f)) for f in FLOATS]
     sizes = {'NBODY': m.nbody, 'NJNT': m.njnt, 'NQ': m.nq, 'NGEOM': m.ngeom, 'NV': m.nv, 'NC': m.nC, 'NU': m.nu}
+    if m.opt.integrator:  # absent = Euler: those binaries are unchanged
+        sizes['INTEGRATOR'] = int(m.opt.integrator)
     if regex:
         ci, cf, cs = feet(m, regex)
         ints, floats, sizes = ints + [ci], floats + [cf], sizes | cs
@@ -426,6 +455,21 @@ def standing(m, count, seed=0):
             if k >= 2000 and k % 20 == 0:
                 q.append(d.qpos.copy()); v.append(d.qvel.copy())
     return np.array(q), np.array(v)
+
+
+def airborne(mjcf, out, count=64, lift=5.0):
+    """STATES file of count contact-free poses: the standing rollout (always run with Euler, so the states do not depend on
+    the integrator under test) with every free joint lifted by `lift` along z. No contact rows, so qacc_euler and
+    qpos_next carry the integrator alone, without the active-set float32 noise of contact states."""
+    m = load(mjcf)
+    m.opt.integrator = mujoco.mjtIntegrator.mjINT_EULER
+    q, v = standing(m, count)
+    for j in np.flatnonzero(m.jnt_type == mujoco.mjtJoint.mjJNT_FREE):  # every animal of a combined model
+        q[:, m.jnt_qposadr[j] + 2] += lift
+    out = Path(out)
+    out.mkdir(parents=True, exist_ok=True)
+    np.savez(out / 'airborne.npz', qpos=q, qvel=v)
+    return str(out / 'airborne.npz')
 
 
 def check(mjcf, out, stage, count=64, k=0, oracle=None):
@@ -511,6 +555,9 @@ def check(mjcf, out, stage, count=64, k=0, oracle=None):
     flags = (out / 'sizes.txt').read_text().split()
     subprocess.run([str(Path.home() / '.local/bin/mojo'), 'build', *flags, f'-DFLIES={count}', f'-DSTAGE={number}', f'-DK={k}', f"-DWAVE={os.environ.get('WAVE', 0)}", str(ENGINE / 'smooth.mojo'), '-o', str(binary)], check=True)
     subprocess.run([str(binary), str(out) + '/'], check=True)
+    if os.environ.get('ENGINE_ONLY'):  # engine run only (loopk: K=10 vs 10 x K=1 byte equality), no MuJoCo comparison
+        print(f'engine only: {stage} K={k} ran, nothing compared with MuJoCo')
+        return
     rows = np.fromfile(out / ('state.bin' if k else 'smooth.bin'), np.float32).reshape(-1, count).T
     sizes = [want[f][0].size for f in fields]
     if rows.shape[1] != sum(sizes):
@@ -548,6 +595,8 @@ def check(mjcf, out, stage, count=64, k=0, oracle=None):
 
 if __name__ == '__main__':
     cmd, args = sys.argv[1], sys.argv[2:]
+    if cmd == 'airborne':
+        sys.exit(print(airborne(args[0], args[1])))
     if cmd == 'meshes':
         sys.exit(0 if meshes(*args) <= 1e-4 else 'FAIL meshes: decode error above 1e-4 of part size')
     import os

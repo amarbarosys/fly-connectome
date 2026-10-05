@@ -111,6 +111,47 @@ if [ "$stage" = fluid ]; then  # Flybody flight model: mj_fluid (ellipsoid wings
   [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
   echo "PASS all fluid checks"; exit 0
 fi
+if [ "$stage" = loopk ]; then  # engine vs ITSELF, no MuJoCo: one K=10 launch == ten K=1 launches byte for byte, on BODY (default fly)
+  # with ENGINE_OPT options (integrator, solver). One-step MuJoCo parity is the separate per-option stages (integrator, loop)
+  B=${BODY:-.work/agent/gpu-body-port/body-v2/body.xml}; D=$X/loopk-$(basename $B .xml)
+  ST=actuated; [ "$(basename $B)" = spider_test.xml ] && ST=step  # the spider test body has no actuators
+  ENGINE_ONLY=1 $M -m agent.body_engine.model check $B $D $ST 64 1 | tail -1
+  ~/.local/bin/mojo build $(cat $D/sizes.txt) -DFLIES=64 -DSTAGE=$($M -c "from agent.body_engine.model import STAGES; print(STAGES['$ST'][0])") -DK=10 -DWAVE=${WAVE:-0} agent/body_engine/smooth.mojo -o $D/k10
+  cp $D/state10.bin $D/k1x10.bin && $D/k10 $D/ >/dev/null
+  cmp $D/state.bin $D/k1x10.bin && echo "PASS loopk $(basename $B .xml) ${ENGINE_OPT:-defaults}: K=10 launch == 10 K=1 launches, byte-equal (engine vs engine, not MuJoCo)" || { echo "FAIL loopk $(basename $B .xml)"; exit 1; }
+  exit 0
+fi
+if [ "$stage" = integrator ]; then  # implicitfast (mj_implicitSkip) vs MuJoCo with opt.integrator=implicitfast, fly + spider + 2-animal world
+  F=.work/agent/gpu-body-port/body-v2/body.xml; SP=agent/body_engine/models/spider_test.xml
+  SB=.work/agent/body_engine/spider-body/spider.xml; I=$X/integrator; KV=0.01  # KV: the shipped servos have kv 0 = Euler's qH; 0.01 makes h gear^2 kv ~ M's diagonal
+  echo "COVERAGE integrator=implicitfast (3): fly step + actuated (airborne states, kv=$KV, shipped kv=0 in step), spider_test step, world fly+spider at 8 and 200 mm"
+  echo "COVERAGE not covered: standalone free body (midpoint, refused at export), implicit (full), RK4, tendon-damping and fluid derivatives (refused), spring-only tendons (accepted, no velocity derivative, no parity case), contact states (MEASURED only)"
+  $M -m agent.body_engine.reject_check || { echo "FAIL reject"; fail=$((fail+1)); }
+  ~/iTools/bin/mutant-check agent/body_engine/model.py 's/m.opt.density or m.opt.viscosity or m.tendon_damping.any()/False/' -- $M -m agent.body_engine.reject_check || fail=$((fail+1))
+  export ENGINE_OPT=integrator=3,kv=$KV
+  A=$($M -m agent.body_engine.model airborne $F $I/fly | tail -1)
+  STATES=$A $M -m agent.body_engine.model check $F $I/fly actuated 64 || { echo "FAIL fly actuated implicitfast"; fail=$((fail+1)); }
+  ENGINE_OPT=integrator=3 $M -m agent.body_engine.model check $F $I/fly-step step 64 || { echo "FAIL fly step implicitfast"; fail=$((fail+1)); }
+  ENGINE_OPT=integrator=3 $M -m agent.body_engine.model check $SP $I/spider step 64 || { echo "FAIL spider step implicitfast"; fail=$((fail+1)); }
+  # the gate must fail with the actuator velocity term of qH (qDeriv) added instead of subtracted
+  ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo 's/-= h \* mf\[af + 8\] \* mf\[af + 8\] \* mf\[af + 3\]/+= h * mf[af + 8] * mf[af + 8] * mf[af + 3]/' -- \
+    env STATES=$A $M -m agent.body_engine.model check $F $I/mutant actuated 64 || fail=$((fail+1))
+  # islands: two animals in one model. Each animal's dofs get their own qH terms; the engine must match MuJoCo on the merged model
+  # at 200 mm (two islands) and 8 mm (the spider's origin 8 mm away), and fail when the spider uses the fly's origin
+  for off in 200 8; do
+    W=$($M -c "from agent.body_engine.model import combine; print(combine('$F', '$SB', ($off, 0, 0), 'iworld$off'))")
+    AW=$($M -m agent.body_engine.model airborne $W $I/world$off | tail -1)
+    STATES=$AW $M -m agent.body_engine.model check $W $I/world$off actuated 64 || { echo "FAIL implicitfast world at $off mm"; fail=$((fail+1)); }
+    if [ $off = 200 ]; then
+      ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo 's/    var r = Int(mi\[ROOT + b\])/    var r = Int(mi[ROOT + 1])/' -- \
+        env STATES=$AW $M -m agent.body_engine.model check $W $I/mutant actuated 64 || fail=$((fail+1))
+    fi
+  done
+  # MEASURED, not a gate: contact states (active-set float32 noise, fly kv 0.01: qacc_euler 2.4e-5, qfrc_constraint 1.2e-4 vs a floor-lifted bar of 1.3e-5, 6.4e-5)
+  $M -m agent.body_engine.model check $F $I/fly-contact actuated 64 2>&1 | grep -E "max rel err" | grep -E "qacc|qfrc_constraint" | sed 's/^\(PASS\|FAIL\)/MEASURED/' || true
+  [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
+  echo "PASS all integrator checks (implicitfast)"; exit 0
+fi
 B=${BODY:-.work/agent/gpu-body-port/body-v2/body.xml}  # BODY=path checks another MJCF (e.g. the spider from models/spider.py)
 $M -m agent.body_engine.model check $B $X/body-$(basename $B .xml) "$stage" 64 || { echo "FAIL $(basename $B .xml) $stage"; fail=$((fail+1)); }
 if [ "$stage" = contact ] || [ "$stage" = actuated ]; then  # plane-mesh foot pairs; the spider test body has none
