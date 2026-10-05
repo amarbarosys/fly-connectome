@@ -34,13 +34,14 @@ def descending_name_sets():
     fw['cell_type'] = fw.cell_type.fillna('')
     m['type'] = m.type.fillna('')
     fw_types = set(fw.cell_type)
-    mcns_types = set(m.loc[m.superclass == 'descending_neuron', 'type'])
+    desc_idx = np.asarray(mcns.descending(), np.int64)
+    descending = m.iloc[desc_idx]
+    mcns_types = set(descending.type)
     turning_types = {'DNa01', 'DNa02'}
     forward_types = {t for t in fw_types if t.startswith(('DNg', 'oDN1'))}
     sets = {'turn_left': [], 'turn_right': [], 'forward': [],
             'forward_left': [], 'forward_right': [], 'forward_center': []}
-    selected = m.superclass == 'descending_neuron'
-    for i, row in m.loc[selected].iterrows():
+    for i, row in descending.iterrows():
         if row.type not in fw_types:
             continue
         if row.type in turning_types:
@@ -55,7 +56,7 @@ def descending_name_sets():
     counts = {}
     for name, wanted in (('turning', turning_types), ('forward', forward_types)):
         frows = fw[fw.cell_type.isin(wanted)]
-        mrows = m[(m.superclass == 'descending_neuron') & m.type.isin(wanted)]
+        mrows = descending[descending.type.isin(wanted)]
         matched = wanted & mcns_types
         counts[name] = {'flywire_types': len(wanted), 'matched_types': len(matched),
                         'unmatched_types': sorted(wanted - matched),
@@ -65,7 +66,7 @@ def descending_name_sets():
                                 'matched_types': len((fw_types - {''}) & mcns_types),
                                 'unmatched_types': sorted((fw_types - {''}) - mcns_types),
                                 'flywire_cells': len(fw),
-                                'matched_mcns_cells': int((m.superclass == 'descending_neuron').sum())}
+                                'matched_mcns_cells': int(len(descending))}
     return {name: np.asarray(ids, np.int32) for name, ids in sets.items()}, counts
 
 
