@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from math import isclose
+import struct
 from typing import Iterable, Sequence
 
 
@@ -55,6 +56,10 @@ def _clamp01(value: float) -> float:
     return min(1.0, max(0.0, value))
 
 
+def _f32(value: float) -> float:
+    return struct.unpack("<f", struct.pack("<f", value))[0]
+
+
 def replay(
     animals: Sequence[Animal],
     events: Iterable[Event],
@@ -72,17 +77,19 @@ def replay(
         if animal.dead:
             continue
 
-        drain = rules.basal_drain + max(0.0, event.work) * rules.work_drain
-        animal.energy = _clamp01(animal.energy - drain)
-        animal.stamina = _clamp01(animal.stamina - max(0.0, event.work) * rules.work_drain)
+        work = _f32(max(0.0, _f32(event.work)))
+        drain = _f32(_f32(rules.basal_drain) + _f32(work * _f32(rules.work_drain)))
+        animal.energy = _f32(_clamp01(_f32(animal.energy - drain)))
+        stamina_drain = _f32(work * _f32(rules.work_drain))
+        animal.stamina = _f32(_clamp01(_f32(animal.stamina - stamina_drain)))
         if event.resting:
-            animal.stamina = _clamp01(animal.stamina + rules.rest_recovery)
-        animal.health = _clamp01(animal.health + rules.health_regen)
+            animal.stamina = _f32(_clamp01(_f32(animal.stamina + _f32(rules.rest_recovery))))
+        animal.health = _f32(_clamp01(_f32(animal.health + _f32(rules.health_regen))))
 
         for hazard_id in event.hazard_events:
             key = (event.animal, hazard_id)
             if key not in seen_hazards:
-                animal.health = _clamp01(animal.health - rules.hazard_damage)
+                animal.health = _f32(_clamp01(_f32(animal.health - _f32(rules.hazard_damage))))
                 seen_hazards.add(key)
 
         if event.resource_event is not None and event.source_id is not None:
@@ -90,7 +97,7 @@ def replay(
                 remaining = source_remaining.get(event.source_id, 0)
                 if remaining > 0:
                     source_remaining[event.source_id] = remaining - 1
-                    animal.energy = _clamp01(animal.energy + rules.resource_energy)
+                    animal.energy = _f32(_clamp01(_f32(animal.energy + _f32(rules.resource_energy))))
                     seen_resources.add(event.resource_event)
 
         if animal.energy <= 0.0 or animal.health <= 0.0:
@@ -98,25 +105,25 @@ def replay(
     return result
 
 
-def assert_mutants_caught() -> None:
-    """Small, standalone mutation assertions used by the visible module gate."""
+def assert_mutant_signatures() -> None:
+    """Fixtures that distinguish the three required semantic fault signatures."""
     rules = Rules(basal_drain=0.0, work_drain=0.1, hazard_damage=0.2,
                   rest_recovery=0.1, resource_energy=0.0)
     base = [Animal()]
     worked = replay(base, [Event(0, work=2.0)], {}, rules)[0]
-    assert worked.energy == 0.8, "reversed-drain mutant escaped"
+    assert isclose(worked.energy, 0.8, rel_tol=1e-6), "work-drain signature mismatch"
     contact_repeat = replay(base, [Event(0, hazard_events=("H",)),
                                    Event(0, hazard_events=("H",))], {}, rules)[0]
-    assert contact_repeat.health == 0.8, "every-contact damage mutant escaped"
+    assert isclose(contact_repeat.health, 0.8, rel_tol=1e-6), "hazard-event signature mismatch"
     bite = Event(0, resource_event="bite-1", source_id="food")
     sources = {"food": 1}
     eaten = replay([Animal()], [bite, bite], sources, rules)[0]
-    assert sources["food"] == 0, "duplicate-bite mutant escaped"
-    assert eaten.energy == 1.0, "duplicate bite effect mutant escaped"
+    assert sources["food"] == 0, "resource-depletion signature mismatch"
+    assert isclose(eaten.energy, 1.0, rel_tol=1e-6), "resource-consumption signature mismatch"
 
 
 def _self_check() -> None:
-    assert_mutants_caught()
+    assert_mutant_signatures()
     rules = Rules(basal_drain=0.1, work_drain=0.1, hazard_damage=0.4,
                   rest_recovery=0.25, resource_energy=0.5)
     # Two animals race for one remaining unit. Stable stream order wins once.
@@ -128,9 +135,9 @@ def _self_check() -> None:
         Event(0, hazard_events=("trap-entry",)),
     ], source, rules)
     assert source["berry"] == 0
-    assert isclose(rows[0].energy, 0.7) and isclose(rows[0].health, 0.6)
-    assert isclose(rows[0].stamina, 1.0)
-    assert isclose(rows[1].energy, 0.9)
+    assert isclose(rows[0].energy, 0.7, rel_tol=1e-6) and isclose(rows[0].health, 0.6, rel_tol=1e-6)
+    assert isclose(rows[0].stamina, 1.0, rel_tol=1e-6)
+    assert isclose(rows[1].energy, 0.9, rel_tol=1e-6)
     # Death is absorbing, including for later resource/hazard events.
     dead = replay([Animal(energy=0.0, dead=True)],
                   [Event(0, resource_event="bite", source_id="berry",
@@ -138,7 +145,7 @@ def _self_check() -> None:
     assert dead[0].row() == (0.0, 1.0, 1.0, True)
     print("GAME_EVENTS PASS: fixed replay, work drain, tagged hazard once, rest, absorbing death")
     print("GAME_EVENTS PASS: source_remaining=0 after 2 simultaneous consumers; duplicate bite consumed once")
-    print("GAME_EVENTS PASS: mutants reversed-drain, every-contact damage, duplicate-bite caught")
+    print("GAME_EVENTS PASS: fixtures distinguish reversed drain, repeated-contact damage, duplicate bite")
 
 
 if __name__ == "__main__":
