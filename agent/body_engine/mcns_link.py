@@ -21,27 +21,73 @@ WINDOW, READOUT = 100, 'mcns/mn_readout.npz'
 FWD_HZ, TURN_HZ = 80, 100  # drive 80/140 = 0.57 forward; a turn adds 0.5 on its side (1.0 vs 0.57): at 140 Hz both clip to 1 and the turn vanishes
 
 
-def brain():
+VIS = ('blank', 'left', 'right', 'mirrored')  # vision mode: forward 80 Hz + an image; disc at az +-70 (left/right eye), mirrored = left disc through the mirrored eye map (mutant)
+
+
+def brain(vision=False):
     from agent import mcns, shiu_g1
     from agent.mcns_mapping import descending_name_sets
     from agent.shiu import ShiuLive
     data = mcns.graph()
     n = data[4][0]
     dn, _ = descending_name_sets()
-    b = ShiuLive(*next(shiu_g1.arms(data, 'mcns'))[1], n=n, flies=3, seed=7)
-    for col, t in enumerate((None, 'left', 'right')):
+    cols = 4 if vision else 3
+    b = ShiuLive(*next(shiu_g1.arms(data, 'mcns'))[1], n=n, flies=cols, seed=7)
+    if vision:
+        from agent import fly_vision as fv
+        ids, az, el = fv.receptors(fv.LAMINA)
+        img = {'blank': fv.np.full((90, 180), fv.BG), 'left': fv.disc(70), 'right': fv.disc(-70), 'mirrored': fv.disc(70)}
+    for col, t in enumerate(VIS if vision else (None, 'left', 'right')):
         b.stimulate(dn['forward'], FWD_HZ, fly=col, key=col)
-        if t:
+        if vision:
+            for cells, hz in fv.drive(img[t], ids, -az if t == 'mirrored' else az, el):
+                b.stimulate(cells, hz, fly=col, key=col)
+        elif t:
             b.stimulate(dn['forward_' + t], FWD_HZ + TURN_HZ, fly=col, key=col)
     f = np.load(f'.work/agent/{READOUT}')
     cells = np.r_[f['mnL'], f['mnR']]
-    b.start([1], np.concatenate([c * n + cells for c in range(3)]).astype(np.int32))
+    b.start([1], np.concatenate([c * n + cells for c in range(cols)]).astype(np.int32))
     return b, f, len(f['mnL']), len(cells)
 
 
 def drive(f, x, nl):
     """per-cell MN counts of one 100 ms window -> (left, right) drive in [0, 1]."""
     return np.clip([((x[:nl] - f['mu0']) / f['sd0']) @ f['w0'] + f['y0'], ((x[nl:] - f['mu1']) / f['sd1']) @ f['w1'] + f['y1']], 0, 1)
+
+
+def vision():
+    """fly vision in the walking body: a dark disc left or right of the fly (fixed on the retina, open loop) -> L1-L3/R1-6 ->
+    MCNS brain -> leg-MN readout -> gait. Gates (1 s): left and right discs turn opposite ways, each >= 10 deg more than blank;
+    blank walks > 1 body length; mutant mirrored eye map: the left disc turns like the right one (sign vs blank flips)."""
+    d, m, _ = prepare()
+    q0 = np.fromfile(d / 'qpos.bin', np.float32).astype(float)
+    eng, gait = {k: Engine(d, K, 'mcnsvis-' + k, STEPS) for k in VIS}, {k: Gait(m, d, K) for k in VIS}
+    b, f, nl, nc = brain(vision=True)
+    cum, tr = [np.zeros(4 * nc)], {k: [q0] for k in VIS}
+    for i in range(STEPS):
+        cum.append(b.advance(K).astype(float))
+        x = (cum[-1] - cum[-1 - min(i + 1, WINDOW)]).reshape(4, nc) * (WINDOW / min(i + 1, WINDOW))
+        for c, k in enumerate(VIS):
+            eng[k].send(gait[k].ctrl(drive(f, x[c], nl) if i + 1 >= WINDOW else np.zeros(2)))
+        for k in VIS:
+            tr[k].append(eng[k].recv())
+    b.close()
+    for k in VIS:
+        eng[k].close()
+    r = {k: metrics(m, None, np.array(tr[k])) for k in VIS}
+    fw = {k: float(r[k]['forward'][-1]) for k in VIS}
+    yaw = {k: float(r[k]['yaw_deg'][-1]) for k in VIS}
+    dl, dr, dm = yaw['left'] - yaw['blank'], yaw['right'] - yaw['blank'], yaw['mirrored'] - yaw['blank']
+    print(json.dumps({'forward_mm': fw, 'yaw_deg': yaw}))
+    ok = [(f"blank walks {fw['blank']:.2f} mm > {BODY_LENGTH}", fw['blank'] > BODY_LENGTH),
+          (f"left disc {dl:+.1f}, right disc {dr:+.1f} deg vs blank: opposite, each >= 10", dl * dr < 0 and min(abs(dl), abs(dr)) >= 10),
+          (f"mutant mirrored map: {dm:+.1f} vs left {dl:+.1f}, sign flips", dm * dl < 0)]
+    for k, v in ok:
+        print(('PASS ' if v else 'FAIL ') + k)
+    (OUT / 'mcns-vision.json').write_text(json.dumps({'forward_mm': fw, 'yaw_deg': yaw}))
+    if not all(v for _, v in ok):
+        sys.exit('FAIL fly vision in the walking body')
+    print('PASS fly vision in the walking body: a disc on one side turns the fly')
 
 
 def main():
@@ -81,4 +127,4 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    vision() if sys.argv[1:] == ['vision'] else main()
