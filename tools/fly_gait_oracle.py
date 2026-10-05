@@ -139,6 +139,288 @@ def rollout(mjcf: Path) -> None:
         print("FAIL opposite turn yaw sign")
 
 
+
+def _normal_name(name: str | None, root_alias: bool = False) -> str | None:
+    if name is None:
+        return None
+    if root_alias and "/" not in name:
+        return "@root"
+    return name.split("/", 1)[-1]
+
+
+def _obj_names(model, obj, count: int) -> list[str | None]:
+    return [mujoco.mj_id2name(model, obj, i) for i in range(count)]
+
+
+def diagnose_models(body_mjcf: Path, out: Path) -> None:
+    """Record FlyGym's one-second CPG controls and compare/replay them on body-v2."""
+    import json
+    from flygym import Simulation
+    from flygym.compose import FlatGroundWorld
+    from flygym.utils.math import Rotation3D
+    from flygym.anatomy import BodySegment
+    from flygym_demo.complex_terrain import (CPGController, LocomotionAction, PreprogrammedSteps,
+                                             apply_locomotion_action, make_locomotion_fly,
+                                             make_tripod_cpg_network)
+
+    out.mkdir(parents=True, exist_ok=True)
+    fly = make_locomotion_fly(name="smoke", add_adhesion=True, colorize=False)
+    world = FlatGroundWorld()
+    world.add_fly(fly, [0, 0, 0.5], Rotation3D("quat", [1, 0, 0, 0]))
+    sim = Simulation(world)
+    source = sim.mj_model
+    source_data = sim.mj_data
+    steps = PreprogrammedSteps()
+    dofs = fly.get_actuated_jointdofs_order("position")
+    controller = CPGController(cpg_network=make_tripod_cpg_network(
+        timestep=sim.timestep, intrinsic_amplitude=1.0, coupling_strength=10.0,
+        convergence_coef=20.0, seed=0), preprogrammed_steps=steps, output_dof_order=dofs)
+    sim.reset()
+    apply_locomotion_action(sim, fly.name, LocomotionAction(
+        joint_angles=steps.default_pose_by_dof_order(dofs), adhesion_onoff=np.ones(6, dtype=bool)))
+    sim.warmup()
+    start_q, start_v = source_data.qpos.copy(), source_data.qvel.copy()
+    thorax_id = fly.get_bodysegs_order().index(BodySegment("c_thorax"))
+    start_thorax = sim.get_body_positions(fly.name)[thorax_id].copy()
+    nstep = round(1.0 / sim.timestep)
+    ctrl_trace = np.empty((nstep, source.nu), np.float64)
+    q_trace = np.empty((nstep + 1, source.nq), np.float64)
+    q_trace[0] = start_q
+    for t in range(nstep):
+        apply_locomotion_action(sim, fly.name, controller.step())
+        ctrl_trace[t] = source_data.ctrl
+        sim.step()
+        q_trace[t + 1] = source_data.qpos
+    forward = float(sim.get_body_positions(fly.name)[thorax_id][0] - start_thorax[0])
+
+    target = mujoco.MjModel.from_xml_path(str(body_mjcf))
+    source_act = _obj_names(source, mujoco.mjtObj.mjOBJ_ACTUATOR, source.nu)
+    target_act = _obj_names(target, mujoco.mjtObj.mjOBJ_ACTUATOR, target.nu)
+    source_joints = _obj_names(source, mujoco.mjtObj.mjOBJ_JOINT, source.njnt)
+    target_joints = _obj_names(target, mujoco.mjtObj.mjOBJ_JOINT, target.njnt)
+    source_act_by_name = {_normal_name(n): i for i, n in enumerate(source_act)}
+    target_act_by_name = {_normal_name(n): i for i, n in enumerate(target_act)}
+    source_joint_by_name = {_normal_name(n, root_alias=True): i for i, n in enumerate(source_joints)}
+    target_joint_by_name = {_normal_name(n, root_alias=True): i for i, n in enumerate(target_joints)}
+    common_acts = sorted(source_act_by_name.keys() & target_act_by_name.keys())
+    common_joints = sorted(source_joint_by_name.keys() & target_joint_by_name.keys())
+    rows = ["# Compiled model comparison: FlyGym smoke vs body-v2", "",
+            f"| Field | FlyGym | body-v2 |", "|---|---:|---:|",
+            f"| nu / nq / njnt / ngeom / npair | {source.nu} / {source.nq} / {source.njnt} / {source.ngeom} / {source.npair} | {target.nu} / {target.nq} / {target.njnt} / {target.ngeom} / {target.npair} |",
+            f"| timestep / integrator / noslip | {source.opt.timestep} / {int(source.opt.integrator)} / {source.opt.noslip_iterations} | {target.opt.timestep} / {int(target.opt.integrator)} / {target.opt.noslip_iterations} |",
+            f"| gravity | {source.opt.gravity.tolist()} | {target.opt.gravity.tolist()} |",
+            f"| warm-start root xyz | {start_q[:3].tolist()} | mapped from FlyGym root by freejoint |",
+            f"| matched actuators / joints | {len(common_acts)} / {len(common_joints)} | {len(common_acts)} / {len(common_joints)} |",
+            f"| one-second FlyGym forward displacement | {forward:.6f} model units | recorded as ctrl replay input |", "",
+            "## Actuator order and parameters", "", "| source id | source actuator | target id | target actuator | gain max abs | bias max abs | ctrlrange max abs |", "|---:|---|---:|---|---:|---:|---:|"]
+    for sn, si in source_act_by_name.items():
+        if sn not in target_act_by_name:
+            rows.append(f"| {si} | {source_act[si]} | - | missing | - | - | - |")
+            continue
+        ti = target_act_by_name[sn]
+        gain = float(np.max(np.abs(source.actuator_gainprm[si] - target.actuator_gainprm[ti])))
+        bias = float(np.max(np.abs(source.actuator_biasprm[si] - target.actuator_biasprm[ti])))
+        ctrlrange = float(np.max(np.abs(source.actuator_ctrlrange[si] - target.actuator_ctrlrange[ti])))
+        rows.append(f"| {si} | {source_act[si]} | {ti} | {target_act[ti]} | {gain:.6g} | {bias:.6g} | {ctrlrange:.6g} |")
+    rows += ["", "## Joint order and qpos0", "", "| joint | FlyGym qposadr | body-v2 qposadr | qpos0 max abs |", "|---|---:|---:|---:|"]
+    qdim = {int(mujoco.mjtJoint.mjJNT_FREE): 7, int(mujoco.mjtJoint.mjJNT_BALL): 4,
+            int(mujoco.mjtJoint.mjJNT_SLIDE): 1, int(mujoco.mjtJoint.mjJNT_HINGE): 1}
+    for jn in common_joints:
+        si, ti = source_joint_by_name[jn], target_joint_by_name[jn]
+        sa, ta = int(source.jnt_qposadr[si]), int(target.jnt_qposadr[ti])
+        size = qdim[int(source.jnt_type[si])]
+        err = float(np.max(np.abs(source.qpos0[sa:sa + size] - target.qpos0[ta:ta + size])))
+        rows.append(f"| {jn} | {sa} | {ta} | {err:.6g} |")
+    source_geom = {_normal_name(n): i for i, n in enumerate(_obj_names(source, mujoco.mjtObj.mjOBJ_GEOM, source.ngeom))}
+    target_geom = {_normal_name(n): i for i, n in enumerate(_obj_names(target, mujoco.mjtObj.mjOBJ_GEOM, target.ngeom))}
+    common_geoms = sorted(source_geom.keys() & target_geom.keys())
+    fric_diff = [(n, float(np.max(np.abs(source.geom_friction[source_geom[n]] - target.geom_friction[target_geom[n]])))) for n in common_geoms]
+    rows += ["", "## Geometry and explicit pairs", "",
+             f"Matched named geoms: {len(common_geoms)}; missing from body-v2: {len(source_geom.keys() - target_geom.keys())}; extra in body-v2: {len(target_geom.keys() - source_geom.keys())}.",
+             f"Matched geom friction max abs: {max((x[1] for x in fric_diff), default=0):.6g}.", "",
+             "body-v2 pair names include arena walls/stone fixture pairs absent from FlatGroundWorld:", ""]
+    for i, (g1, g2) in enumerate(zip(target.pair_geom1, target.pair_geom2)):
+        n1 = mujoco.mj_id2name(target, mujoco.mjtObj.mjOBJ_GEOM, int(g1)) or str(g1)
+        n2 = mujoco.mj_id2name(target, mujoco.mjtObj.mjOBJ_GEOM, int(g2)) or str(g2)
+        pair_name = mujoco.mj_id2name(target, mujoco.mjtObj.mjOBJ_PAIR, i) or ""
+        if any(tag in (n1 + " " + n2 + " " + pair_name).lower() for tag in ("wall", "stone", "arena", "ground_plane")):
+            rows.append(f"- pair {i}: {pair_name}: {n1} x {n2}")
+    (out / "model_diff.md").write_text("\n".join(rows) + "\n")
+
+    # Transfer the exact warm state and controls by joint/actuator name, leaving body-v2's extra head servos at the
+    # corresponding standing angle. Compare every common joint after each paired MuJoCo step.
+    target_data = mujoco.MjData(target)
+    target_data.qpos[:] = target.qpos0
+    target_data.qvel[:] = 0
+    for jn in common_joints:
+        si, ti = source_joint_by_name[jn], target_joint_by_name[jn]
+        qs, qt = int(source.jnt_qposadr[si]), int(target.jnt_qposadr[ti])
+        vs, vt = int(source.jnt_dofadr[si]), int(target.jnt_dofadr[ti])
+        nq = qdim[int(source.jnt_type[si])]
+        nv = 6 if int(source.jnt_type[si]) == int(mujoco.mjtJoint.mjJNT_FREE) else 3 if int(source.jnt_type[si]) == int(mujoco.mjtJoint.mjJNT_BALL) else 1
+        target_data.qpos[qt:qt + nq] = start_q[qs:qs + nq]
+        target_data.qvel[vt:vt + nv] = start_v[vs:vs + nv]
+    mujoco.mj_forward(target, target_data)
+    source_replay = mujoco.MjData(source)
+    source_replay.qpos[:] = start_q; source_replay.qvel[:] = start_v
+    source_replay.ctrl[:] = ctrl_trace[0]
+    mujoco.mj_forward(source, source_replay)
+
+    def contact_rows(model, data):
+        rows = []
+        for c in range(data.ncon):
+            con = data.contact[c]
+            a = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, int(con.geom1)) or str(con.geom1)
+            b = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, int(con.geom2)) or str(con.geom2)
+            rows.append({"geom1": a, "geom2": b, "dist": float(con.dist)})
+        return rows
+
+    body_thorax = mujoco.mj_name2id(target, mujoco.mjtObj.mjOBJ_BODY, "fly/c_thorax")
+    body_start_x = float(target_data.xpos[body_thorax, 0])
+    body_q_trace = np.empty((nstep + 1, target.nq), np.float64)
+    body_q_trace[0] = target_data.qpos
+    contact_start = {"flygym": contact_rows(source, source_replay),
+                     "body_v2": contact_rows(target, target_data)}
+    target_ctrl_base = target_data.ctrl.copy()
+    for name, ai in target_act_by_name.items():
+        if name not in source_act_by_name:
+            j = int(target.actuator_trnid[ai, 0])
+            if j < target.njnt and int(target.actuator_trntype[ai]) == int(mujoco.mjtTrn.mjTRN_JOINT):
+                target_ctrl_base[ai] = target_data.qpos[int(target.jnt_qposadr[j])]
+    source_to_target = [(source_act_by_name[n], target_act_by_name[n]) for n in common_acts]
+    first = None
+    max_d = 0.0
+    contact_after_first = None
+    for t in range(nstep):
+        source_replay.ctrl[:] = ctrl_trace[t]
+        mujoco.mj_step(source, source_replay)
+        target_data.ctrl[:] = target_ctrl_base
+        for si, ti in source_to_target:
+            target_data.ctrl[ti] = ctrl_trace[t, si]
+        mujoco.mj_step(target, target_data)
+        body_q_trace[t + 1] = target_data.qpos
+        if t == 0:
+            contact_after_first = {"flygym": contact_rows(source, source_replay),
+                                   "body_v2": contact_rows(target, target_data)}
+        for jn in common_joints:
+            si, ti = source_joint_by_name[jn], target_joint_by_name[jn]
+            qs, qt = int(source.jnt_qposadr[si]), int(target.jnt_qposadr[ti])
+            nq = qdim[int(source.jnt_type[si])]
+            src = q_trace[t + 1, qs:qs + nq]
+            dst = target_data.qpos[qt:qt + nq]
+            error = float(np.max(np.abs(src - dst)))
+            max_d = max(max_d, error)
+            if error > 1e-6 and first is None:
+                k = int(np.argmax(np.abs(src - dst)))
+                first = {"step": t + 1, "joint": jn, "component": k,
+                         "flygym_qpos": float(src[k]), "body_v2_qpos": float(dst[k]), "abs_error": error}
+    from flygym_demo.complex_terrain import HybridTurningController
+    from flygym_demo.complex_terrain.hybrid_controller import HybridControllerObservation
+
+    def turn_trial(signal):
+        turn_fly = make_locomotion_fly(name="smoke", add_adhesion=True, colorize=False)
+        turn_world = FlatGroundWorld()
+        turn_world.add_fly(turn_fly, [0, 0, 0.5], Rotation3D("quat", [1, 0, 0, 0]))
+        turn_sim = Simulation(turn_world)
+        turn_model, turn_data = turn_sim.mj_model, turn_sim.mj_data
+        turn_steps = PreprogrammedSteps()
+        turn_dofs = turn_fly.get_actuated_jointdofs_order("position")
+        turn_ctl = HybridTurningController(timestep=turn_sim.timestep,
+                                           preprogrammed_steps=turn_steps,
+                                           output_dof_order=turn_dofs)
+        turn_sim.reset()
+        apply_locomotion_action(turn_sim, turn_fly.name, LocomotionAction(
+            joint_angles=turn_steps.default_pose_by_dof_order(turn_dofs),
+            adhesion_onoff=np.ones(6, dtype=bool)))
+        turn_sim.warmup()
+        obs = HybridControllerObservation(thorax_z=0.0, tarsus5_z=np.zeros(6),
+                                          stumbling_contact_forces=np.zeros((6, 3, 3)),
+                                          fly_heading=np.array([1.0, 0.0, 0.0]))
+        tq, tv = turn_data.qpos.copy(), turn_data.qvel.copy()
+        replay = mujoco.MjData(target)
+        replay.qpos[:] = target.qpos0
+        replay.qvel[:] = 0
+        for jn, si in source_joint_by_name.items():
+            if jn not in target_joint_by_name:
+                continue
+            ti = target_joint_by_name[jn]
+            qs, qt = int(turn_model.jnt_qposadr[si]), int(target.jnt_qposadr[ti])
+            vs, vt = int(turn_model.jnt_dofadr[si]), int(target.jnt_dofadr[ti])
+            nq = qdim[int(turn_model.jnt_type[si])]
+            nv = 6 if int(turn_model.jnt_type[si]) == int(mujoco.mjtJoint.mjJNT_FREE) else 3 if int(turn_model.jnt_type[si]) == int(mujoco.mjtJoint.mjJNT_BALL) else 1
+            replay.qpos[qt:qt + nq] = tq[qs:qs + nq]
+            replay.qvel[vt:vt + nv] = tv[vs:vs + nv]
+        mujoco.mj_forward(target, replay)
+        base = replay.ctrl.copy()
+        for name, ai in target_act_by_name.items():
+            if name not in source_act_by_name:
+                jid = int(target.actuator_trnid[ai, 0])
+                if int(target.actuator_trntype[ai]) == int(mujoco.mjtTrn.mjTRN_JOINT):
+                    base[ai] = replay.qpos[int(target.jnt_qposadr[jid])]
+        src_root = mujoco.mj_name2id(turn_model, mujoco.mjtObj.mjOBJ_BODY, "smoke")
+        dst_root = mujoco.mj_name2id(target, mujoco.mjtObj.mjOBJ_BODY, "fly")
+        src_thorax = mujoco.mj_name2id(turn_model, mujoco.mjtObj.mjOBJ_BODY, "smoke/c_thorax")
+        dst_thorax = mujoco.mj_name2id(target, mujoco.mjtObj.mjOBJ_BODY, "fly/c_thorax")
+        def yaw_of(data, body):
+            mat = data.xmat[body].reshape(3, 3)
+            return float(np.arctan2(mat[1, 0], mat[0, 0]))
+        sy, ty = yaw_of(turn_data, src_root), yaw_of(replay, dst_root)
+        syaw = tyaw = 0.0
+        sx, tx = float(turn_data.xpos[src_thorax, 0]), float(replay.xpos[dst_thorax, 0])
+        for _ in range(nstep):
+            action = turn_ctl.step(np.asarray(signal, np.float64), obs)
+            apply_locomotion_action(turn_sim, turn_fly.name, action)
+            # apply_locomotion_action has set the exact ctrl vector for this tick.
+            for name, ti in target_act_by_name.items():
+                if name in source_act_by_name:
+                    replay.ctrl[ti] = turn_data.ctrl[source_act_by_name[name]]
+            mujoco.mj_step(target, replay)
+            turn_sim.step()
+            ns, nt = yaw_of(turn_data, src_root), yaw_of(replay, dst_root)
+            syaw += float(np.arctan2(np.sin(ns - sy), np.cos(ns - sy)))
+            tyaw += float(np.arctan2(np.sin(nt - ty), np.cos(nt - ty)))
+            sy, ty = ns, nt
+        return {"signal": list(signal), "flygym_yaw_rad": syaw, "body_v2_yaw_rad": tyaw,
+                "flygym_dx": float(turn_data.xpos[src_thorax, 0] - sx),
+                "body_v2_dx": float(replay.xpos[dst_thorax, 0] - tx)}
+
+    turns = [turn_trial((1.0, 1.0)), turn_trial((0.0, 0.0)),
+             turn_trial((1.0, -1.0)), turn_trial((-1.0, 1.0))]
+    body_thorax = mujoco.mj_name2id(target, mujoco.mjtObj.mjOBJ_BODY, "fly/c_thorax")
+    body_end_x = float(target_data.xpos[body_thorax, 0])
+    body_forward = body_end_x - body_start_x
+    body_root_joint = int(target.body_jntadr[int(target.body_rootid[body_thorax])])
+    body_root_qadr = int(target.jnt_qposadr[body_root_joint])
+    from scipy.spatial.transform import Rotation
+    root_quat = body_q_trace[:, body_root_qadr + 3:body_root_qadr + 7]
+    body_rot = Rotation.from_quat(np.column_stack((root_quat[:, 1:], root_quat[:, 0])))
+    body_tilt_trace = np.degrees(np.arccos(np.clip(body_rot.as_matrix()[:, 2, 2], -1, 1)))
+    body_tilt_max = float(np.max(body_tilt_trace))
+    np.savez_compressed(out / "flygym_rollout.npz", ctrl=ctrl_trace, qpos=q_trace,
+                        body_v2_qpos=body_q_trace,
+                        start_qpos=start_q, start_qvel=start_v,
+                        actuator_names=np.asarray([n or "" for n in source_act]),
+                        joint_names=np.asarray([n or "" for n in source_joints]))
+    receipt = {"flygym_forward_model_units": forward, "steps": nstep, "source_model": {
+        "nu": source.nu, "nq": source.nq, "njnt": source.njnt, "ngeom": source.ngeom, "npair": source.npair},
+        "target_model": {"nu": target.nu, "nq": target.nq, "njnt": target.njnt, "ngeom": target.ngeom, "npair": target.npair},
+        "common_actuators": len(common_acts), "common_joints": len(common_joints),
+        "first_divergence": first, "max_abs_qpos_error_over_rollout": max_d,
+        "body_v2_forward_displacement": body_forward, "body_v2_max_root_tilt_deg": body_tilt_max,
+        "opposite_turns": turns,
+        "active_contacts_start": contact_start, "active_contacts_after_first_step": contact_after_first}
+    (out / "replay.json").write_text(json.dumps(receipt, indent=2) + "\n")
+    if first:
+        print(f"FIRST DIVERGENCE step={first['step']} joint={first['joint']} component={first['component']} "
+              f"FlyGym={first['flygym_qpos']:.9g} body-v2={first['body_v2_qpos']:.9g} abs={first['abs_error']:.9g}")
+        print(f"BODY-V2 replay 1s forward displacement={body_forward:.6g} model units; "
+              f"max root tilt={body_tilt_max:.4g} deg; max abs qpos error={max_d:.6g}")
+    else:
+        print(f"No mapped qpos divergence > 1e-6 over {nstep} steps; max_abs={max_d:.9g}")
+    print(f"opposite-turn replay: {turns}")
+    print(f"model table: {out / 'model_diff.md'}; ctrl replay and receipt: {out}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("mjcf", type=Path, nargs="?", help="body-v2/body.xml")
@@ -147,7 +429,12 @@ def main() -> None:
     parser.add_argument("--check-export", type=Path, help="verify a prior export against the installed FlyGym oracle")
     parser.add_argument("--check-controller", action="store_true", help="compare mapped targets against HybridTurningController")
     parser.add_argument("--rollout", type=Path, help="one-second body-v2 MuJoCo morphology preflight")
+    parser.add_argument("--diagnose", type=Path, help="compare compiled FlyGym/body-v2 models and replay FlyGym CPG controls")
+    parser.add_argument("--out-dir", type=Path, default=Path(".work/team/status/flyloop-hooks/model-diff"))
     args = parser.parse_args()
+    if args.diagnose:
+        diagnose_models(args.diagnose, args.out_dir)
+        return
     if args.rollout:
         rollout(args.rollout)
         return
