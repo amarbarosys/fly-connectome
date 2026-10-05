@@ -12,6 +12,12 @@ brain link (-DBRAIN=1 or 2, docs/plans/SPIDER_BRAIN.md unit 1; BRAIN=0 compiles 
        ctrl, qpos, qvel, valid contact slots (OVALID.., NSLOT rows), each float32 [row][animal]. Frames (arg 10 = every n-th
        step, 0 = never) go to fd 4 instead of stdout. No target state anywhere in the packet.
 
+spectator (docs/plans/RENDERER.md; each flag compiles none of its block when 0): -DFOLLOW=1 follows the root bodies of DIR/roots.bin
+       (body, radius per root; spectate.follow, on the card, same formula as follow_camera.fit_camera) instead of the fixed camera;
+       -DHUD=1 draws the energy/health/stamina bars of animal 0 from DIR/game.bin (4 x F float32, [row][animal]); -DPROFILE=1 syncs
+       between phases and, with arg 12 = FILE, writes the root trace FILE (float32 frame, root, xyz) and prints one COST line
+       (ms per frame: physics, neural_control, render, copy, display; the syncs cost, the run is for the split, not for fps).
+
 usage: live DIR/ FRAMES ex ey ez tx ty tz fovy_deg [OUT]
        DIR holds the engine files (mi.bin, mf.bin, qpos.bin, qvel.bin, ctrl.bin) and the mesh tables (rmi.bin ...);
        FRAMES 0 = until the reader closes the pipe; OUT = a .rgba file gets frame FRAMES-1 instead of the stream
@@ -29,9 +35,13 @@ from std.time import perf_counter_ns
 from max.gpu.host import DeviceContext
 from layout import TileTensor
 import spider_brain as brain
+import spectate as spec
 
 comptime BRAIN = get_defined_int["BRAIN", 0]()
 comptime NVALID = eng.NSLOT
+comptime FOLLOW = get_defined_int["FOLLOW", 0]()
+comptime HUD = get_defined_int["HUD", 0]()
+comptime PROFILE = get_defined_int["PROFILE", 0]()
 
 
 def write_all(fd: Int, p: Pointer[UInt8, MutUntrackedOrigin], n: Int) -> Bool:
@@ -139,9 +149,28 @@ def main() raises:
     comptime if BRAIN == 2:
         var dr = eng.load(dir + "drive.bin", 2 * eng.F)
         ctx.enqueue_copy(drive_b, dr.unsafe_ptr().unsafe_bitcast[Float32]())
+    var kf = ctx.compile_function[spec.follow]()  # launched only when FOLLOW
+    var kh = ctx.compile_function[spec.hud]()  # launched only when HUD
+    var root_b = ctx.enqueue_create_buffer[DType.float32](2 * spec.NROOT)
+    var gs_b = ctx.enqueue_create_buffer[DType.float32](4 * eng.F)
+    var rs_h = List[Float32]()
+    comptime if FOLLOW > 0 or PROFILE > 0:
+        var rs = eng.load(dir + "roots.bin", 2 * spec.NROOT)
+        ctx.enqueue_copy(root_b, rs.unsafe_ptr().unsafe_bitcast[Float32]())
+        for k in range(2 * spec.NROOT):
+            rs_h.append(rs.unsafe_ptr().unsafe_bitcast[Float32]()[k])
+    comptime if HUD > 0:
+        var gs = eng.load(dir + "game.bin", 4 * eng.F)
+        ctx.enqueue_copy(gs_b, gs.unsafe_ptr().unsafe_bitcast[Float32]())
+    var troot = TileTensor(root_b, spec.LROOT)
+    var tgs = TileTensor(gs_b, spec.LGS)
+    var pose_h = ctx.enqueue_create_host_buffer[DType.float32](ren.PROWS * ren.F)  # PROFILE: the root trace reads xpos from here
+    var trace = List[Float32]()
+    var ms = InlineArray[Float64, 5](fill=0)  # PROFILE: neural_control, physics, render, copy, display
     var t0 = perf_counter_ns()
     var fr = 0
     while frames == 0 or fr < frames:
+        var tp = perf_counter_ns()
         comptime if BRAIN == 1:
             if not read_all(0, ctrl_h.unsafe_ptr().unsafe_bitcast[UInt8](), max(eng.NU, 1) * eng.F * 4):
                 return  # brain gone
@@ -149,13 +178,29 @@ def main() raises:
         elif BRAIN == 2:
             ctx.enqueue_function(kb, TileTensor(u_b, eng.LU), TileTensor(drive_b, brain.LD), Float32(fr * max(eng.K, 1)) * Float32(1e-4),
                 grid_dim=(eng.NU * eng.F + 63) // 64, block_dim=64)
+        comptime if PROFILE > 0:
+            ctx.synchronize()
+            ms[0] += Float64(perf_counter_ns() - tp)
+            tp = perf_counter_ns()
         ctx.enqueue_function(step, TileTensor(mi_b, eng.LI), TileTensor(mf_b, eng.LF), TileTensor(q_b, eng.LQ), TileTensor(v_b, eng.LV),
             TileTensor(u_b, eng.LU), TileTensor(o_b, eng.LO), grid_dim=eng.GRID, block_dim=eng.BLOCK)
+        comptime if PROFILE > 0:
+            ctx.synchronize()
+            ms[1] += Float64(perf_counter_ns() - tp)
+            tp = perf_counter_ns()
         var draw = render_every > 0 and fr % render_every == 0 if BRAIN > 0 else True
         if draw:
+            comptime if FOLLOW > 0:
+                ctx.enqueue_function(kf, tcam, tpose, troot, grid_dim=1, block_dim=1)
             ctx.enqueue_function(kc, vis, grid_dim=(ren.W * ren.H + 255) // 256, block_dim=256)
             ctx.enqueue_function(kr, vis, tpi, tpf, trv, trt, trp, tpose, tcam, grid_dim=(ren.F * ren.NTRI + 255) // 256, block_dim=256)
             ctx.enqueue_function(ks, vis, img, tpi, tpf, trv, trt, trp, tpose, tcam, grid_dim=(ren.W * ren.H + 255) // 256, block_dim=256)
+            comptime if HUD > 0:
+                ctx.enqueue_function(kh, img, tgs, grid_dim=(spec.PANEL_W * spec.PANEL_H + 63) // 64, block_dim=64)
+            comptime if PROFILE > 0:
+                ctx.synchronize()
+                ms[2] += Float64(perf_counter_ns() - tp)
+                tp = perf_counter_ns()
             ctx.enqueue_copy(out_h, img_b)
         var send = False
         comptime if BRAIN > 0:
@@ -167,6 +212,17 @@ def main() raises:
                 comptime if NVALID > 0:
                     ctx.enqueue_copy(pkt_s, o_b.create_sub_buffer[DType.float32](eng.OVALID * eng.F, NVALID * eng.F))
         ctx.synchronize()
+        comptime if PROFILE > 0:
+            ms[3] += Float64(perf_counter_ns() - tp)
+            tp = perf_counter_ns()
+            if len(a) > 12:  # outside the timed phases: the root rows of this frame, read back
+                ctx.enqueue_copy(pose_h, o_b.create_sub_buffer[DType.float32](0, ren.PROWS * ren.F))
+                ctx.synchronize()
+                for r in range(spec.NROOT):
+                    var b = Int(rs_h[2 * r]) - 1
+                    for c in range(3):
+                        trace.append(pose_h[(3 * b + c) * ren.F])
+                tp = perf_counter_ns()
         fr += 1
         if to_file:
             continue
@@ -180,9 +236,17 @@ def main() raises:
         if draw:
             if not write_all(4 if BRAIN > 0 else 1, out_h.unsafe_ptr().unsafe_bitcast[UInt8](), ren.W * ren.H * 4):
                 return  # reader gone
+        comptime if PROFILE > 0:
+            ms[4] += Float64(perf_counter_ns() - tp)
         if fr % 100 == 0:
             var ms = Float64(perf_counter_ns() - t0) / Float64(fr) / 1e6
             print(fr, "frames,", ms, "ms per frame,", Float64(fr * max(eng.K, 1)) * 0.1, "ms simulated", file=stderr)
+    comptime if PROFILE > 0:
+        var per = 1e-6 / Float64(max(fr, 1))
+        print("COST physics", ms[1] * per, "neural_control", ms[0] * per, "render", ms[2] * per, "copy", ms[3] * per, "display", ms[4] * per, "frames", fr, file=stderr)
+        if len(a) > 12:
+            with open(String(a[12]), "w") as file:
+                file.write_bytes(Span(unsafe_ptr=trace.unsafe_ptr().unsafe_bitcast[UInt8](), length=len(trace) * 4))
     if to_file:
         with open(String(a[10]), "w") as file:
             file.write_bytes(Span(unsafe_ptr=out_h.unsafe_ptr().unsafe_bitcast[UInt8](), length=ren.W * ren.H * 4))

@@ -225,6 +225,18 @@ if [ "$stage" = spiderlink ]; then  # brain<->body link on the spider (docs/plan
   [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
   echo "PASS all spiderlink checks"; exit 0
 fi
+if [ "$stage" = spectate ]; then  # spectator hooks in live.mojo (docs/plans/RENDERER.md, -DFOLLOW=1 -DHUD=1): camera follows the walking spider, HUD bars show the
+  # state buffer, hooks off changes no byte, frame cost split + leak receipt through spectator_integration_check.py. Mutants: camera target offset,
+  # HUD fill off by one pixel, the follow hook compiled in by default (the hooks-off frame must differ from the pre-hook live.mojo)
+  S="$M -m agent.body_engine.spectate_check"
+  $M agent/body_engine/spectator_check.py || { echo "FAIL spectator_check"; fail=$((fail+1)); }
+  $S check || { echo "FAIL spectate"; fail=$((fail+1)); }
+  ~/iTools/bin/mutant-check agent/body_engine/spectate.mojo 's|tx /= Float32(NROOT)|tx = tx / Float32(NROOT) + 30.0|' -- $S clip || fail=$((fail+1))
+  ~/iTools/bin/mutant-check agent/body_engine/spectate.mojo 's|Float32(x - BAR_X) + 0.5 < fill.width|Float32(x - BAR_X) + 1.5 < fill.width|' -- $S hud || fail=$((fail+1))
+  ~/iTools/bin/mutant-check agent/body_engine/live.mojo 's|get_defined_int\["FOLLOW", 0\]|get_defined_int["FOLLOW", 1]|' -- $S off || fail=$((fail+1))
+  [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
+  echo "PASS all spectate checks"; exit 0
+fi
 if [ "$stage" = fluid ]; then  # Flybody flight model: mj_fluid (ellipsoid wings + inertia boxes) inside qfrc_passive, wing velocities up to flapping rate
   R=~/Projects/science/fly-connectome; FL=${FLIGHT:-$R/.work/flight-body}
   [ -f $FL/flight.xml ] || $R/.work/neural-flies/flight-venv/bin/python agent/body_engine/models/flight_export.py $FL
