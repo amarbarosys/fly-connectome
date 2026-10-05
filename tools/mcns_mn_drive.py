@@ -2,8 +2,8 @@
 tools/mcns_mn_rhythm.py); the leg motor neurons, read per side, replace the descending-neuron readout as the two drives
 the gait mapping takes. This step learns that readout and checks it on held-out conditions.
 
-Conditions (one column each, one launch): forward DNs at 50/100/150/200 Hz x turn {none, left, right}, a turn = that
-side's forward DNs at +100 Hz.
+Conditions (one column each, one launch, 2 s): forward DNs at 50-200 Hz (6 levels), symmetric or a turn = one side's
+forward DNs at +50 or +100 Hz (30 conditions; the 12-condition first version gave R^2 0.705 / 0.830 on two runs).
 Per 100 ms window after a 200 ms onset: teacher = the commanded drive per side (forward rate / 150, plus 0.5 on the
 turning side); input = the leg MN counts per side. (The DN spike readout as teacher was tried first: the 4 turning DNs
 vanish in the 784 forward DNs' sum, asymmetry +-0.04, held-out R^2 -81.)
@@ -21,8 +21,9 @@ from agent import mcns, shiu_g1
 from agent.mcns_mapping import descending_name_sets, leg_motor_groups
 from agent.shiu import ShiuGPU
 
-FWD, TURN = (50, 100, 150, 200), (None, 'left', 'right')
-COND = [(f, t) for f in FWD for t in TURN]
+FWD, TURN = (50, 80, 110, 140, 170, 200), (None, 'left', 'right')
+DT = (50, 100)  # turn sizes: that side's forward DNs + DT Hz
+COND = [(f, None, 0) for f in FWD] + [(f, t, d) for f in FWD for t in TURN[1:] for d in DT]  # 30 conditions
 data = mcns.graph()
 graph = next(shiu_g1.arms(data, 'mcns'))[1]
 n = data[4][0]
@@ -31,23 +32,23 @@ mg, _ = leg_motor_groups()
 mn = {s: np.concatenate([mg[k] for k in mg if k.endswith('_' + s)]) for s in 'LR'}
 dns = {'L': np.r_[dn['forward_left'], dn['turn_left']], 'R': np.r_[dn['forward_right'], dn['turn_right']]}
 brain = ShiuGPU(*graph, n=n, flies=len(COND), seed=7)
-for c, (f, t) in enumerate(COND):
+for c, (f, t, d) in enumerate(COND):
     brain.stimulate(dn['forward'], f, fly=c)
     if t:  # turn = one side's forward DNs 100 Hz harder (DNa01/02 at 150 Hz moved MN sides by noise only: 1911/1611 L vs 1917/1574 R)
-        brain.stimulate(dn['forward_' + t], f + 100, fly=c)
+        brain.stimulate(dn['forward_' + t], f + d, fly=c)
 cells = np.r_[mn['L'], mn['R'], dns['L'], dns['R']]
 nl, nr, dl = len(mn['L']), len(mn['R']), len(dns['L'])
 readout = np.concatenate([c * n + cells for c in range(len(COND))]).astype(np.int32)
-win = np.arange(2000, 10001, 1000)  # 200 ms onset, then 100 ms windows
+win = np.arange(2000, 20001, 1000)  # 200 ms onset, then 18 windows of 100 ms (540 samples for 381 MNs)
 cg = np.full(n, -1, np.int32); cg[cells] = 0
 _, got = brain.run_groups(win, cg, readout)
 x = np.diff(got.astype(np.int64), axis=0).reshape(len(win) - 1, len(COND), len(cells))  # (8 windows, conditions, cells)
 mnL, mnR = x[..., :nl], x[..., nl:nl + nr]
 dnL, dnR = x[..., nl + nr:nl + nr + dl].sum(-1), x[..., nl + nr + dl:].sum(-1)
-ref = COND.index((150, None))
-cmd = np.array([[f / 150 + 0.5 * (t == 'left'), f / 150 + 0.5 * (t == 'right')] for f, t in COND])
+ref = COND.index((140, None, 0))
+cmd = np.array([[f / 140 + d / 200 * (t == 'left'), f / 140 + d / 200 * (t == 'right')] for f, t, d in COND])
 drive = np.broadcast_to(cmd, (len(win) - 1, *cmd.shape)).astype(float)  # (w, c, 2) teacher
-side = {f'{f}Hz {t}': [int(mnL[:, i].sum()), int(mnR[:, i].sum())] for i, (f, t) in enumerate(COND)}  # MN spikes L, R
+side = {f'{f}Hz {t} {d}': [int(mnL[:, i].sum()), int(mnR[:, i].sum())] for i, (f, t, d) in enumerate(COND)}  # MN spikes L, R
 
 
 def fit_eval(xl, xr, lam=10.0):
@@ -70,8 +71,8 @@ def r2(p):
 
 
 p = fit_eval(mnL, mnR)
-signs = {f'{f}Hz {t}': bool(np.sign((p[:, i, 0] - p[:, i, 1]).mean()) == (1 if t == 'left' else -1))
-         for i, (f, t) in enumerate(COND) if t}
+signs = {f'{f}Hz {t} +{d}': bool(np.sign((p[:, i, 0] - p[:, i, 1]).mean()) == (1 if t == 'left' else -1))
+         for i, (f, t, d) in enumerate(COND) if t}
 allmn = np.concatenate([mnL, mnR], -1)
 # mutant: the teacher's conditions permuted (a random-side MN split is no control: signed ridge weights on a mixed half
 # still read the asymmetry, R^2 0.81), so a fit that only overfits 190 MNs on 96 samples fails it
