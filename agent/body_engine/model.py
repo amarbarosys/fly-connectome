@@ -66,6 +66,7 @@ VSCALE = float(os.environ.get('VSCALE', 10))  # random qvel in +-VSCALE per dof 
 REL = float(os.environ.get('REL', 1e-5))  # check.sh sets a measured bar for `arena` (3e-3) and `terrain_exact` (4e-4), reasons there
 EQ_EULER_BAR = 1e-4  # equality stage, qacc_euler only: see check()
 FLOOR_X = 3  # contact stage: bar = max(REL, 3 x the field's float32 input floor), see check()
+FLOOR_X_CONE = 15  # elliptic cone: the converged nonlinear cone solve amplifies float32 rounding of D, J and jar: measured 4e-5 (noslip 0) and 5.3e-5 (noslip 5) on qfrc_constraint, floor 4.3e-6
 WORLD_FIRST = ('xpos', 'xquat', 'xipos', 'cinert', 'crb', 'cvel')  # body-indexed fields whose row 0 is the world
 ENGINE = Path(__file__).parent
 
@@ -176,6 +177,20 @@ def airborne_mjcf(mjcf, spring=(2.0, 0.3, -0.04, 0.04)):
     for t in root.iter('fixed'):
         t.set('stiffness', str(spring[0])); t.set('damping', str(spring[1])); t.set('springlength', f'{spring[2]} {spring[3]}')
     out = Path(mjcf).with_name('airborne.xml')
+    tree.write(out)
+    return str(out)
+
+
+def elliptic(mjcf, noslip=0):
+    """The fly MJCF with the elliptic friction cone, noslip_iterations = noslip and solver tolerance 0 (the walking fly ships
+    pyramidal, noslip 5, tolerance 1e-8): the gate of the elliptic Newton port, same pairs and states. The cone solve is
+    nonlinear, so MuJoCo's own stop at tolerance 1e-8 leaves ~1e-4 of force error; tolerance 0 runs it to convergence and
+    that is what the engine is compared with. Written next to mjcf as elliptic<noslip>.xml; returns the path."""
+    import xml.etree.ElementTree as ET
+    tree = ET.parse(mjcf)
+    opt = tree.getroot().find('option') if tree.getroot().find('option') is not None else ET.SubElement(tree.getroot(), 'option')
+    opt.set('cone', 'elliptic'); opt.set('noslip_iterations', str(noslip)); opt.set('tolerance', '0')
+    out = Path(mjcf).with_name(f'elliptic{noslip}.xml')
     tree.write(out)
     return str(out)
 
@@ -292,6 +307,8 @@ def load(mjcf):
             or m.dof_dampingpoly.any() or m.jnt_stiffnesspoly.any() or m.opt.disableflags):
         raise SystemExit('FAIL export: only Euler/implicitfast, linear joint springs and dof dampers are ported (no flex, '
                          'actuator damping, polynomial springs or dampers, disable flags)')
+    if m.opt.cone == mujoco.mjtCone.mjCONE_ELLIPTIC and m.opt.integrator != mujoco.mjtIntegrator.mjINT_EULER:
+        raise SystemExit('FAIL export: the elliptic cone is gated with the Euler integrator only (check.sh cone), not RK4 or implicitfast')
     if m.tendon_limited.any() or m.tendon_frictionloss.any() \
             or m.tendon_stiffnesspoly.any() or m.tendon_dampingpoly.any() or m.tendon_actfrclimited.any():
         raise SystemExit('FAIL export: only unlimited tendons without friction loss, with linear spring and damper, are ported')
@@ -438,8 +455,11 @@ def feet(m, regex, couple=(), hrows=None, convex=False, hfexact=False):
     floats per pair: margin, gap, friction 0-1, solref 2, solimp 5, invweight0 translation (both bodies), rbound of
            geom2 and geom1 (14); then hull vertices in the geom frame; then opt.impratio, opt.tolerance, opt.ls_tolerance, opt.noslip_tolerance, stat.meaninertia
     """
-    if m.opt.cone != mujoco.mjtCone.mjCONE_PYRAMIDAL or (m.geom_contype & m.geom_conaffinity).any():
-        raise SystemExit('FAIL export: contacts need the pyramidal cone and explicit pairs only')
+    elliptic = m.opt.cone == mujoco.mjtCone.mjCONE_ELLIPTIC
+    if elliptic and (convex or hfexact):
+        raise SystemExit('FAIL export: the elliptic cone is gated on plane-mesh pairs only (check.sh cone), not convex or exact-heightfield pairs')
+    if (m.geom_contype & m.geom_conaffinity).any():
+        raise SystemExit('FAIL export: contacts need explicit pairs only')
     sel, drop = pairs(m, regex, convex)
     if drop:
         print(f'export: {sum(drop.values())} pairs of unported kinds NOT exported: {dict(drop)}')
@@ -506,6 +526,8 @@ def feet(m, regex, couple=(), hrows=None, convex=False, hfexact=False):
     sizes = {'NCP': len(sel), 'NHV': len(verts) // 3, 'NHE': len(edges), 'NCH': len(chains), 'NH': len(hcol), 'NSLOT': nslot + npool, 'NJE': nje + jpool}
     if npool:
         sizes |= {'NPOOL': npool, 'JPOOL': jpool}
+    if elliptic:
+        sizes['ELLIPTIC'] = 1
     hf = sorted({m.pair_geom1[i] for i in sel if m.geom_type[m.pair_geom1[i]] == mujoco.mjtGeom.mjGEOM_HFIELD})
     if hf:  # terrain: the heightfield is MuJoCo's sample; the engine evaluates world.py's function from its 8 params
         t = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_NUMERIC, 'terrain')
@@ -867,6 +889,7 @@ def check(mjcf, out, stage, count=64, k=0, oracle=None):
     hfexact = bool(os.environ.get('HFEXACT'))  # exact heightfield contact (GJK + EPA per cell prism) instead of the tangent plane
     convex = bool(os.environ.get('CONVEX'))  # box and ellipsoid vs mesh pairs too (GJK + EPA), states moved into the arena's walls and stones
     feet = stage in ('contact', 'actuated', 'sptendon_act') or (stage == 'equality' and bool(load(mjcf).npair))  # equality + contacts: the contact path
+    fx = FLOOR_X_CONE if load(mjcf).opt.cone == mujoco.mjtCone.mjCONE_ELLIPTIC else FLOOR_X
     m, out = export(mjcf, out, FEET if feet else None, stage in ('actuated', 'sptendon_act'), convex, hfexact), Path(out)
     number, fn, fields = STAGES[stage]
     near = stage in ('equality', 'mocap') and os.environ.get('EQSPREAD') != 'far'
@@ -922,7 +945,7 @@ def check(mjcf, out, stage, count=64, k=0, oracle=None):
             nconv[n] = sum(c.efc_address >= 0 and s.geom_type[c.geom1] in (mujoco.mjtGeom.mjGEOM_BOX, mujoco.mjtGeom.mjGEOM_ELLIPSOID) for c in d.contact[:d.ncon])
             jar = np.zeros(d.nefc)
             mujoco.mj_mulJacVec(s, d, jar, d.qacc)
-            switch[n] = (np.abs(jar - d.efc_aref)[d.ne:].min() / max(np.abs(d.efc_aref).max(), 1e-30)) if d.nefc > d.ne else 1.0  # equality rows never switch
+            switch[n] = (np.abs(jar - d.efc_aref)[d.ne:].min() / max(np.abs(d.efc_aref).max(), 1e-30)) if d.nefc > d.ne and fx == FLOOR_X else 1.0  # equality rows never switch; pyramidal rows only: a cone has no row to switch
             for i in live:
                 g1, g2 = s.pair_geom1[i], s.pair_geom2[i]
                 a, c = s.mesh_vertadr[s.geom_dataid[g2]], s.mesh_vertnum[s.geom_dataid[g2]]
@@ -1021,8 +1044,8 @@ def check(mjcf, out, stage, count=64, k=0, oracle=None):
         # |jar| 1.8e-5 of scale, force error 2.4e-4 along that row's direction). Those states skip qfrc_constraint only.
         i = fields.index('qfrc_constraint')
         w = want['qfrc_constraint'].reshape(count, -1)
-        over = np.abs(got[i] - w).max(1) / max(np.abs(w).max(), 1e-30) > max(REL, FLOOR_X * floor.get('qfrc_constraint', 0))
-        flip = (switch < max(REL, FLOOR_X * floor.get('qacc', 0))) & over  # only states the bar would fail count
+        over = np.abs(got[i] - w).max(1) / max(np.abs(w).max(), 1e-30) > max(REL, fx * floor.get('qfrc_constraint', 0))
+        flip = (switch < max(REL, fx * floor.get('qacc', 0))) & over  # only states the bar would fail count
         print(f'{"PASS" if flip.mean() <= 0.1 else "FAIL"} active-set ambiguous states over the bar {int(flip.sum())}/{count} '
               f'(qfrc_constraint not compared there; at most 10 %)')
         bad += ['active-set'] if flip.mean() > 0.1 else []
@@ -1030,11 +1053,11 @@ def check(mjcf, out, stage, count=64, k=0, oracle=None):
         want['qfrc_constraint'] = want['qfrc_constraint'].reshape(count, -1)[~flip]
         got[i] = got[i][~flip]
     skip = STALE_RK4 if m.opt.integrator == mujoco.mjtIntegrator.mjINT_RK4 else ()
-    bad += [b for f, g in zip(fields, got) if f not in skip for b in compare({f: (want[f].reshape(len(g), -1), g)}, max(REL, FLOOR_X * floor.get(f, 0)))]
+    bad += [b for f, g in zip(fields, got) if f not in skip for b in compare({f: (want[f].reshape(len(g), -1), g)}, max(REL, fx * floor.get(f, 0)))]
     if bad:
         print(f'FAIL {len(bad)}/{len(fields)} {stage} fields: {" ".join(bad)}')
         sys.exit(1)
-    lifted = ', '.join(f'{f} {FLOOR_X * e:.1e}' for f, e in floor.items() if FLOOR_X * e > REL)
+    lifted = ', '.join(f'{f} {fx * e:.1e}' for f, e in floor.items() if fx * e > REL)
     print(f'PASS {stage}' + (f' K={k}' if k else '') + f': {len(fields)} fields x {count} states within {REL:g}' + (f' (float32-floor bars: {lifted})' if lifted else ''))
 
 

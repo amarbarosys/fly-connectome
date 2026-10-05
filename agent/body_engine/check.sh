@@ -321,6 +321,27 @@ if [ "$stage" = rk4 ]; then  # RK4 (mj_RungeKutta) vs MuJoCo with opt.integrator
   [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
   echo "PASS all rk4 checks"; exit 0
 fi
+if [ "$stage" = cone ]; then  # elliptic friction cone on the walking fly: Newton (noslip 0) and Newton + noslip 5 (QCQP over the friction ellipse), MuJoCo run to convergence
+  for ns in 0 5; do
+    E=$($M -c "from agent.body_engine.model import elliptic; print(elliptic('.work/agent/gpu-body-port/body-v2/body.xml', $ns))")
+    $M -m agent.body_engine.model check $E $X/elliptic$ns actuated 64 || { echo "FAIL elliptic cone noslip $ns"; fail=$((fail+1)); }
+  done
+  E0=$($M -c "from agent.body_engine.model import elliptic; print(elliptic('.work/agent/gpu-body-port/body-v2/body.xml', 0))")
+  E5=$($M -c "from agent.body_engine.model import elliptic; print(elliptic('.work/agent/gpu-body-port/body-v2/body.xml', 5))")
+  # Newton mutants (noslip 0): cone force tangent sign, Dm without (1 + mu^2), line-search slope sign, top-zone bound doubled
+  for mut in 's/force = V3(f0, -f0 \/ T \* U\[1\] \* fr\[1\], -f0 \/ T \* U\[2\] \* fr\[2\], 0)/force = V3(f0, f0 \/ T * U[1] * fr[1], f0 \/ T * U[2] * fr[2], 0)/' \
+             's/(mu \* mu \* (1 + mu \* mu))/(mu * mu)/' 's/e0 += Dm \* (N - mu \* T) \* (N1 - mu \* T1)/e0 -= Dm * (N - mu * T) * (N1 - mu * T1)/' \
+             's/if N >= mu \* T or (T <= 0 and N >= 0):/if N >= 2 * mu * T or (T <= 0 and N >= 0):/'; do
+    ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo "$mut" -- $M -m agent.body_engine.model check $E0 $X/mutant actuated 64 || fail=$((fail+1))
+  done
+  # noslip mutants (noslip 5): QCQP residual cross term sign (tangent axes share mu, so an axis swap is an equivalent mutant), dual-finish sign, friction update dropped
+  for mut in 's/res0 - (a00 \* o1 + a01 \* o2)/res0 - (a00 * o1 - a01 * o2)/' 's/var df = get(res, f, OFRN + row) - get(res, f, OFRC + row)/var df = get(res, f, OFRN + row) + get(res, f, OFRC + row)/' \
+             's/res\[(OFRN + r + 1) \* F + f\] = n\[0\]/res[(OFRN + r + 1) * F + f] = o1/'; do
+    ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo "$mut" -- $M -m agent.body_engine.model check $E5 $X/mutant actuated 64 || fail=$((fail+1))
+  done
+  [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
+  echo "PASS all cone checks"; exit 0
+fi
 B=${BODY:-.work/agent/gpu-body-port/body-v2/body.xml}  # BODY=path checks another MJCF (e.g. the spider from models/spider.py)
 $M -m agent.body_engine.model check $B $X/body-$(basename $B .xml) "$stage" 64 || { echo "FAIL $(basename $B .xml) $stage"; fail=$((fail+1)); }
 if [ "$stage" = contact ] || [ "$stage" = actuated ]; then  # plane-mesh foot pairs; the spider test body has none

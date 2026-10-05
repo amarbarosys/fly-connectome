@@ -49,7 +49,7 @@ comptime DUMP = get_defined_int["DUMP", 0]() == 1  # diagnostics (row_diag.py): 
 comptime STOP = get_defined_int["STOP", 99]()
 comptime INTEGRATOR = get_defined_int["INTEGRATOR", 0]()  # opt.integrator: 0 Euler, 1 RK4, 3 implicitfast (model.py export; absent = Euler)
 comptime K = get_defined_int["K", 0]()  # K > 0 (STAGE >= 5): K steps per launch, qpos/qvel written back in place
-comptime STEPTOL = Float32(get_defined_int["STEPTOL_E7", 10]()) * 1e-7  # Newton stops when a step moves qacc less than this
+comptime STEPTOL = Float32(get_defined_int["STEPTOL_E7", 1 if get_defined_int["ELLIPTIC", 0]() == 1 else 10]()) * 1e-7  # Newton stops when a step moves qacc less than this
 comptime LSFLOOR = Float32(get_defined_int["LSFLOOR_E7", 10]()) * 1e-7  # line-search slope floor, relative to alpha = 0  # phase timing (phases.sh): return after phase STOP
 # mi.bin: body_parentid, body_jntadr, body_jntnum, jnt_type, jnt_qposadr, geom_bodyid
 comptime PARENT = 0
@@ -192,11 +192,13 @@ comptime OCACC = NOUTX  # scratch rows after the output: cacc, cfrc_body per bod
 comptime OCFRC = OCACC + 6 * NB
 comptime NSLOT = get_defined_int["NSLOT", 0]()  # contact slots: 3 per plane-mesh pair (MuJoCo maxplanemesh), 1 per sphere pair
 comptime NJE = get_defined_int["NJE", 0]()  # Jacobian entries: 4 rows x slots x chain length, summed over pairs
+comptime ELL = get_defined_int["ELLIPTIC", 0]() == 1  # model.py feet(): opt.cone elliptic (3 rows per contact, normal then 2 friction), else pyramidal
+comptime NR = 3 if ELL else 4  # rows used per contact slot (the arrays keep a stride of 4)
 comptime NPOOL = get_defined_int["NPOOL", 0]()  # NCV: slots shared by the convex and exact-heightfield pairs of one animal (the last NPOOL of NSLOT); each such pair takes what it needs per step
 comptime JPOOL = get_defined_int["JPOOL", 0]()  # their Jacobian entries (the last JPOOL of NJE), bump-allocated per step
 comptime NSTATIC = NSLOT - NPOOL
 comptime JSTATIC = NJE - JPOOL
-comptime NEFC = 4 * NSLOT  # pyramidal condim 3: 4 rows per contact
+comptime NEFC = 4 * NSLOT  # condim 3: 4 pyramid rows or 3 elliptic rows per contact
 comptime OFLW = OCFRC + 6 * NB  # NFLUID scratch: fluid wrench per body about its root's subtree_com
 comptime OVALID = OFLW + (6 * NB if NFLUID else 0)  # STAGE 6 scratch: slot valid, per row D aref jar jv state, J rows, solver vectors, H
 comptime OD = OVALID + NSLOT
@@ -215,13 +217,14 @@ comptime OHN = OMV + NV
 comptime OHNI = OHN + NH
 comptime ODIAG = OHNI + NV  # Newton iterations, line-search evaluations (printed by main)
 comptime OFRC = ODIAG + 3  # Newton diagnostics, then noslip scratch
-comptime OZ = OFRC + NEFC
+comptime OFRN = OFRC + NEFC  # elliptic noslip: the new friction forces (OFRC keeps Newton's)
+comptime OZ = OFRN + (NEFC if ELL else 0)
 comptime OW = OZ + NV
 comptime OWC = OW + 2 * NV  # noslip per step: w of every valid row (laid out as J), then per row pair A 00 01 11, base 0 1
 comptime OAC = OWC + NJE
 comptime OACT = OAC + 10 * NSLOT  # valid slots: count, then their ids ascending (row loops skip the ~95 % empty)
 comptime OPART = OACT + 1 + NSLOT  # WAVE: per-lane partial sums, 3 x LN
-comptime OWARM = OPART + 3 * LN  # K > 0: last step's qacc (MuJoCo qacc_warmstart), persists across launches
+comptime OWARM = OPART + (6 if ELL else 3) * LN  # K > 0: last step's qacc (MuJoCo qacc_warmstart), persists across launches
 comptime OPA = OWARM + NV  # active pairs (some valid slot) of this step: count, then ids ascending: the solver loops visit these only
 comptime OSD = OPA + 1 + NCP  # NCV: per pair this step's slot base, slot count and Jacobian base (pooled pairs only)
 comptime OPP = OSD + 3 * NCP  # NCV: pool slots and pool Jacobian entries taken so far this step
@@ -621,7 +624,7 @@ comptime MINVAL: Float32 = 1e-15
 
 @always_inline
 def acosp(x: Float32) -> Float32:
-    """acos on [-1, 1] (amdgpu has no acosf): atan2(sqrt((1 - x)(1 + x)), x)."""
+    """Acos on [-1, 1] (amdgpu has no acosf): atan2(sqrt((1 - x)(1 + x)), x)."""
     var c = min(max(x, Float32(-1)), Float32(1))
     return atan2p(sqrt((1 - c) * (1 + c)), c)
 
@@ -635,7 +638,7 @@ def asinp(x: Float32) -> Float32:
 
 @always_inline
 def is_intersect(e: P4, sl: P4) -> Bool:
-    """mju_wrap's is_intersect (engine_util_misc.c:34): do the segments end0-sol0 and end1-sol1 cross; e and sl hold (x0, y0, x1, y1)."""
+    """The mju_wrap is_intersect (engine_util_misc.c:34): do the segments end0-sol0 and end1-sol1 cross; e and sl hold (x0, y0, x1, y1)."""
     var det = (sl[3] - e[3]) * (sl[0] - e[0]) - (sl[2] - e[2]) * (sl[1] - e[1])
     if abs(det) < MINVAL:
         return False
@@ -716,7 +719,7 @@ comptime D4 = SIMD[DType.float64, 4]
 
 @always_inline
 def atan2d(y: Float64, x: Float64) -> Float64:
-    """atan2 for y >= 0 in float64 (atan2p's reduction, 2 half-angle steps, Taylor to z^9: error ~1e-15)."""
+    """Atan2 for y >= 0 in float64 (atan2p's reduction, 2 half-angle steps, Taylor to z^9: error ~1e-15)."""
     var r = sqrt(x * x + y * y)
     if r + x <= 0:
         return 3.14159265358979323846 if r > 0 else 0.0
@@ -1197,14 +1200,15 @@ def terrain(mf: TF) -> PW:
 
 @always_inline
 def emit_contact(mi: TI, mf: TF, qvel: TV, res: TO, f: Int, p: Int, count: Int, cpos: V3, dist: Float32, normal: V3, y: V3, z: V3, com: V3):
-    """The rest of mj_instantiateContact for contact `count` of pair p at cpos with the frame (normal, y, z): the pyramidal
-    Jacobian rows over the pair's dof chain, getsolparam / getimpedance / makeImpedance, referenceConstraint."""
+    """The rest of mj_instantiateContact for contact `count` of pair p at cpos with the frame (normal, y, z): the pyramidal or
+    elliptic Jacobian rows over the pair's dof chain, getsolparam / getimpedance / makeImpedance, referenceConstraint."""
     var h = mf[TSTEP]
     var impratio = mf[COPT]
     var nch = Int(mi[CPH + 11 * p + 6]); var choff = Int(mi[CPH + 11 * p + 7])
     var pf = CPF + 14 * p
     var margin = mf[pf]; var gap = mf[pf + 1]; var f0 = mf[pf + 2]; var f1 = mf[pf + 3]
     var slot = sbase(mi, res, f, p) + count
+    res[(OVALID + slot) * F + f] = Float32(p + 1) if ELL else Float32(1)  # elliptic: the pair index + 1, for the cone's mu and friction
     # mj_jacDifPair over the chain: jacp = cdof_lin + cdof_ang x (pos - subtree_com[root]), signed (geom2's body
     # minus geom1's; a dof of both cancels exactly); rows to the contact frame
     var off = cpos - com
@@ -1214,30 +1218,47 @@ def emit_contact(mi: TI, mf: TF, qvel: TV, res: TO, f: Int, p: Int, count: Int, 
         var jp = (V3(get(res, f, cd + 3), get(res, f, cd + 4), get(res, f, cd + 5), 0) + cross(ang, off)) * Float32(mi[CSIGN + choff + c])
         var jn = (normal * jp).reduce_add(); var j1 = (y * jp).reduce_add(); var j2 = (z * jp).reduce_add()
         var jadr = OJ + jbase(mi, res, f, p) + 4 * count * nch + c
-        res[jadr * F + f] = jn + f0 * j1
-        res[(jadr + nch) * F + f] = jn - f0 * j1
-        res[(jadr + 2 * nch) * F + f] = jn + f1 * j2
-        res[(jadr + 3 * nch) * F + f] = jn - f1 * j2
-    # getsolparam, getimpedance, makeImpedance (pyramidal), referenceConstraint
+        comptime if ELL:  # mj_instantiateContact elliptic: the contact-frame rows themselves
+            res[jadr * F + f] = jn
+            res[(jadr + nch) * F + f] = j1
+            res[(jadr + 2 * nch) * F + f] = j2
+        else:
+            res[jadr * F + f] = jn + f0 * j1
+            res[(jadr + nch) * F + f] = jn - f0 * j1
+            res[(jadr + 2 * nch) * F + f] = jn + f1 * j2
+            res[(jadr + 3 * nch) * F + f] = jn - f1 * j2
+    # getsolparam, getimpedance, makeImpedance, referenceConstraint
     var ref0 = max(mf[pf + 4], 2 * h); var ref1 = mf[pf + 5]
     var s0 = min(Float32(0.9999), max(Float32(1e-4), mf[pf + 6])); var s1 = min(Float32(0.9999), max(Float32(1e-4), mf[pf + 7]))
     var s2 = max(Float32(0), mf[pf + 8]); var s3 = min(Float32(0.9999), max(Float32(1e-4), mf[pf + 9])); var s4 = max(Float32(1), mf[pf + 10])
     var imargin = margin - gap
     var imp = impedance(s0, s1, s2, s3, s4, dist - imargin)
     var tran = mf[pf + 11]
-    var R0 = max(Float32(1e-15), (1 - imp) * (tran + f0 * f0 * tran) / imp)
-    var R1 = R0 / max(Float32(1e-15), impratio)
-    var mu = f0 * sqrt(R1 / R0)
-    var D = 1 / (2 * mu * mu * R0)
     var K = 1 / max(Float32(1e-15), s1 * s1 * ref0 * ref0 * ref1 * ref1)
     var B = 2 / max(Float32(1e-15), s1 * ref0)
-    for k in range(4):
+    comptime if ELL:  # mj_diagApprox: tran on all rows; R1 = R0 / impratio, R2 R1 f0^2 / f1^2; friction rows have K = 0
+        var R0 = max(Float32(1e-15), (1 - imp) * tran / imp)
+        var R1 = R0 / max(Float32(1e-15), impratio)
+        var R2 = R1 * f0 * f0 / (f1 * f1)
+        res[(OD + 4 * slot) * F + f] = 1 / R0
+        res[(OD + 4 * slot + 1) * F + f] = 1 / R1
+        res[(OD + 4 * slot + 2) * F + f] = 1 / R2
+    else:
+        var R0 = max(Float32(1e-15), (1 - imp) * (tran + f0 * f0 * tran) / imp)
+        var R1 = R0 / max(Float32(1e-15), impratio)
+        var mu = f0 * sqrt(R1 / R0)
+        var D = 1 / (2 * mu * mu * R0)
+        for k in range(4):
+            res[(OD + 4 * slot + k) * F + f] = D
+    for k in range(NR):
         var row = 4 * slot + k
-        res[(OD + row) * F + f] = D
         var vel: Float32 = 0
         for c in range(nch):
             vel += get(res, f, OJ + jbase(mi, res, f, p) + (4 * count + k) * nch + c) * qvel[Int(mi[CCHAIN + choff + c]) * F + f]
-        res[(OAREF + row) * F + f] = -B * vel - K * imp * (dist - imargin)
+        comptime if ELL:
+            res[(OAREF + row) * F + f] = -B * vel - (K * imp * (dist - imargin) if k == 0 else Float32(0))
+        else:
+            res[(OAREF + row) * F + f] = -B * vel - K * imp * (dist - imargin)
 
 
 
@@ -1316,7 +1337,6 @@ def hfield_pair(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int, p: Int, q2:
         y = y - normal * (normal * y).reduce_add()
         y = y / sqrt((y * y).reduce_add())
         var z = cross(normal, y)
-        res[(OVALID + sbase(mi, res, f, p) + count) * F + f] = 1
         emit_contact(mi, mf, qvel, res, f, p, count, (cs.pos[count] - org).cast[DType.float32](), cs.dist[count].cast[DType.float32](), normal, y, z, com)
         count += 1
 
@@ -1367,7 +1387,6 @@ def convex_pair(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int, p: Int, kin
             y = y - normal * (normal * y).reduce_add()
             y = y / sqrt((y * y).reduce_add())
             var z = cross(normal, y)
-            res[(OVALID + sbase(mi, res, f, p) + count) * F + f] = 1
             emit_contact(mi, mf, qvel, res, f, p, count, cs.pos[count].cast[DType.float32](), cs.dist[count].cast[DType.float32](), normal, y, z, com)
             count += 1
 
@@ -1473,8 +1492,6 @@ def contacts(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int):
             elif dist > margin:
                 break
             var cpos = pnt - normal * (0.5 * dist)
-            var slot = sbase(mi, res, f, p) + count
-            res[(OVALID + slot) * F + f] = 1
             emit_contact(mi, mf, qvel, res, f, p, count, cpos, dist, normal, y, z, com)
             count += 1
         for c in range(count, nslot(mi, res, f, p)):
@@ -1546,7 +1563,7 @@ def actuation(mi: TI, mf: TF, qpos: TQ, qvel: TV, ctrl: TU, res: TO, f: Int):
                         continue
                     var jadr = OJ + jbase(mi, res, f, p) + 4 * sl * nch
                     for k in range(nch):  # normal row = mean of the pyramid's first pair
-                        var jn = 0.5 * (get(res, f, jadr + k) + get(res, f, jadr + nch + k))
+                        var jn = get(res, f, jadr + k) if ELL else 0.5 * (get(res, f, jadr + k) + get(res, f, jadr + nch + k))
                         res[(OQACT + Int(mi[CCHAIN + choff + k])) * F + f] += scale * jn
 
     comptime if GRAVCOMP and NU > 0:  # actuator-level gravcomp (engine_forward.c:770), only where mj_fwdActuation runs (nu > 0)
@@ -1676,13 +1693,66 @@ def equality(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int):
             res[(OEQA + row) * F + f] = -B * vel - K * imp * cpos[k] - jdv[k]
 
 
-def update(mi: TI, res: TO, f: Int) -> Float32:
+@always_inline
+def cone_fric(mf: TF, p: Int) -> V3:
+    """Elliptic cone of pair p: mu of the regularized cone = f0 sqrt(R1/R0) = f0 / sqrt(impratio) (mj_makeImpedance), f0, f1."""
+    var f0 = mf[CPF + 14 * p + 2]
+    return V3(f0 / sqrt(max(Float32(1e-15), mf[COPT])), f0, mf[CPF + 14 * p + 3], 0)
+
+
+def update_cone(mi: TI, mf: TF, res: TO, f: Int) -> Float32:
+    """MuJoCo mj_constraintUpdate_impl, elliptic contacts (engine_core_constraint.c:3155): U = (mu jar0, f0 jar1, f1 jar2), N = U0,
+    T = |U1 U2|; top zone (N >= mu T): no force, state 0; bottom zone (mu N + T <= 0): quadratic, state 1; middle: cost
+    0.5 Dm (N - mu T)^2 with Dm = D0 / (mu^2 (1 + mu^2)), state 2. Forces to OFRC, qfrc_constraint += J' force, cost returned."""
+    var cost: Float32 = 0
+    for ip in range(Int(get(res, f, OPA))):
+        var p = Int(get(res, f, OPA + 1 + ip))
+        var nch = Int(mi[CPH + 11 * p + 6]); var choff = Int(mi[CPH + 11 * p + 7])
+        var fr = cone_fric(mf, p)
+        var mu = fr[0]
+        for sl in range(nslot(mi, res, f, p)):
+            if get(res, f, OVALID + sbase(mi, res, f, p) + sl) == 0:
+                continue
+            var r = 4 * (sbase(mi, res, f, p) + sl)
+            var jar = V3(get(res, f, OJAR + r), get(res, f, OJAR + r + 1), get(res, f, OJAR + r + 2), 0)
+            var D = V3(get(res, f, OD + r), get(res, f, OD + r + 1), get(res, f, OD + r + 2), 0)
+            var U = V3(jar[0] * mu, jar[1] * fr[1], jar[2] * fr[2], 0)
+            var N = U[0]
+            var T = sqrt(U[1] * U[1] + U[2] * U[2])
+            var force = V3(0)
+            var zone: Float32
+            if N >= mu * T or (T <= 0 and N >= 0):
+                zone = 0
+            elif mu * N + T <= 0 or (T <= 0 and N < 0):
+                zone = 1
+                force = -D * jar
+                cost += 0.5 * (D * jar * jar).reduce_add()
+            else:
+                zone = 2
+                var Dm = D[0] / (mu * mu * (1 + mu * mu))
+                var NmT = N - mu * T
+                cost += 0.5 * Dm * NmT * NmT
+                var f0 = -Dm * NmT * mu
+                force = V3(f0, -f0 / T * U[1] * fr[1], -f0 / T * U[2] * fr[2], 0)
+            for k in range(3):
+                res[(OST + r + k) * F + f] = zone
+                res[(OFRC + r + k) * F + f] = force[k]
+                if force[k] != 0:
+                    var jadr = OJ + jbase(mi, res, f, p) + (4 * sl + k) * nch
+                    for c in range(nch):
+                        res[(OQFC + Int(mi[CCHAIN + choff + c])) * F + f] += get(res, f, jadr + c) * force[k]
+    return cost
+
+
+def update(mi: TI, mf: TF, res: TO, f: Int) -> Float32:
     """MuJoCo PrimalUpdateConstraint, pyramidal rows: state = jar < 0, force = -D jar, qfrc_constraint = J' force,
     returns cost = sum 0.5 D jar^2 over active rows + Gauss."""
     var cost: Float32 = 0
     for v in range(NV):
         res[(OQFC + v) * F + f] = 0
-    for ip in range(Int(get(res, f, OPA))):
+    comptime if ELL:
+        cost = update_cone(mi, mf, res, f)
+    for ip in range(0 if ELL else Int(get(res, f, OPA))):
         var p = Int(get(res, f, OPA + 1 + ip))
         var nch = Int(mi[CPH + 11 * p + 6]); var choff = Int(mi[CPH + 11 * p + 7])
         for sl in range(nslot(mi, res, f, p)):
@@ -1717,7 +1787,7 @@ def update(mi: TI, res: TO, f: Int) -> Float32:
     return cost
 
 
-def hessian(mi: TI, res: TO, f: Int):
+def hessian(mi: TI, mf: TF, res: TO, f: Int):
     """MuJoCo MakeHessian + FactorizeHessian: H = M + J' D J over active rows, in H's pattern (model.py hpattern: M's
     plus the fill of pairs coupling two limbs; a pair's dof chain is exactly the pattern of its deepest row),
     factored L'DL with mj_factorI."""
@@ -1733,10 +1803,39 @@ def hessian(mi: TI, res: TO, f: Int):
         for sl in range(nslot(mi, res, f, p)):
             if get(res, f, OVALID + sbase(mi, res, f, p) + sl) == 0:
                 continue
-            for k in range(4):
+            comptime if ELL:  # middle zone: the cone Hessian block (HessianCone, engine_core_constraint.c:3208)
+                var r0 = 4 * (sbase(mi, res, f, p) + sl)
+                if get(res, f, OST + r0) == 2:
+                    var fr = cone_fric(mf, p)
+                    var mu = fr[0]
+                    var U = V3(get(res, f, OJAR + r0) * mu, get(res, f, OJAR + r0 + 1) * fr[1], get(res, f, OJAR + r0 + 2) * fr[2], 0)
+                    var N = U[0]
+                    var T = sqrt(U[1] * U[1] + U[2] * U[2])
+                    var Dm = get(res, f, OD + r0) / (mu * mu * (1 + mu * mu))
+                    var sc = mu * N / (T * T * T)
+                    var dg = mu * mu - mu * N / T
+                    var H00 = Dm * mu * mu
+                    var H01 = Dm * mu * fr[1] * (-mu / T * U[1]); var H02 = Dm * mu * fr[2] * (-mu / T * U[2])
+                    var H11 = Dm * fr[1] * fr[1] * (sc * U[1] * U[1] + dg); var H22 = Dm * fr[2] * fr[2] * (sc * U[2] * U[2] + dg)
+                    var H12 = Dm * fr[1] * fr[2] * (sc * U[1] * U[2])
+                    var jb = OJ + jbase(mi, res, f, p) + 4 * sl * nch
+                    for a in range(nch):
+                        var d = Int(mi[CCHAIN + choff + a])
+                        if d % LN != lane():
+                            continue
+                        var ra = Int(mi[HADR + d])
+                        var a0 = get(res, f, jb + a); var a1 = get(res, f, jb + nch + a); var a2 = get(res, f, jb + 2 * nch + a)
+                        for bb in range(a + 1):
+                            var b0 = get(res, f, jb + bb); var b1 = get(res, f, jb + nch + bb); var b2 = get(res, f, jb + 2 * nch + bb)
+                            res[(OHN + ra + bb) * F + f] += (a0 * (H00 * b0 + H01 * b1 + H02 * b2) + a1 * (H01 * b0 + H11 * b1 + H12 * b2)
+                                                            + a2 * (H02 * b0 + H12 * b1 + H22 * b2))
+            for k in range(NR):
                 var row = 4 * (sbase(mi, res, f, p) + sl) + k
                 if get(res, f, OST + row) == 0:
                     continue
+                comptime if ELL:  # only the bottom zone is a plain quadratic
+                    if get(res, f, OST + row) != 1:
+                        continue
                 var D = get(res, f, OD + row)
                 var jadr = OJ + jbase(mi, res, f, p) + (4 * sl + k) * nch
                 for a in range(nch):  # lane owns H row d (d % LN): every row the same lane, no race across pairs
@@ -1829,18 +1928,55 @@ def gradient(mi: TI, res: TO, f: Int):
 comptime PNT = SIMD[DType.float32, 4]  # line-search point: alpha, cost, deriv0, deriv1
 
 
-def peval(mi: TI, res: TO, f: Int, gauss: PNT, alpha: Float32) -> PNT:
+def peval(mi: TI, mf: TF, res: TO, f: Int, gauss: PNT, alpha: Float32) -> PNT:
     """MuJoCo PrimalEval for pyramidal rows: Gauss quadratic plus every row active at jar + alpha jv (valid rows split
     over lanes, partial sums in OPART)."""
     var q0: Float32 = 0; var q1: Float32 = 0; var q2: Float32 = 0
-    for a in range(lane(), 4 * Int(get(res, f, OACT)), LN):
-        var r = 4 * Int(get(res, f, OACT + 1 + a // 4)) + a % 4
-        var jar = get(res, f, OJAR + r); var jv = get(res, f, OJV + r)
-        if jar + alpha * jv < 0:
-            var D = get(res, f, OD + r)
-            q0 += 0.5 * D * jar * jar
-            q1 += jv * D * jar
-            q2 += 0.5 * jv * D * jv
+    var cc: Float32 = 0; var e0: Float32 = 0; var e1: Float32 = 0  # elliptic middle zone: cost and derivatives added directly
+    comptime if ELL:
+        for a in range(lane(), Int(get(res, f, OACT)), LN):
+            var sl = Int(get(res, f, OACT + 1 + a))
+            var r = 4 * sl
+            var fr = cone_fric(mf, Int(get(res, f, OVALID + sl)) - 1)
+            var mu = fr[0]
+            var jar = V3(get(res, f, OJAR + r), get(res, f, OJAR + r + 1), get(res, f, OJAR + r + 2), 0)
+            var jv = V3(get(res, f, OJV + r), get(res, f, OJV + r + 1), get(res, f, OJV + r + 2), 0)
+            var D = V3(get(res, f, OD + r), get(res, f, OD + r + 1), get(res, f, OD + r + 2), 0)
+            var U0 = jar[0] * mu; var V0 = jv[0] * mu
+            var u1 = jar[1] * fr[1]; var u2 = jar[2] * fr[2]; var v1 = jv[1] * fr[1]; var v2 = jv[2] * fr[2]
+            var UU = u1 * u1 + u2 * u2; var UV = u1 * v1 + u2 * v2; var VV = v1 * v1 + v2 * v2
+            var N = U0 + alpha * V0
+            var Tsqr = UU + alpha * (2 * UV + alpha * VV)
+            var bottom = False
+            var T = sqrt(max(Tsqr, Float32(0)))
+            if Tsqr <= 0:
+                bottom = N < 0
+            else:
+                if N >= mu * T:
+                    pass
+                elif mu * N + T <= 0:
+                    bottom = True
+                else:
+                    var Dm = D[0] / (mu * mu * (1 + mu * mu))
+                    var N1 = V0
+                    var T1 = (UV + alpha * VV) / T
+                    var T2 = VV / T - (UV + alpha * VV) * T1 / (T * T)
+                    cc += 0.5 * Dm * (N - mu * T) * (N - mu * T)
+                    e0 += Dm * (N - mu * T) * (N1 - mu * T1)
+                    e1 += Dm * ((N1 - mu * T1) * (N1 - mu * T1) + (N - mu * T) * (-mu * T2))
+            if bottom:
+                q0 += 0.5 * (D * jar * jar).reduce_add()
+                q1 += (D * jar * jv).reduce_add()
+                q2 += 0.5 * (D * jv * jv).reduce_add()
+    else:
+        for a in range(lane(), 4 * Int(get(res, f, OACT)), LN):
+            var r = 4 * Int(get(res, f, OACT + 1 + a // 4)) + a % 4
+            var jar = get(res, f, OJAR + r); var jv = get(res, f, OJV + r)
+            if jar + alpha * jv < 0:
+                var D = get(res, f, OD + r)
+                q0 += 0.5 * D * jar * jar
+                q1 += jv * D * jar
+                q2 += 0.5 * jv * D * jv
     comptime if NEQ > 0:  # equality rows: active at every alpha
         for r in range(lane(), NEQR, LN):
             var jar = get(res, f, OEQJAR + r); var jv = get(res, f, OEQJV + r); var D = get(res, f, OEQD + r)
@@ -1851,15 +1987,21 @@ def peval(mi: TI, res: TO, f: Int, gauss: PNT, alpha: Float32) -> PNT:
         res[(OPART + lane()) * F + f] = q0
         res[(OPART + LN + lane()) * F + f] = q1
         res[(OPART + 2 * LN + lane()) * F + f] = q2
+        comptime if ELL:
+            res[(OPART + 3 * LN + lane()) * F + f] = cc
+            res[(OPART + 4 * LN + lane()) * F + f] = e0
+            res[(OPART + 5 * LN + lane()) * F + f] = e1
         sync()
-        q0 = 0; q1 = 0; q2 = 0
+        q0 = 0; q1 = 0; q2 = 0; cc = 0; e0 = 0; e1 = 0
         for l in range(LN):
             q0 += get(res, f, OPART + l); q1 += get(res, f, OPART + LN + l); q2 += get(res, f, OPART + 2 * LN + l)
+            comptime if ELL:
+                cc += get(res, f, OPART + 3 * LN + l); e0 += get(res, f, OPART + 4 * LN + l); e1 += get(res, f, OPART + 5 * LN + l)
         sync()
     q0 += gauss[0]; q1 += gauss[1]; q2 += gauss[2]
     res[(ODIAG + 1) * F + f] += 1
-    var d1 = 2 * q2
-    return PNT(alpha, alpha * alpha * q2 + alpha * q1 + q0, 2 * alpha * q2 + q1, d1 if d1 > 0 else Float32(1e-15))
+    var d1 = 2 * q2 + e1
+    return PNT(alpha, alpha * alpha * q2 + alpha * q1 + q0 + cc, 2 * alpha * q2 + q1 + e0, d1 if d1 > 0 else Float32(1e-15))
 
 
 @always_inline
@@ -1877,7 +2019,7 @@ def bracket(mut p: PNT, c0: PNT, c1: PNT, c2: PNT) -> Bool:
     return flag
 
 
-def search(mi: TI, res: TO, f: Int, scale: Float32, tolerance: Float32, lsiter: Int) -> Float32:
+def search(mi: TI, mf: TF, res: TO, f: Int, scale: Float32, tolerance: Float32, lsiter: Int) -> Float32:
     """MuJoCo PrimalSearch: Newton steps along the search direction, then a bracketed search; returns alpha."""
     var snorm: Float32 = 0
     for v in range(NV):
@@ -1893,7 +2035,7 @@ def search(mi: TI, res: TO, f: Int, scale: Float32, tolerance: Float32, lsiter: 
         for sl in range(nslot(mi, res, f, p)):
             if get(res, f, OVALID + sbase(mi, res, f, p) + sl) == 0:
                 continue
-            for k in range(4):
+            for k in range(NR):
                 res[(OJV + 4 * (sbase(mi, res, f, p) + sl) + k) * F + f] = jdot(mi, res, f, OJ + jbase(mi, res, f, p) + (4 * sl + k) * nch, nch, choff, OSRCH)
     comptime if NEQ > 0:
         for e in range(NEQ):
@@ -1909,25 +2051,25 @@ def search(mi: TI, res: TO, f: Int, scale: Float32, tolerance: Float32, lsiter: 
         g0 += 0.5 * (get(res, f, OMA + v) - get(res, f, OQSM + v)) * (get(res, f, OCQACC + v) - get(res, f, OQACCS + v))
     var gauss = PNT(g0, g1, g2, 0)
     var it = 0
-    var p0 = peval(mi, res, f, gauss, 0); it += 1
+    var p0 = peval(mi, mf, res, f, gauss, 0); it += 1
     gtol = max(gtol, LSFLOOR * abs(p0[2]))  # float32: the slope cannot fall below ~1e-7 of its start
-    var p1 = peval(mi, res, f, gauss, p0[0] - p0[2] / p0[3]); it += 1
+    var p1 = peval(mi, mf, res, f, gauss, p0[0] - p0[2] / p0[3]); it += 1
     if abs(p1[2]) < gtol:
         return p1[0]
     var dir: Float32 = 1 if p1[2] < 0 else -1
     var p2 = p0
     while p1[2] * dir <= -gtol and it < lsiter:
         p2 = p1
-        p1 = peval(mi, res, f, gauss, p1[0] - p1[2] / p1[3]); it += 1
+        p1 = peval(mi, mf, res, f, gauss, p1[0] - p1[2] / p1[3]); it += 1
         if abs(p1[2]) < gtol:
             return p1[0]
     if it >= lsiter:
         return p1[0]
     var p2next = p1
-    var p1next = peval(mi, res, f, gauss, p1[0] - p1[2] / p1[3]); it += 1
+    var p1next = peval(mi, mf, res, f, gauss, p1[0] - p1[2] / p1[3]); it += 1
     var pmid = p0
     while it < lsiter:
-        pmid = peval(mi, res, f, gauss, 0.5 * (p1[0] + p2[0])); it += 1
+        pmid = peval(mi, mf, res, f, gauss, 0.5 * (p1[0] + p2[0])); it += 1
         var bestcost: Float32 = 0
         var bestind = -1
         for i in range(3):
@@ -1940,10 +2082,10 @@ def search(mi: TI, res: TO, f: Int, scale: Float32, tolerance: Float32, lsiter: 
         var c0 = p1next; var c1 = p2next; var c2 = pmid
         var b1 = bracket(p1, c0, c1, c2)
         if b1:
-            p1next = peval(mi, res, f, gauss, p1[0] - p1[2] / p1[3]); it += 1
+            p1next = peval(mi, mf, res, f, gauss, p1[0] - p1[2] / p1[3]); it += 1
         var b2 = bracket(p2, c0, c1, c2)
         if b2:
-            p2next = peval(mi, res, f, gauss, p2[0] - p2[2] / p2[3]); it += 1
+            p2next = peval(mi, mf, res, f, gauss, p2[0] - p2[2] / p2[3]); it += 1
         if not b1 and not b2:
             return pmid[0]
     if p1[1] <= p2[1] and p1[1] < p0[1]:
@@ -1953,7 +2095,7 @@ def search(mi: TI, res: TO, f: Int, scale: Float32, tolerance: Float32, lsiter: 
     return 0
 
 
-def start(mi: TI, res: TO, f: Int, src: Int) -> Float32:
+def start(mi: TI, mf: TF, res: TO, f: Int, src: Int) -> Float32:
     """Newton's starting point: qacc = rows src.., M qacc, jar on the valid rows, then PrimalUpdateConstraint's cost."""
     for v in range(NV):
         res[(OCQACC + v) * F + f] = get(res, f, src + v)
@@ -1964,7 +2106,7 @@ def start(mi: TI, res: TO, f: Int, src: Int) -> Float32:
         for sl in range(nslot(mi, res, f, p)):
             if get(res, f, OVALID + sbase(mi, res, f, p) + sl) == 0:
                 continue
-            for k in range(4):
+            for k in range(NR):
                 var row = 4 * (sbase(mi, res, f, p) + sl) + k
                 res[(OJAR + row) * F + f] = jdot(mi, res, f, OJ + jbase(mi, res, f, p) + (4 * sl + k) * nch, nch, choff, OCQACC) - get(res, f, OAREF + row)
     comptime if NEQ > 0:
@@ -1973,7 +2115,7 @@ def start(mi: TI, res: TO, f: Int, src: Int) -> Float32:
             var nch = Int(mi[eh + 4]); var choff = Int(mi[eh + 5]); var rbase = Int(mi[eh + 6]); var jb = OEQJ + Int(mi[eh + 7])
             for k in range(Int(mi[eh + 3])):
                 res[(OEQJAR + rbase + k) * F + f] = jdot(mi, res, f, jb + k * nch, nch, choff, OCQACC, CEQC) - get(res, f, OEQA + rbase + k)
-    return update(mi, res, f)
+    return update(mi, mf, res, f)
 
 
 def newton(mi: TI, mf: TF, res: TO, f: Int):
@@ -1994,11 +2136,11 @@ def newton(mi: TI, mf: TF, res: TO, f: Int):
     res[ODIAG * F + f] = 0
     res[(ODIAG + 1) * F + f] = 0
     res[(ODIAG + 2) * F + f] = 0
-    var cost = start(mi, res, f, OQACCS)
+    var cost = start(mi, mf, res, f, OQACCS)
     comptime if K > 0:  # mj warmstart: the last step's qacc unless qacc_smooth costs less
-        var cw = start(mi, res, f, OWARM)
-        cost = start(mi, res, f, OQACCS) if cw > cost else cw
-    hessian(mi, res, f)
+        var cw = start(mi, mf, res, f, OWARM)
+        cost = start(mi, mf, res, f, OQACCS) if cw > cost else cw
+    hessian(mi, mf, res, f)
     comptime if STOP == 9:
         return
     gradient(mi, res, f)
@@ -2006,15 +2148,15 @@ def newton(mi: TI, mf: TF, res: TO, f: Int):
         return
     for _ in range(Int(mi[CITER])):
         res[ODIAG * F + f] += 1
-        var alpha = search(mi, res, f, scale, tol * mf[COPT + 2], Int(mi[CITER + 1]))
+        var alpha = search(mi, mf, res, f, scale, tol * mf[COPT + 2], Int(mi[CITER + 1]))
         if alpha == 0:
             break
         for v in range(NV):
             res[(OCQACC + v) * F + f] += alpha * get(res, f, OSRCH + v)
             res[(OMA + v) * F + f] += alpha * get(res, f, OMV + v)
         var changed = False
-        for a in range(4 * Int(get(res, f, OACT))):
-            var r = 4 * Int(get(res, f, OACT + 1 + a // 4)) + a % 4
+        for a in range(NR * Int(get(res, f, OACT))):
+            var r = 4 * Int(get(res, f, OACT + 1 + a // NR)) + a % NR
             res[(OJAR + r) * F + f] += alpha * get(res, f, OJV + r)
             if (get(res, f, OJAR + r) < 0) != (get(res, f, OST + r) != 0):
                 changed = True
@@ -2022,7 +2164,10 @@ def newton(mi: TI, mf: TF, res: TO, f: Int):
             for r in range(NEQR):
                 res[(OEQJAR + r) * F + f] += alpha * get(res, f, OEQJV + r)
         var cheap = True
-        if changed:
+        comptime if ELL:  # the cone Hessian moves with jar: rebuilt every iteration, no rank-1 shortcut
+            changed = True
+            cheap = False
+        if changed and not ELL:
             comptime if WAVE:  # one sequential walk per animal on lane 0; its verdict shared so all lanes agree
                 sync()
                 if lane() == 0:
@@ -2033,9 +2178,9 @@ def newton(mi: TI, mf: TF, res: TO, f: Int):
             else:
                 cheap = lowrank(mi, res, f)
         var oldcost = cost
-        cost = update(mi, res, f)
+        cost = update(mi, mf, res, f)
         if changed and not cheap:
-            hessian(mi, res, f)
+            hessian(mi, mf, res, f)
         gradient(mi, res, f)
         var gn: Float32 = 0
         for v in range(NV):
@@ -2069,12 +2214,152 @@ def ltsolve(mi: TI, res: TO, f: Int, W: Int, jadr: Int, nch: Int, choff: Int):
             res[(W + Int(mi[MCOL + adr])) * F + f] -= get(res, f, OLD + adr) * x_i
 
 
+def qcqp2(a00: Float32, a01: Float32, a11: Float32, b0: Float32, b1: Float32, d0: Float32, d1: Float32, r: Float32) -> V3:
+    """MuJoCo mju_QCQP2 (engine_util_solve.c) plus solveQCQP's projection (engine_solver.c:379): min 0.5 x'Ax + x'b over the
+    ellipse (x0 / d0)^2 + (x1 / d1)^2 <= r^2, scaled to the unit-radius disc, Newton on the multiplier la of (A + la I) v = -b;
+    an active solution is put exactly on the ellipse. Returns x0, x1."""
+    var A0 = a00 * d0 * d0; var A1 = a01 * d0 * d1; var A2 = a11 * d1 * d1
+    var B0 = b0 * d0; var B1 = b1 * d1
+    var la: Float32 = 0
+    var v0: Float32 = 0; var v1: Float32 = 0
+    for _ in range(20):
+        var det = (A0 + la) * (A2 + la) - A1 * A1
+        if det < 1e-15:
+            return V3(0)
+        var P00 = (A2 + la) / det; var P11 = (A0 + la) / det; var P01 = -A1 / det
+        v0 = -(P00 * B0 + P01 * B1); v1 = -(P01 * B0 + P11 * B1)
+        var val = v0 * v0 + v1 * v1 - r * r
+        if val < 1e-8 * r * r:
+            break
+        var deriv = -2 * (v0 * (P00 * v0 + P01 * v1) + v1 * (P01 * v0 + P11 * v1))
+        var delta = -val / deriv
+        if delta < 1e-15:
+            break
+        la += delta
+    var x0 = v0 * d0; var x1 = v1 * d1
+    if la != 0:
+        var sq = x0 * x0 / (d0 * d0) + x1 * x1 / (d1 * d1)
+        var sc = sqrt(r * r / max(Float32(1e-15), sq))
+        x0 *= sc; x1 *= sc
+    return V3(x0, x1, 0, 0)
+
+
+def noslip_cone(mi: TI, mf: TF, res: TO, f: Int):
+    """MuJoCo mj_solNoSlip for elliptic contacts (engine_solver.c:646), no dry friction: after Newton, per contact the 2 friction
+    rows are re-solved with the normal force held, a QCQP over the friction ellipse (mu = f0, f1) against their 2x2 block
+    A = J M^-1 J' and the residual of all other rows; a step that does not lower the cost is dropped. Same matrix-free
+    scheme as noslip() (w = L^-T J', z = L^-T J' f kept current). Then mj_dualFinish as a change on Newton's result."""
+    var nit = Int(mi[CITER + 2])
+    if nit == 0:
+        return
+    var imp0: Float32 = 0
+    for ip in range(Int(get(res, f, OPA))):
+        var p = Int(get(res, f, OPA + 1 + ip))
+        for sl in range(nslot(mi, res, f, p)):
+            if get(res, f, OVALID + sbase(mi, res, f, p) + sl) == 0:
+                continue
+            for k in range(3):
+                var r = 4 * (sbase(mi, res, f, p) + sl) + k
+                var fr = get(res, f, OFRC + r)
+                imp0 += 0.5 * fr * fr / get(res, f, OD + r)
+                res[(OFRN + r) * F + f] = fr
+    for v in range(NV):
+        res[(OZ + v) * F + f] = get(res, f, OQFC + v)
+    for i in range(NV - 1, -1, -1):  # z = L^-T J' f
+        var start = Int(mi[MADR + i])
+        var x_i = get(res, f, OZ + i)
+        for adr in range(start, start + Int(mi[MNNZ + i]) - 1):
+            res[(OZ + Int(mi[MCOL + adr])) * F + f] -= get(res, f, OLD + adr) * x_i
+    for ip in range(Int(get(res, f, OPA))):  # w, A and J qacc_smooth - aref of the friction rows: fixed during the sweeps
+        var p = Int(get(res, f, OPA + 1 + ip))
+        var nch = Int(mi[CPH + 11 * p + 6]); var choff = Int(mi[CPH + 11 * p + 7])
+        for sl in range(nslot(mi, res, f, p)):
+            if get(res, f, OVALID + sbase(mi, res, f, p) + sl) == 0:
+                continue
+            var slot = sbase(mi, res, f, p) + sl
+            var jo = jbase(mi, res, f, p) + (4 * sl + 1) * nch
+            ltsolve(mi, res, f, OW, OJ + jo, nch, choff)
+            ltsolve(mi, res, f, OW + NV, OJ + jo + nch, nch, choff)
+            var a00: Float32 = 0; var a01: Float32 = 0; var a11: Float32 = 0
+            for c in range(nch):
+                var i = Int(mi[CCHAIN + choff + c])
+                var w0 = get(res, f, OW + i); var w1 = get(res, f, OW + NV + i); var di = get(res, f, OLDI + i)
+                a00 += w0 * w0 * di; a01 += w0 * w1 * di; a11 += w1 * w1 * di
+                res[(OWC + jo + c) * F + f] = w0
+                res[(OWC + jo + nch + c) * F + f] = w1
+            var ac = OAC + 5 * slot
+            res[ac * F + f] = max(a00, Float32(1e-10))
+            res[(ac + 1) * F + f] = a01
+            res[(ac + 2) * F + f] = max(a11, Float32(1e-10))
+            res[(ac + 3) * F + f] = jdot(mi, res, f, OJ + jo, nch, choff, OQACCS) - get(res, f, OAREF + 4 * slot + 1)
+            res[(ac + 4) * F + f] = jdot(mi, res, f, OJ + jo + nch, nch, choff, OQACCS) - get(res, f, OAREF + 4 * slot + 2)
+    var scale = 1 / (mf[COPT + 4] * Float32(NV))
+    for it in range(nit):
+        var improvement: Float32 = imp0 if it == 0 else 0
+        for ip in range(Int(get(res, f, OPA))):
+            var p = Int(get(res, f, OPA + 1 + ip))
+            var nch = Int(mi[CPH + 11 * p + 6]); var choff = Int(mi[CPH + 11 * p + 7])
+            var fr = cone_fric(mf, p)
+            for sl in range(nslot(mi, res, f, p)):
+                if get(res, f, OVALID + sbase(mi, res, f, p) + sl) == 0:
+                    continue
+                var slot = sbase(mi, res, f, p) + sl
+                var r = 4 * slot
+                var w = OWC + jbase(mi, res, f, p) + (4 * sl + 1) * nch
+                var ac = OAC + 5 * slot
+                var a00 = get(res, f, ac); var a01 = get(res, f, ac + 1); var a11 = get(res, f, ac + 2)
+                var res0 = get(res, f, ac + 3); var res1 = get(res, f, ac + 4)
+                for c in range(nch):
+                    var i = Int(mi[CCHAIN + choff + c])
+                    var zd = get(res, f, OZ + i) * get(res, f, OLDI + i)
+                    res0 += get(res, f, w + c) * zd; res1 += get(res, f, w + nch + c) * zd
+                var fnorm = get(res, f, OFRN + r)
+                var o1 = get(res, f, OFRN + r + 1); var o2 = get(res, f, OFRN + r + 2)
+                var n = V3(0)
+                if fnorm >= 1e-15:
+                    n = qcqp2(a00, a01, a11, res0 - (a00 * o1 + a01 * o2), res1 - (a01 * o1 + a11 * o2), fr[1], fr[2], fnorm)
+                var d1 = n[0] - o1; var d2 = n[1] - o2
+                var change = 0.5 * (a00 * d1 * d1 + 2 * a01 * d1 * d2 + a11 * d2 * d2) + d1 * res0 + d2 * res1
+                if change > 1e-10:  # no improvement: keep the old forces
+                    continue
+                improvement -= change
+                res[(OFRN + r + 1) * F + f] = n[0]
+                res[(OFRN + r + 2) * F + f] = n[1]
+                for c in range(nch):
+                    var i = Int(mi[CCHAIN + choff + c])
+                    res[(OZ + i) * F + f] += get(res, f, w + c) * d1 + get(res, f, w + nch + c) * d2
+        if improvement * scale < mf[COPT + 3]:
+            break
+    for v in range(NV):  # mj_dualFinish as a change on Newton's result: qfrc_constraint += J' (f - f_newton), qacc += M^-1 of it
+        res[(OW + v) * F + f] = 0
+    for ip in range(Int(get(res, f, OPA))):
+        var p = Int(get(res, f, OPA + 1 + ip))
+        var nch = Int(mi[CPH + 11 * p + 6]); var choff = Int(mi[CPH + 11 * p + 7])
+        for sl in range(nslot(mi, res, f, p)):
+            if get(res, f, OVALID + sbase(mi, res, f, p) + sl) == 0:
+                continue
+            for k in range(1, 3):
+                var row = 4 * (sbase(mi, res, f, p) + sl) + k
+                var df = get(res, f, OFRN + row) - get(res, f, OFRC + row)
+                var jadr = OJ + jbase(mi, res, f, p) + (4 * sl + k) * nch
+                for c in range(nch):
+                    res[(OW + Int(mi[CCHAIN + choff + c])) * F + f] += get(res, f, jadr + c) * df
+    for v in range(NV):
+        res[(OQFC + v) * F + f] += get(res, f, OW + v)
+    solveLD(mi, res, f, OW, OLD, OLDI)
+    for v in range(NV):
+        res[(OCQACC + v) * F + f] += get(res, f, OW + v)
+
+
 def noslip(mi: TI, mf: TF, res: TO, f: Int):
     """MuJoCo mj_solNoSlip for pyramidal contacts (no dry friction ported): after Newton, projected Gauss-Seidel over
     each contact's opposing pyramid-edge row pairs (their sum, what the normal sees, kept), noslip_iterations sweeps
     or until improvement / (meaninertia nv) < noslip_tolerance; then mj_dualFinish: qfrc_constraint = J' f, qacc =
     qacc_smooth + M^-1 qfrc_constraint. Matrix-free with M = L'DL: A(k, l) = J_k M^-1 J_l' = w_k' D^-1 w_l, w = L^-T J'
     on the row's chain, and the residual's J_k M^-1 J' f = w_k' D^-1 z with z = L^-T J' f kept current."""
+    comptime if ELL:
+        noslip_cone(mi, mf, res, f)
+        return
     var nit = Int(mi[CITER + 2])
     if nit == 0:
         return
