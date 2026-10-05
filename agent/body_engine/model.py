@@ -173,13 +173,50 @@ def onfaces(q, v, side):
 
 def load(mjcf):
     m = mjcf if isinstance(mjcf, mujoco.MjModel) else mujoco.MjModel.from_xml_path(str(mjcf))
-    if m.nmocap or m.ntendon or m.dof_simplenum.any():
-        raise SystemExit('FAIL export: mocap bodies, tendons and simple dofs are not ported')
-    if (m.nflex or m.opt.integrator or m.opt.density or m.opt.viscosity or m.body_gravcomp.any() or m.actuator_damping.any()
+    if m.nmocap or m.dof_simplenum.any():
+        raise SystemExit('FAIL export: mocap bodies and simple dofs are not ported')
+    if (m.nflex or m.opt.integrator or m.body_gravcomp.any() or m.actuator_damping.any()
             or m.dof_dampingpoly.any() or m.jnt_stiffnesspoly.any() or m.opt.disableflags):
-        raise SystemExit('FAIL export: only Euler, linear joint springs and dof dampers are ported (no flex, fluid, gravcomp, '
+        raise SystemExit('FAIL export: only Euler, linear joint springs and dof dampers are ported (no flex, gravcomp, '
                          'actuator damping, polynomial springs or dampers, disable flags)')
+    if (m.wrap_type != mujoco.mjtWrap.mjWRAP_JOINT).any() or m.tendon_limited.any() or m.tendon_frictionloss.any() \
+            or m.tendon_stiffnesspoly.any() or m.tendon_dampingpoly.any() or m.tendon_actfrclimited.any():
+        raise SystemExit('FAIL export: only fixed tendons (joint wraps), unlimited, no friction loss, linear spring and damper are ported')
     return m
+
+
+def fluid(m):
+    """MuJoCo mj_fluid block (engine_passive.c:842), appended last: ints per ellipsoid row (body, geom) then the inertia-box
+    bodies (every body with mass that has no ellipsoid geom); floats opt.density, opt.viscosity, opt.wind, then per ellipsoid
+    row the geom's semi-axes (mju_geomSemiAxes) and its 12 geom_fluid coefficients. Rows are geoms with geom_fluid[0] > 0;
+    a body with any such geom takes the ellipsoid model only. Empty for a model without density and viscosity."""
+    if not (m.opt.density or m.opt.viscosity):
+        return None
+    G = mujoco.mjtGeom
+    rows = np.nonzero(m.geom_fluid[:, 0] > 0)[0]
+    axes = []
+    for g in rows:
+        s, t = m.geom_size[g], m.geom_type[g]
+        axes.append([s[0]] * 3 if t == G.mjGEOM_SPHERE else [s[0], s[0], s[1] + s[0]] if t == G.mjGEOM_CAPSULE
+                    else [s[0], s[0], s[1]] if t == G.mjGEOM_CYLINDER else list(s))
+    ell = {m.geom_bodyid[g] for g in rows}
+    box = [b for b in range(m.nbody) if m.body_mass[b] >= 1e-15 and b not in ell]
+    ints = np.array([v for g in rows for v in (m.geom_bodyid[g], g)] + box)
+    floats = np.concatenate([[m.opt.density, m.opt.viscosity], m.opt.wind] + [np.r_[a, m.geom_fluid[g]] for a, g in zip(axes, rows)])
+    return ints, floats, {'NFLROW': len(rows), 'NFLBOX': len(box)}
+
+
+def tendons(m):
+    """Fixed tendons (mj_tendon: length = sum coef q, J = coef, constant) plus mj_passive's tendon spring and damper
+    (engine_passive.c:775): ints per tendon wrap start and count, then each wrap's dof address; floats each wrap's
+    coef, then per tendon stiffness, damping, lengthspring 2. Joints are hinge or slide only."""
+    if not m.ntendon:
+        return None
+    if (m.jnt_type[m.wrap_objid] > 3).any() or (m.jnt_type[m.wrap_objid] < 2).any():
+        raise SystemExit('FAIL export: tendon wraps only on hinge and slide joints')
+    ints = np.concatenate([m.tendon_adr, m.tendon_num, m.jnt_dofadr[m.wrap_objid]])
+    floats = np.concatenate([m.wrap_prm, m.tendon_stiffness, m.tendon_damping, m.tendon_lengthspring.ravel()])
+    return ints, floats, {'NTEN': m.ntendon, 'NWRAP': m.nwrap}
 
 
 def pairs(m, regex):
@@ -328,6 +365,9 @@ def export(mjcf, out, regex=None, act=False):
     if act:
         ai, af = actuators(m)
         ints, floats = ints + [ai], floats + [af]
+    for block in (fluid(m), tendons(m)):  # last, so every earlier block keeps its offsets and a model without them its bytes
+        if block:
+            ints, floats, sizes = ints + [block[0]], floats + [block[1]], sizes | block[2]
     np.concatenate(ints).astype(np.int32).tofile(out / 'mi.bin')
     np.concatenate(floats).astype(np.float32).tofile(out / 'mf.bin')
     (out / 'sizes.txt').write_text(' '.join(f'-D{k}={v}' for k, v in sizes.items()) + '\n')
