@@ -1,0 +1,24 @@
+name = "plume"
+seed = 0
+coordinate_units = "world millimetres"
+maps_coordinate_units = "metres"
+millimetres_per_metre = 1000.0
+plume = true
+wind_direction = "+x"
+source_jitter_metres = 0.02
+
+[[sources]]
+id = 0
+kind = "food"
+position_mm = [305.4784675, 340.7914686]
+color_rgb = [255, 190, 64]
+remaining = 50.0
+present = true
+
+[[sources]]
+id = 1
+kind = "decoy"
+position_mm = [281.6389410, -369.3388946]
+color_rgb = [96, 160, 255]
+remaining = 50.0
+present = true

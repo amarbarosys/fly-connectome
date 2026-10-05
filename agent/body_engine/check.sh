@@ -226,6 +226,52 @@ if [ "$stage" = spiderlink ]; then  # brain<->body link on the spider (docs/plan
   [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
   echo "PASS all spiderlink checks"; exit 0
 fi
+if [ "$stage" = spectate ]; then  # spectator hooks in live.mojo (docs/plans/RENDERER.md, -DFOLLOW=1 -DHUD=1): camera follows the walking spider, HUD bars show the
+  # state buffer, hooks off changes no byte, frame cost split + leak receipt through spectator_integration_check.py. Mutants: camera target offset,
+  # HUD fill off by one pixel, the follow hook compiled in by default (the hooks-off frame must differ from the pre-hook live.mojo)
+  S="$M -m agent.body_engine.spectate_check"
+  $M agent/body_engine/spectator_check.py || { echo "FAIL spectator_check"; fail=$((fail+1)); }
+  $S check || { echo "FAIL spectate"; fail=$((fail+1)); }
+  ~/iTools/bin/mutant-check agent/body_engine/spectate.mojo 's|tx /= Float32(NROOT)|tx = tx / Float32(NROOT) + 30.0|' -- $S clip || fail=$((fail+1))
+  ~/iTools/bin/mutant-check agent/body_engine/spectate.mojo 's|Float32(x - BAR_X) + 0.5 < fill.width|Float32(x - BAR_X) + 1.5 < fill.width|' -- $S hud || fail=$((fail+1))
+  ~/iTools/bin/mutant-check agent/body_engine/live.mojo 's|get_defined_int\["FOLLOW", 0\]|get_defined_int["FOLLOW", 1]|' -- $S off || fail=$((fail+1))
+  [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
+  echo "PASS all spectate checks"; exit 0
+fi
+if [ "$stage" = game ]; then  # game layer per step (-DGAME=1, docs/plans/GAME_LAYER.md) on fly and spider: engine energy/stamina rows == game_events.replay on
+  # MuJoCo's per-step work, death at the oracle's step, servos and adhesion exactly 0 after it, HUD bars show the engine rows.
+  # Mutants: the work term skipped; the dead gate removed
+  G="$M -m agent.body_engine.game_check check"
+  $G || { echo "FAIL game"; fail=$((fail+1)); }
+  ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo 's|work += abs(get(res, f, OQACT + v) \* qvel\[v \* F + f\]) \* mf\[TSTEP\]|work += 0|' -- $G fly || fail=$((fail+1))
+  ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo 's|if get(res, f, OGAME + 3) != 0:|if get(res, f, OGAME + 3) > 5:|' -- $G fly || fail=$((fail+1))
+  [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
+  echo "PASS all game checks"; exit 0
+fi
+if [ "$stage" = flylink ]; then  # brain-driven fly in live, host transport (BRAIN=1; docs/plans/BRAIN_BODY_LOOP.md): resident Shiu -> 2 DN drives -> FlyGym gait mapping -> 50 ctrl.
+  # Gates: walks > 1 body length with tilt < 20 deg, opposite turn drives give opposite yaw, silenced DN and held ctrl differ from the live brain. Needs the Shiu worker:
+  # submit with --vram 4. Mutants: ctrl write skipped, DN counts zeroed before the readout, left and right drive merged
+  export PYTHONPATH=$PWD
+  L="$M -m agent.body_engine.fly_link check"
+  $L || { echo "FAIL flylink"; fail=$((fail+1)); }
+  ~/iTools/bin/mutant-check agent/body_engine/live.mojo 's/ctx.enqueue_copy(u_b, ctrl_h)/pass/' -- $L || fail=$((fail+1))
+  ~/iTools/bin/mutant-check agent/body_engine/fly_link.py 's/cum.append(side_counts(brain.advance(k), edges))/cum.append(side_counts(brain.advance(k) * 0, edges))/' -- $L || fail=$((fail+1))
+  ~/iTools/bin/mutant-check agent/body_engine/fly_link.py 's/sig = np.clip(drive\[n\], 0, 1)/sig = np.clip(np.full(2, drive[n].mean()), 0, 1)/' -- $L || fail=$((fail+1))
+  [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
+  echo "PASS all flylink checks"; exit 0
+fi
+if [ "$stage" = world_hud ]; then  # plume world in the live frame (-DWORLD=1, docs/plans/WORLD.md): odor sites sample the plume on the card, the HUD prints the
+  # concentrations and draws the sources from the same descriptor, fly (fly/l_odor, fly/r_odor) and spider (leg I tarsus tips), decoy present and absent.
+  # Mutants: food/decoy swapped in the sampler, the presence flag ignored, mini-map y flipped
+  export PYTHONPATH=$PWD
+  W="$M -m agent.body_engine.world_check check"
+  $W || { echo "FAIL world_hud"; fail=$((fail+1)); }
+  ~/iTools/bin/mutant-check agent/body_engine/spectate.mojo 's|    plume\[2 \* s\] = c\[0\]|    plume[2 * s] = c[1]|' -- $W spider || fail=$((fail+1))
+  ~/iTools/bin/mutant-check agent/body_engine/spectate.mojo 's|Int32(src\[8\]), src\[9\])|Int32(1), src[9])|' -- $W spider || fail=$((fail+1))
+  ~/iTools/bin/mutant-check agent/body_engine/hud.mojo 's|center_y - (source_y - target_y) \* scale|center_y + (source_y - target_y) * scale|' -- $W spider || fail=$((fail+1))
+  [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
+  echo "PASS all world_hud checks"; exit 0
+fi
 if [ "$stage" = fluid ]; then  # Flybody flight model: mj_fluid (ellipsoid wings + inertia boxes) inside qfrc_passive, wing velocities up to flapping rate
   R=~/Projects/science/fly-connectome; FL=${FLIGHT:-$R/.work/flight-body}
   [ -f $FL/flight.xml ] || $R/.work/neural-flies/flight-venv/bin/python agent/body_engine/models/flight_export.py $FL

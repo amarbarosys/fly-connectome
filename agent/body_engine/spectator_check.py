@@ -37,6 +37,17 @@ def main():
         raise SystemExit(f"FAIL off-center target mutant was not rejected: {diagnostic}")
     print("PASS off-center target mutant rejected")
 
+    needle = "return 1.05 * radius"  # a fit distance that is too short leaves a root sphere outside the limiting field of view
+    if original.count(needle) != 1:
+        raise SystemExit("FAIL mutant setup: expected one fit-distance expression")
+    mutant_source.write_text(original.replace(needle, "return 0.5 * radius"))
+    if subprocess.run([str(MOJO), "build", str(mutant_source), "-o", str(mutant_binary)], text=True, capture_output=True).returncode:
+        raise SystemExit("FAIL distance mutant compile")
+    mutant = subprocess.run([str(mutant_binary)], text=True, capture_output=True)
+    if mutant.returncode == 0 or "falls outside the limiting FOV" not in mutant.stdout + mutant.stderr:
+        raise SystemExit(f"FAIL short-distance mutant was not rejected: {mutant.stdout}{mutant.stderr}")
+    print("PASS short-distance mutant rejected")
+
     hud_binary = BUILD / "hud"
     hud_build = subprocess.run([str(MOJO), "build", str(HUD), "-o", str(hud_binary)],
                                text=True, capture_output=True)
