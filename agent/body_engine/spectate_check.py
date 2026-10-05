@@ -56,7 +56,7 @@ def set_state(d, energy, health, stamina, dead):
 def build(d, tag, flags, k=K, src=None, brain=2):
     """Content-addressed build (mutant-check restores old mtimes): live.mojo `src` (default the current one) + the modules it imports."""
     src = src or ENGINE / 'live.mojo'
-    deps = [src] + [ENGINE / f for f in ('smooth.mojo', 'render.mojo', 'spider_brain.mojo', 'spectate.mojo', 'follow_camera.mojo', 'hud.mojo', 'world.mojo')]
+    deps = [src] + [ENGINE / f for f in ('smooth.mojo', 'render.mojo', 'spider_brain.mojo', 'spectate.mojo', 'follow_camera.mojo', 'hud.mojo', 'world.mojo', 'game_state.mojo', 'world_content.mojo')]
     h = hashlib.sha1(b''.join(f.read_bytes() for f in deps) + ' '.join(flags).encode() + bytes([brain])).hexdigest()[:8]
     b = d / f'{tag}_k{k}_{W}x{H}_{h}'
     if not b.is_file():
@@ -154,6 +154,20 @@ def hud_gate(d, v):
     return ok
 
 
+def tight(path):
+    """Framing tighter than the integration checker's (centre 0.15-0.85, no edge clipping, which a camera 30 mm off the animal still passes, 2.7 % of
+    the frame at 0.38/0.42): in all frames the silhouette centroid within 0.4-0.6 of both axes and the silhouette at least 2 % of the frame."""
+    a = np.memmap(path, np.uint8, 'r').reshape(-1, H, W, 4)
+    lo, hi, size = np.ones(2), np.zeros(2), 1.0
+    for f in a:
+        ys, xs = np.nonzero(f[..., 3] == 255)
+        c = np.array([xs.mean() / W, ys.mean() / H]) if len(xs) else np.array([-1.0, -1.0])
+        lo, hi, size = np.minimum(lo, c), np.maximum(hi, c), min(size, len(xs) / (W * H))
+    ok = bool((lo >= 0.4).all() and (hi <= 0.6).all() and size >= 0.02)
+    print(('PASS' if ok else 'FAIL'), f'follow framing tight: centroid x {lo[0]:.3f}..{hi[0]:.3f} y {lo[1]:.3f}..{hi[1]:.3f} (0.4-0.6), smallest silhouette {100 * size:.2f} % of the frame (>= 2 %)')
+    return ok
+
+
 def integration(receipt):
     if not CHECKER.exists():
         subprocess.run(['git', 'apply', str(PATCH.resolve())], check=True)
@@ -188,6 +202,7 @@ def main(cmd):
             hooks_off(d, v)
     (OUT / 'receipt.json').write_text(json.dumps(receipt, indent=1))
     ok &= integration(OUT / 'receipt.json')
+    ok &= tight(OUT / 'follow.rgba')
     sys.exit(0 if ok else 1)
 
 
