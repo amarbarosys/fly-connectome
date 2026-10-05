@@ -247,6 +247,18 @@ if [ "$stage" = game ]; then  # game layer per step (-DGAME=1, docs/plans/GAME_L
   [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
   echo "PASS all game checks"; exit 0
 fi
+if [ "$stage" = flylink ]; then  # brain-driven fly in live, host transport (BRAIN=1; docs/plans/BRAIN_BODY_LOOP.md): resident Shiu -> 2 DN drives -> FlyGym gait mapping -> 50 ctrl.
+  # Gates: walks > 1 body length with tilt < 20 deg, opposite turn drives give opposite yaw, silenced DN and held ctrl differ from the live brain. Needs the Shiu worker:
+  # submit with --vram 4. Mutants: ctrl write skipped, DN counts zeroed before the readout, left and right drive merged
+  export PYTHONPATH=$PWD
+  L="$M -m agent.body_engine.fly_link check"
+  $L || { echo "FAIL flylink"; fail=$((fail+1)); }
+  ~/iTools/bin/mutant-check agent/body_engine/live.mojo 's/ctx.enqueue_copy(u_b, ctrl_h)/pass/' -- $L || fail=$((fail+1))
+  ~/iTools/bin/mutant-check agent/body_engine/fly_link.py 's/cum.append(side_counts(brain.advance(k), edges))/cum.append(side_counts(brain.advance(k) * 0, edges))/' -- $L || fail=$((fail+1))
+  ~/iTools/bin/mutant-check agent/body_engine/fly_link.py 's/sig = np.clip(drive\[n\], 0, 1)/sig = np.clip(np.full(2, drive[n].mean()), 0, 1)/' -- $L || fail=$((fail+1))
+  [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
+  echo "PASS all flylink checks"; exit 0
+fi
 if [ "$stage" = fluid ]; then  # Flybody flight model: mj_fluid (ellipsoid wings + inertia boxes) inside qfrc_passive, wing velocities up to flapping rate
   R=~/Projects/science/fly-connectome; FL=${FLIGHT:-$R/.work/flight-body}
   [ -f $FL/flight.xml ] || $R/.work/neural-flies/flight-venv/bin/python agent/body_engine/models/flight_export.py $FL
