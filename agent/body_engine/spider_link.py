@@ -168,7 +168,6 @@ def timing():
 
 def watch(k=10):
     """One spider circling under the on-card brain (speed 0.6, turn 0.8), drawn every control step into mpv (K steps = K x 0.1 ms per frame)."""
-    import os
     w, h = 960, 540
     d = files(1, 'watch')
     np.array([0.6, 0.8], np.float32).tofile(d / 'drive.bin')
@@ -177,8 +176,8 @@ def watch(k=10):
     cam = [str(x) for x in (*(look + np.array([0.0, -22.0, 14.0])), *look, 45)]
     mpv = subprocess.Popen(['mpv', '--demuxer=rawvideo', f'--demuxer-rawvideo-w={w}', f'--demuxer-rawvideo-h={h}',
                             '--demuxer-rawvideo-mp-format=rgba', '--no-cache', '-'], stdin=subprocess.PIPE)
-    eng = subprocess.Popen([str(build(d, 1, k, 2, w, h)), str(d) + '/', '0', *cam, '1', '0'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                           pass_fds=(mpv.stdin.fileno(),), preexec_fn=lambda: os.dup2(mpv.stdin.fileno(), 4))
+    eng = subprocess.Popen(['/usr/bin/bash', '-c', f'exec "$@" 4>&{mpv.stdin.fileno()}', 'engine', str(build(d, 1, k, 2, w, h)), str(d) + '/', '0', *cam, '1', '0'],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, pass_fds=(mpv.stdin.fileno(),))
     mpv.wait()
     eng.terminate()
 

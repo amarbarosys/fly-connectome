@@ -81,19 +81,21 @@ def com_series(m, q, v):
 
 def engine_rollout(d, steps, frames=None, cam=None, w=64, h=64, every=0):
     """steps control steps (K = 1) with the host brain: (qpos, qvel, valid contact slots) per step; frames: file for RGBA frames."""
-    import os
     nq, nv, ns = sizes(d)
     b = build(d, 1, 1, 1, w, h)
     cam = cam or ['0', '0', '10', '0', '0', '0', '45']
-    kw = {}
-    f = open(frames, 'wb') if frames else None
-    if f:
-        kw = dict(pass_fds=(f.fileno(),), preexec_fn=lambda: os.dup2(f.fileno(), 4))
-    p = subprocess.Popen([str(b), str(d) + '/', str(steps), *cam, str(every), '1'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, **kw)
+    argv = [str(b), str(d) + '/', str(steps), *cam, str(every), '1']
+    if frames:  # fd 4 = the frames file: a shell redirect (subprocess's close_fds would drop an fd dup'ed in preexec_fn)
+        argv = ['/usr/bin/bash', '-c', 'exec "$@" 4>' + str(Path(frames).resolve()), 'engine', *argv]
+    p = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=open(OUT / 'engine.err', 'wb'))
     q, v, valid = [], [], []
     for i in range(steps):
-        p.stdin.write(ctrl(i).tobytes())
-        p.stdin.flush()
+        try:
+            p.stdin.write(ctrl(i).tobytes())
+            p.stdin.flush()
+        except BrokenPipeError:
+            p.wait()
+            raise SystemExit(f'FAIL jump: engine exited {p.returncode} at step {i}: {(OUT / "engine.err").read_text()[-300:]}')
         buf = p.stdout.read(4 * (NU + nq + nv + ns))
         a = np.frombuffer(buf, np.float32)
         q.append(a[NU:NU + nq].astype(float))
