@@ -769,6 +769,54 @@ def hessian(mi: TI, res: TO, f: Int):
     factorI(mi, res, f, OHN, OHNI, HADR)
 
 
+def lowrank(mi: TI, res: TO, f: Int) -> Bool:
+    """Active-set change without refactoring: before update rewrites OST, every row turning active (inactive) is a
+    rank-1 update (downdate) H +- D j j' of the factored L'DL in OHN (Gill-Golub-Murray-Saunders C1 in elimination
+    order, k from the row's deepest dof back to the root). j lives on the pair's chain, which is the pattern of its
+    deepest row, so the walk stays on that row's elimination path: no fill. w in OMV (free until the next search).
+    False when a downdate's pivot collapses (float32): the caller rebuilds H from scratch."""
+    for p in range(NCP):
+        var nch = Int(mi[CPH + 11 * p + 6]); var choff = Int(mi[CPH + 11 * p + 7])
+        var deep = 0
+        for c in range(nch):
+            deep = max(deep, Int(mi[CCHAIN + choff + c]))
+        var ds = Int(mi[HADR + deep]); var dn = Int(mi[HADR + NV + deep])
+        for sl in range(nslot(mi, p)):
+            if get(res, f, OVALID + sbase(mi, p) + sl) == 0:
+                continue
+            for k in range(4):
+                var row = 4 * (sbase(mi, p) + sl) + k
+                var now = get(res, f, OJAR + row) < 0
+                if now == (get(res, f, OST + row) != 0):
+                    continue
+                for t in range(dn):
+                    res[(OMV + Int(mi[HADR + 2 * NV + ds + t])) * F + f] = 0
+                var jadr = OJ + jbase(mi, p) + (4 * sl + k) * nch
+                for c in range(nch):
+                    res[(OMV + Int(mi[CCHAIN + choff + c])) * F + f] = get(res, f, jadr + c)
+                var a = get(res, f, OD + row) if now else -get(res, f, OD + row)
+                for t in range(dn - 1, -1, -1):
+                    var kk = Int(mi[HADR + 2 * NV + ds + t])
+                    var pk = get(res, f, OMV + kk)
+                    if pk == 0:
+                        continue
+                    var start = Int(mi[HADR + kk]); var diag = Int(mi[HADR + NV + kk]) - 1
+                    var dk = get(res, f, OHN + start + diag)
+                    var dnew = dk + a * pk * pk
+                    if dnew <= 1e-4 * dk:
+                        return False
+                    var beta = a * pk / dnew
+                    a = a * dk / dnew
+                    res[(OHN + start + diag) * F + f] = dnew
+                    res[(OHNI + kk) * F + f] = 1 / dnew
+                    for c in range(diag):
+                        var i = Int(mi[HADR + 2 * NV + start + c])
+                        var wi = get(res, f, OMV + i) - pk * get(res, f, OHN + start + c)
+                        res[(OMV + i) * F + f] = wi
+                        res[(OHN + start + c) * F + f] = get(res, f, OHN + start + c) + beta * wi
+    return True
+
+
 def gradient(mi: TI, res: TO, f: Int):
     """MuJoCo PrimalUpdateGradient (Newton): grad = M qacc - qfrc_smooth - qfrc_constraint, search = -H^-1 grad."""
     for v in range(NV):
@@ -952,9 +1000,20 @@ def newton(mi: TI, mf: TF, res: TO, f: Int):
             res[(OJAR + r) * F + f] += alpha * get(res, f, OJV + r)
             if (get(res, f, OJAR + r) < 0) != (get(res, f, OST + r) != 0):
                 changed = True
+        var cheap = True
+        if changed:
+            comptime if WAVE:  # one sequential walk per animal on lane 0; its verdict shared so all lanes agree
+                sync()
+                if lane() == 0:
+                    res[OPART * F + f] = 1 if lowrank(mi, res, f) else 0
+                sync()
+                cheap = get(res, f, OPART) != 0
+                sync()
+            else:
+                cheap = lowrank(mi, res, f)
         var oldcost = cost
         cost = update(mi, res, f)
-        if changed:
+        if changed and not cheap:
             hessian(mi, res, f)
         gradient(mi, res, f)
         var gn: Float32 = 0
