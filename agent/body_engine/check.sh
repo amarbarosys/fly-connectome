@@ -176,6 +176,30 @@ if [ "$stage" = gravcomp ]; then  # body gravcomp (mj_gravcomp) on the fly and t
   [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
   echo "PASS all gravcomp checks"; exit 0
 fi
+if [ "$stage" = sptendon ]; then  # spatial tendons (mj_tendon, mju_wrap): site-site, pulleys, sphere and cylinder wraps with sidesites (inside the
+  # sphere too: wrap_inside), a fixed tendon beside them, a tendon servo; fixture models/tendon_spatial.xml (random states, then the actuated path
+  # on rollout states) and the fly and spider with three spatial tendons added (model.with_spatial_tendons), vs mj_step on the tendon outputs
+  # (ten_length, ten_velocity, dense ten_J) and everything the tendon spring and damper reach
+  S=agent/body_engine/smooth.mojo; T=agent/body_engine/models/tendon_spatial.xml; mkdir -p $X/st
+  FT=$($M -c "from agent.body_engine.model import with_spatial_tendons; print(with_spatial_tendons('${BODY:-.work/agent/gpu-body-port/body-v2/body.xml}', '$X/st/fly.xml'))")
+  ST=$($M -c "from agent.body_engine.model import with_spatial_tendons; print(with_spatial_tendons('agent/body_engine/models/spider_test.xml', '$X/st/spider.xml'))")
+  for B in $T $FT $ST; do
+    $M -m agent.body_engine.model check $B $X/st/$(basename $B .xml) sptendon 64 || { echo "FAIL sptendon $(basename $B .xml)"; fail=$((fail+1)); }
+  done
+  $M -m agent.body_engine.model check $T $X/st/act sptendon_act 64 || { echo "FAIL sptendon_act"; fail=$((fail+1)); }
+  # the gate must fail with: the wrap side flipped, the tangent solutions swapped, the moment arm sign flipped, the pulley divisor dropped,
+  # the cylinder's height correction dropped, the inside wrap's angle sign flipped
+  for mut in 's/good = ux \* side\[0\] + uy \* side\[1\]/good = -(ux * side[0] + uy * side[1])/' \
+             's/var sgn: Float32 = 1 if i == 0 else -1/var sgn: Float32 = -1 if i == 0 else 1/' \
+             's/tjac(mi, qpos, res, f, row, bb, pb, dif, 1 \/ divisor, frame)/tjac(mi, qpos, res, f, row, bb, pb, dif, -1 \/ divisor, frame)/' \
+             's/divisor = mf\[TNF + w0\]/divisor = 1/' \
+             's/r1\[2\] = p0\[2\] + (p1\[2\] - p0\[2\]) \* (L0 + wlen) \/ (L0 + wlen + L1)/r1[2] = p0[2]/' \
+             's/ang = asin64(z) - asin64(A \* z)/ang = asin64(z) + asin64(A * z)/'; do
+    ~/iTools/bin/mutant-check $S "$mut" -- $M -m agent.body_engine.model check $T $X/mutant sptendon 64 || fail=$((fail+1))
+  done
+  [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
+  echo "PASS all sptendon checks"; exit 0
+fi
 if [ "$stage" = loop ]; then  # K steps per launch, state kept on the card. K=1 vs mj_step (one step: the accuracy
   # gate); one K=10 launch must equal ten K=1 launches byte for byte (the loop). K=10 vs ten chained mj_step is not a
   # gate: the engine's ~5e-6 per-step float32 error grows ~12x in 10 steps on contact-rich states (diag/k_floor.py)
