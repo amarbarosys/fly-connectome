@@ -1,5 +1,5 @@
 """GPU timing and resources of convex.mojo's narrowphase, one thread per case, on convex_check.py's case files:
-float32 results go to DIR/outgpu.f64 (compared by convex_check.py), time per launch is printed. Same collide() as the CPU driver.
+results go to DIR/outgpu.f64 (compared with the CPU out.f64 by convex_check.py gpu), time per launch is printed. Same collide() as the CPU driver.
 
 usage: gpu-wait run --priority 60 --timeout 300 -- convex_gpu DIR/   (build: -DNCASES=n -DNHV=.. -DNHF=.. -DNHE=.. from convex_check.py)"""
 from std.sys import argv, get_defined_int
@@ -10,7 +10,7 @@ from layout import TileTensor, row_major
 from convex import *
 
 comptime CW = 40
-comptime OW = 32
+comptime OW = 36
 comptime N = get_defined_int["NCASES"]()
 comptime NHV = get_defined_int["NHV"]()
 comptime NHF = get_defined_int["NHF"]()
@@ -22,8 +22,8 @@ comptime LV = row_major[3 * NHV]()
 comptime LF = row_major[NHF]()
 comptime LE = row_major[NHE]()
 comptime LM = row_major[3 * NHM]()
-comptime TC = TileTensor[DType.float32, type_of(LC), MutAnyOrigin]
-comptime TO = TileTensor[DType.float32, type_of(LO), MutAnyOrigin]
+comptime TC = TileTensor[T, type_of(LC), MutAnyOrigin]
+comptime TO = TileTensor[T, type_of(LO), MutAnyOrigin]
 comptime TV = TileTensor[DType.float32, type_of(LV), MutAnyOrigin]
 comptime TF = TileTensor[DType.int32, type_of(LF), MutAnyOrigin]
 comptime TE = TileTensor[DType.int32, type_of(LE), MutAnyOrigin]
@@ -57,32 +57,32 @@ def kernel(cases: TC, hv: TV, hf: TF, he: TE, hm: TM, res: TO):
     o2.r0 = v3(cases, b + 20)
     o2.r1 = v3(cases, b + 23)
     o2.r2 = v3(cases, b + 26)
-    var con = collide(o1, o2, S(cases[b + 30]), S(cases[b + 31]), Int(cases[b + 32]))
+    var cs = collide(o1, o2, S(cases[b + 30]), S(cases[b + 31]), S(cases[b + 32]))
     var r = c * OW
     for k in range(OW):
         res[r + k] = 0
-    if con.n > 0:
-        res[r] = 1
-        res[r + 1] = Float32(con.dist)
+    res[r] = Scalar[T](cs.n)
+    for i in range(cs.n):
+        res[r + 1 + 7 * i] = cs.dist[i]
         for k in range(3):
-            res[r + 2 + k] = Float32(con.pos[k])
-            res[r + 5 + k] = Float32(con.normal[k])
+            res[r + 2 + 7 * i + k] = cs.pos[i][k]
+            res[r + 5 + 7 * i + k] = cs.normal[i][k]
 
 
 def main() raises:
     var dir = String(argv()[1])
     var ctx = DeviceContext(0)
-    var cases = List[Float32](length=N * CW, fill=0)
+    var cases = List[Scalar[T]](length=N * CW, fill=0)
     var raw = open(dir + "cases.f64", "r").read_bytes()
     var p = raw.unsafe_ptr().unsafe_bitcast[Float64]()
     for i in range(N * CW):
-        cases[i] = Float32(p[i])
+        cases[i] = Scalar[T](p[i])
     var hvr = open(dir + "hverts.f32", "r").read_bytes()
     var hfr = open(dir + "hfirst.i32", "r").read_bytes()
     var her = open(dir + "hedges.i32", "r").read_bytes()
     var hmr = open(dir + "hmeta.i32", "r").read_bytes()
-    var c_b = ctx.enqueue_create_buffer[DType.float32](N * CW)
-    var o_b = ctx.enqueue_create_buffer[DType.float32](N * OW)
+    var c_b = ctx.enqueue_create_buffer[T](N * CW)
+    var o_b = ctx.enqueue_create_buffer[T](N * OW)
     var v_b = ctx.enqueue_create_buffer[DType.float32](3 * NHV)
     var f_b = ctx.enqueue_create_buffer[DType.int32](NHF)
     var e_b = ctx.enqueue_create_buffer[DType.int32](NHE)
@@ -101,7 +101,7 @@ def main() raises:
         ctx.enqueue_function(k, TileTensor(c_b, LC), TileTensor(v_b, LV), TileTensor(f_b, LF), TileTensor(e_b, LE), TileTensor(m_b, LM), TileTensor(o_b, LO), grid_dim=grid, block_dim=64)
     ctx.synchronize()
     var us = Float64(perf_counter_ns() - t0) / 20 / 1000
-    var host = List[Float32](length=N * OW, fill=0)
+    var host = List[Scalar[T]](length=N * OW, fill=0)
     ctx.enqueue_copy(host.unsafe_ptr(), o_b)
     ctx.synchronize()
     var out = List[Float64](length=N * OW, fill=0)

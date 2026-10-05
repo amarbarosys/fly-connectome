@@ -190,7 +190,72 @@ def floor(kind, n):
           f'worst dist {worst[0]:.2e} pos {worst[1]:.2e} normal {worst[2]:.2e}')
 
 
+def arena_poses(count, prec='f32'):
+    """The narrowphase on the arena states of `check.sh arena` (standing fly moved into walls and stones, model.arena): every
+    box-mesh and ellipsoid-mesh pair at its real poses (rounded to float32 as the engine receives them), against MuJoCo's
+    contacts of the same state. Prints, over the contact-bearing pairs, count mismatches and the dist / pos / normal errors."""
+    from agent.body_engine.model import standing, arena
+    m = mujoco.MjModel.from_xml_path(BODY)
+    d = mujoco.MjData(m)
+    q, v = arena(m, *standing(m, count))
+    sel = [i for i in range(m.npair) if m.geom_type[m.pair_geom1[i]] in (G.mjGEOM_BOX, G.mjGEOM_ELLIPSOID)]
+    meshes = sorted({int(m.geom_dataid[m.pair_geom2[i]]) for i in sel})
+    hv, hf, he, hm, hidx = hull_tables(m, meshes)
+    rows, keys, want = [], [], []
+    for n in range(count):
+        d.qpos[:], d.qvel[:] = q[n], v[n]
+        mujoco.mj_forward(m, d)
+        got = {(c.geom1, c.geom2): [] for c in d.contact[:d.ncon]}
+        for c in d.contact[:d.ncon]:
+            got[(c.geom1, c.geom2)].append((c.dist, c.pos.copy(), c.frame[:3].copy()))
+        for i in sel:
+            g1, g2 = int(m.pair_geom1[i]), int(m.pair_geom2[i])
+            row = np.zeros(CW)
+            row[0] = 2 if m.geom_type[g1] == G.mjGEOM_BOX else 0
+            row[1] = 1
+            row[2:5] = m.geom_size[g1]
+            row[5:8] = d.geom_xpos[g1]; row[8:17] = d.geom_xmat[g1]
+            row[17:20] = d.geom_xpos[g2]; row[20:29] = d.geom_xmat[g2]
+            row[29] = hidx[int(m.geom_dataid[g2])]
+            row[30] = m.pair_margin[i] + m.pair_gap[i]
+            row[31] = m.opt.ccd_tolerance
+            row[32] = min(m.geom_rbound[g1], m.geom_rbound[g2])
+            row[2:29] = row[2:29].astype(np.float32)
+            rows.append(row); keys.append((n, i, g1)); want.append(got.get((g1, g2), []))
+    work = Path('.work/agent/body_engine/convex') / f'arena-{prec}'
+    work.mkdir(parents=True, exist_ok=True)
+    np.array(rows).tofile(work / 'cases.f64')
+    hv.tofile(work / 'hverts.f32'); hf.tofile(work / 'hfirst.i32'); he.tofile(work / 'hedges.i32'); hm.tofile(work / 'hmeta.i32')
+    exe = work / 'ct'
+    p = subprocess.run(['/home/<user>/.local/bin/mojo', 'build', *(['-DCCD64=1'] if prec == 'f64' else []), 'agent/body_engine/convex_test.mojo', '-o', str(exe)], capture_output=True, text=True)
+    if p.returncode or subprocess.run([str(exe), str(work) + '/']).returncode:
+        print('FAIL build or run', p.stderr[-800:])
+        return False
+    out = np.fromfile(work / 'out.f64').reshape(len(rows), OW)
+    nbad, errs, bystate = 0, [], {}
+    for r, (n, i, g1) in enumerate(keys):
+        w = want[r]
+        mine = int(out[r, 0])
+        if len(w) != mine:
+            nbad += 1
+            bystate.setdefault(n, []).append((i, len(w), mine))
+            continue
+        for k, (cd, cp, cn) in enumerate(w):
+            errs.append((n, abs(out[r, 1 + 7 * k] - cd), np.abs(out[r, 2 + 7 * k:5 + 7 * k] - cp).max(), np.abs(out[r, 5 + 7 * k:8 + 7 * k] - cn).max()))
+    a = np.array(errs)
+    print(f'arena poses {prec}: {len(rows)} pair-states, {len(a)} contacts compared, count mismatches {nbad} {dict(list(bystate.items())[:6])}')
+    print(f'  max dist {a[:, 1].max():.1e} pos {a[:, 2].max():.1e} normal {a[:, 3].max():.1e}; p99 pos {np.percentile(a[:, 2], 99):.1e} normal {np.percentile(a[:, 3], 99):.1e}')
+    for n in (32, 16, 4, 53, 12, 9, 5):
+        b = a[a[:, 0] == n]
+        print(f'  state {n}: {len(b)} contacts, max dist {b[:, 1].max():.1e} pos {b[:, 2].max():.1e} normal {b[:, 3].max():.1e}') if len(b) else None
+    worst = np.argsort(-a[:, 3])[:5]
+    print('  worst normal (state, dist err, pos err, normal err):', [tuple(float(f'{x:.2g}') for x in a[k]) for k in worst])
+    return nbad == 0
+
+
 if __name__ == '__main__':
+    if sys.argv[1] == 'arena':
+        sys.exit(0 if arena_poses(int(sys.argv[2]), sys.argv[3] if len(sys.argv) > 3 else 'f32') else 1)
     if sys.argv[1] == 'floor':
         floor(sys.argv[2], int(sys.argv[3]))
         sys.exit(0)

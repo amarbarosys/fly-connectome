@@ -12,8 +12,8 @@ Deviation from the C source, all bounded forms of unbounded C: the polytope is a
 faces (as mjc_ccdSize), the EPA horizon recursion is an explicit stack of CCD_STACK frames, horizon edges 24 as the C buffer.
 """
 from std.sys import get_defined_int
-from std.memory import UnsafePointer
-from std.math import sqrt
+from std.memory import Pointer
+from std.math import sqrt, floor, ceil
 
 comptime CCD_DEBUG = get_defined_int["CCD_DEBUG", 0]() == 1
 comptime CCD64 = get_defined_int["CCD64", 0]() == 1
@@ -32,6 +32,7 @@ comptime BIG = S(1.7976931348623157e308) if CCD64 else S(3.4028234e38)
 comptime ELLIPSOID = 0
 comptime MESH = 1
 comptime BOX = 2
+comptime PRISM = 3  # one heightfield cell triangle as a prism (mjc_ConvexHField): 6 vertices in the hfield frame
 
 
 @always_inline
@@ -77,13 +78,14 @@ struct Shape[o: MutOrigin](Copyable):
     var r2: V
     var size: V
     var margin: S
-    var verts: UnsafePointer[Float32, Self.o]  # hull vertices, geom frame
-    var first: UnsafePointer[Int32, Self.o]  # per hull vertex: first edge, absolute into edges
-    var edges: UnsafePointer[Int32, Self.o]  # hull-local neighbour ids, -1 ends a vertex
+    var verts: Pointer[Float32, Self.o]  # hull vertices, geom frame
+    var first: Pointer[Int32, Self.o]  # per hull vertex: first edge, absolute into edges
+    var edges: Pointer[Int32, Self.o]  # hull-local neighbour ids, -1 ends a vertex
     var vertindex: Int
     var meshindex: Int
+    var prism: InlineArray[V, 6]
 
-    def __init__(out self, verts: UnsafePointer[Float32, Self.o], first: UnsafePointer[Int32, Self.o], edges: UnsafePointer[Int32, Self.o]):
+    def __init__(out self, verts: Pointer[Float32, Self.o], first: Pointer[Int32, Self.o], edges: Pointer[Int32, Self.o]):
         self.kind = 0
         self.pos = V(0)
         self.r0 = V(1, 0, 0, 0)
@@ -96,6 +98,7 @@ struct Shape[o: MutOrigin](Copyable):
         self.edges = edges
         self.vertindex = -1
         self.meshindex = -1
+        self.prism = InlineArray[V, 6](fill=V(0))
 
     @always_inline
     def local(self, d: V) -> V:
@@ -107,8 +110,27 @@ struct Shape[o: MutOrigin](Copyable):
         """mat l + pos."""
         return V(dot(self.r0, l), dot(self.r1, l), dot(self.r2, l), 0) + self.pos
 
+    def center(self) -> V:
+        """mjc_center (engine_collision_convex.c:158): the geom position, the mean of the 6 vertices for a prism."""
+        if self.kind == PRISM:
+            var c = V(0)
+            for i in range(6):
+                c = c + self.prism[i]
+            return c * (S(1) / 6)
+        return self.pos
+
     def support(mut self, d: V) -> V:
         """mjc_ellipsoidSupport (engine_collision_convex.c:256), mjc_hillclimbSupport (:391), mjc_boxSupport (:317)."""
+        if self.kind == PRISM:  # mjc_prism_support (:436): best vertex of the bottom (dir z < 0) or top triangle
+            var istart = 0 if d[2] < 0 else 3
+            var ibest = istart
+            var best = dot(self.prism[istart], d)
+            for i in range(1, 3):
+                var tmp = dot(self.prism[istart + i], d)
+                if tmp > best:
+                    ibest = istart + i
+                    best = tmp
+            return self.prism[ibest]
         var ld = self.local(d)
         if self.kind == ELLIPSOID:
             var ls = V(ld[0] * self.size[0], ld[1] * self.size[1], ld[2] * self.size[2], 0)
@@ -128,19 +150,19 @@ struct Shape[o: MutOrigin](Copyable):
         var imax = self.meshindex if self.meshindex >= 0 else 0
         while imax != prev:
             prev = imax
-            var i = Int(self.first[imax])
+            var i = Int(self.first[unsafe_offset=imax])
             while True:
-                var sub = Int(self.edges[i])
+                var sub = Int(self.edges[unsafe_offset=i])
                 if sub < 0:
                     break
-                var vd = ld[0] * S(self.verts[3 * sub]) + ld[1] * S(self.verts[3 * sub + 1]) + ld[2] * S(self.verts[3 * sub + 2])
+                var vd = ld[0] * S(self.verts[unsafe_offset=3 * sub]) + ld[1] * S(self.verts[unsafe_offset=3 * sub + 1]) + ld[2] * S(self.verts[unsafe_offset=3 * sub + 2])
                 if vd > mx:
                     mx = vd
                     imax = sub
                 i += 1
         self.meshindex = imax
         self.vertindex = imax
-        return self.world(V(S(self.verts[3 * imax]), S(self.verts[3 * imax + 1]), S(self.verts[3 * imax + 2]), 0))
+        return self.world(V(S(self.verts[unsafe_offset=3 * imax]), S(self.verts[unsafe_offset=3 * imax + 1]), S(self.verts[unsafe_offset=3 * imax + 2]), 0))
 
 
 comptime Sp = Shape[MutAnyOrigin]
@@ -340,9 +362,9 @@ def s2d(mut lam: InlineArray[S, 4], s1: V, s2: V, s3: V):
     var m14 = s2[1] * s3[2] - s2[2] * s3[1] - s1[1] * s3[2] + s1[2] * s3[1] + s1[1] * s2[2] - s1[2] * s2[1]
     var m24 = s2[0] * s3[2] - s2[2] * s3[0] - s1[0] * s3[2] + s1[2] * s3[0] + s1[0] * s2[2] - s1[2] * s2[0]
     var m34 = s2[0] * s3[1] - s2[1] * s3[0] - s1[0] * s3[1] + s1[1] * s3[0] + s1[0] * s2[1] - s1[1] * s2[0]
-    var mmax = S(0)
-    var x = 0
-    var y = 1
+    var mmax: S
+    var x: Int
+    var y: Int
     var mu1 = abs(m14)
     var mu2 = abs(m24)
     var mu3 = abs(m34)
@@ -780,9 +802,9 @@ def tri_affine_coord(mut lam: InlineArray[S, 4], v1: V, v2: V, v3: V, p: V):
     var m14 = v2[1] * v3[2] - v2[2] * v3[1] - v1[1] * v3[2] + v1[2] * v3[1] + v1[1] * v2[2] - v1[2] * v2[1]
     var m24 = v2[0] * v3[2] - v2[2] * v3[0] - v1[0] * v3[2] + v1[2] * v3[0] + v1[0] * v2[2] - v1[2] * v2[0]
     var m34 = v2[0] * v3[1] - v2[1] * v3[0] - v1[0] * v3[1] + v1[1] * v3[0] + v1[0] * v2[1] - v1[1] * v2[0]
-    var mmax = S(0)
-    var x = 0
-    var y = 1
+    var mmax: S
+    var x: Int
+    var y: Int
     var mu1 = abs(m14)
     var mu2 = abs(m24)
     var mu3 = abs(m34)
@@ -867,7 +889,7 @@ def epa(mut st: Status, mut pt: Polytope, mut o1: Sp, mut o2: Sp) -> Int:
             upper2 = upper * upper
         if upper - lower < tolerance:
             break
-        if discrete or (repeat_stops and (o1.kind != ELLIPSOID and o2.kind != ELLIPSOID)):
+        if discrete or (repeat_stops and (o1.kind == MESH or o1.kind == BOX) and (o2.kind == MESH or o2.kind == BOX)):
             var i = 0
             var nverts = pt.nverts - 1
             while i < nverts:
@@ -1140,8 +1162,8 @@ def polytope4(mut pt: Polytope, mut st: Status, mut o1: Sp, mut o2: Sp) -> Int:
 def ccd(mut st: Status, mut o1: Sp, mut o2: Sp) -> S:
     """mjc_ccd (engine_collision_gjk.c:2220) for geoms that are neither sphere nor capsule, penetration contacts only
     (dist_cutoff 0, contacts wanted). Returns the signed distance (< 0: penetrating); witness points in st.x1, st.x2."""
-    st.x1 = o1.pos
-    st.x2 = o2.pos
+    st.x1 = o1.center()
+    st.x2 = o2.center()
     st.gjk_iterations = 0
     st.epa_iterations = 0
     st.epa_status = -1
@@ -1315,4 +1337,113 @@ def collide(mut o1: Sp, mut o2: Sp, margin: S, tol: S, rbound: S) -> ConSet:
         cs.pos[i] = cs.pos[i] + org
     o1.pos = o1.pos + org
     o2.pos = org
+    return cs^
+
+
+# ---------------------------------------- heightfield (engine_collision_convex.c:1100) ------------------------
+
+comptime HF_SLOTS = get_defined_int["HF_SLOTS", 50]()  # contacts kept per heightfield pair (mjMAXCONPAIR 50)
+
+
+trait Height:
+    def h(self, r: Int, c: Int) -> S:
+        """Height of grid node (row r, column c) above the hfield frame's origin: hfield_data * size[2]."""
+        ...
+
+
+struct HCons(Copyable):
+    """Contacts of one heightfield pair in the hfield frame, in prism order."""
+    var n: Int
+    var dist: InlineArray[S, HF_SLOTS]
+    var pos: InlineArray[V, HF_SLOTS]
+    var normal: InlineArray[V, HF_SLOTS]
+
+    def __init__(out self):
+        self.n = 0
+        self.dist = InlineArray[S, HF_SLOTS](fill=0)
+        self.pos = InlineArray[V, HF_SLOTS](fill=V(0))
+        self.normal = InlineArray[V, HF_SLOTS](fill=V(0))
+
+
+@always_inline
+def add_prism_vert(mut o: Sp, hf: Some[Height], r: Int, c: Int, i: Int, dx: S, dy: S, size0: S, size1: S, margin: S):
+    """addPrismVert (engine_collision_convex.c:1100): slide the prism by one vertex, the new one at the last position."""
+    o.prism[0] = o.prism[1]
+    o.prism[1] = o.prism[2]
+    o.prism[3] = o.prism[4]
+    o.prism[4] = o.prism[5]
+    var dr = 1 - i
+    var x = dx * S(c) - size0
+    var y = dy * S(r + dr) - size1
+    o.prism[2] = V(x, y, o.prism[2][2], 0)
+    o.prism[5] = V(x, y, hf.h(r + dr, c) + margin, 0)
+
+
+def collide_hfield(hf: Some[Height], mut mesh: Sp, nrow: Int, ncol: Int, size0: S, size1: S, size2: S, size3: S, margin: S,
+                   tol: S, rb2: S, endless: Bool, bottom_prism: V) -> HCons:
+    """mjc_ConvexHField (engine_collision_convex.c:1120) with native CCD, in the hfield frame (the mesh's pose is already
+    expressed in it: pos, rotation rows): the sphere and AABB early returns, the sub-grid under the mesh's AABB, one
+    GJK + EPA per cell-triangle prism whose top is not below the mesh, the prism's top raised by the margin and the mesh
+    inflated by it. Contacts in prism order, at most HF_SLOTS. endless: no clamp to the grid (the engine's terrain is a
+    function; nodes outside nrow x ncol exist). bottom_prism is unused padding for call symmetry."""
+    var cs = HCons()
+    var lp = mesh.pos
+    var radius = rb2 + margin
+    if size0 < lp[0] - radius or -size0 > lp[0] + radius or size1 < lp[1] - radius or -size1 > lp[1] + radius:
+        if not endless:
+            return cs^
+    if size2 < lp[2] - radius or -size3 > lp[2] + radius:
+        if not endless:
+            return cs^
+    mesh.margin = 0
+    var xmax = mesh.support(V(1, 0, 0, 0))[0]
+    var xmin = mesh.support(V(-1, 0, 0, 0))[0]
+    var ymax = mesh.support(V(0, 1, 0, 0))[1]
+    var ymin = mesh.support(V(0, -1, 0, 0))[1]
+    var zmax = mesh.support(V(0, 0, 1, 0))[2]
+    var zmin = mesh.support(V(0, 0, -1, 0))[2]
+    if not endless:
+        if xmin - margin > size0 or xmax + margin < -size0 or ymin - margin > size1 or ymax + margin < -size1 or zmin - margin > size2 or zmax + margin < -size3:
+            return cs^
+    var dx = (2 * size0) / S(ncol - 1)
+    var dy = (2 * size1) / S(nrow - 1)
+    var cmin = Int(floor((xmin + size0) / (2 * size0) * S(ncol - 1)))
+    var cmax = Int(ceil((xmax + size0) / (2 * size0) * S(ncol - 1)))
+    var rmin = Int(floor((ymin + size1) / (2 * size1) * S(nrow - 1)))
+    var rmax = Int(ceil((ymax + size1) / (2 * size1) * S(nrow - 1)))
+    if not endless:
+        cmin = max(0, cmin)
+        cmax = min(ncol - 1, cmax)
+        rmin = max(0, rmin)
+        rmax = min(nrow - 1, rmax)
+    mesh.margin = margin
+    var o1 = Sp(mesh.verts, mesh.first, mesh.edges)
+    o1.kind = PRISM
+    o1.prism[0] = V(0, 0, -size3, 0)
+    o1.prism[1] = V(0, 0, -size3, 0)
+    o1.prism[2] = V(0, 0, -size3, 0)
+    var r = rmin
+    while r < rmax:
+        add_prism_vert(o1, hf, r, cmin, 0, dx, dy, size0, size1, margin)
+        add_prism_vert(o1, hf, r, cmin, 1, dx, dy, size0, size1, margin)
+        var c = cmin + 1
+        while c <= cmax:
+            for i in range(2):
+                add_prism_vert(o1, hf, r, c, i, dx, dy, size0, size1, margin)
+                if o1.prism[3][2] < zmin and o1.prism[4][2] < zmin and o1.prism[5][2] < zmin:
+                    continue
+                var st = Status()
+                st.tolerance = tol
+                st.max_contacts = 1
+                o1.margin = 0
+                var d = ccd(st, o1, mesh)
+                if d < 0:
+                    cs.dist[cs.n] = d
+                    cs.pos[cs.n] = (st.x1 + st.x2) * S(0.5)
+                    cs.normal[cs.n] = contact_normal(st)
+                    cs.n += 1
+                    if cs.n >= HF_SLOTS:
+                        return cs^
+            c += 1
+        r += 1
     return cs^
