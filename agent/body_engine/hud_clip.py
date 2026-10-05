@@ -6,7 +6,7 @@ The spider walks a circle under the card brain (BRAIN=2, K=10, 640 x 360) with F
 visibly). From the engine's own traces of the same frames (game rows, sampled plume, root pose) every one of the 300 frames must show: each of the three state bars
 exactly round(row x 120) px wide; the concentration text pixel-equal to the glyphs of the sampled values; both plume sources' mini-map squares at hud.project_source
 (descriptor, animal root of that frame) within 0.55 px in their kind colour; the animal centred (spectate_check.tight). Hooks off (no flag): the first frame of the starting
-state is byte-equal to the one main's live.mojo (git show main) draws. One frame goes to hud-frame.png for a human look.
+state is byte-equal to the one the live.mojo this branch started from draws (the first live.mojo-touching commit's parent in main..HEAD; 5faa668 once merged). One frame goes to hud-frame.png for a human look.
 check.sh hudclip adds the mutants: the mini-map source x and y swapped (marker at the wrong place), a state bar one pixel short.
 """
 import os
@@ -29,12 +29,15 @@ def hooks_off():
     d = sc.files()
     src = OUT / 'pre' / 'live.mojo'
     src.parent.mkdir(parents=True, exist_ok=True)
-    src.write_text(subprocess.run(['git', 'show', 'main:agent/body_engine/live.mojo'], check=True, capture_output=True, text=True).stdout)
+    mine = subprocess.run(['git', 'log', 'main..HEAD', '--format=%H', '--', 'agent/body_engine/live.mojo'], capture_output=True, text=True).stdout.split()
+    ref = mine[-1] + '^' if mine else '5faa668'  # live.mojo as this branch found it (main's own copy moves on, e.g. -DGAZE needs eyes.mojo changes this tree lacks); merged: the pre-hook file
+    src.write_text(subprocess.run(['git', 'show', f'{ref}:agent/body_engine/live.mojo'], check=True, capture_output=True, text=True).stdout)
+    print(f'reference live.mojo: {ref}')
     sc.run(sc.build(d, 'pre_main', [], 1, src), d, 1, OUT / 'main.rgba')
     sc.run(sc.build(d, 'off_main', [], 1), d, 1, OUT / 'off.rgba')
     a, b = (OUT / 'main.rgba').read_bytes(), (OUT / 'off.rgba').read_bytes()
     ok = bool(a) and a == b
-    print(('PASS' if ok else 'FAIL'), f'hooks off: first frame byte-equal to main live.mojo ({len(a)} bytes)')
+    print(('PASS' if ok else 'FAIL'), f'hooks off: first frame byte-equal to the base live.mojo ({len(a)} bytes)')
     return ok
 
 
@@ -87,7 +90,7 @@ def main():
     ok &= clip()
     if not ok:
         sys.exit('FAIL hud_clip')
-    print('PASS hud_clip: 300 frames, every overlay exact per frame, hooks off byte-equal to main')
+    print('PASS hud_clip: 300 frames, every overlay exact per frame, hooks off byte-equal to the base live.mojo')
 
 
 if __name__ == '__main__':
