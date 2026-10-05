@@ -34,6 +34,7 @@ comptime BAR_PITCH = 14
 comptime PANEL_W = BAR_X + BAR_W + 8
 comptime PANEL_H = BAR_Y + 3 * BAR_PITCH
 comptime HUD_ALPHA = UInt32(254)
+comptime TEXT_RGB = UInt32(0x202020)  # labels and concentration text: dark, the floor and sky are pale (white text was invisible on them)
 comptime NSITE = get_defined_int["NSITE", 2]()  # WORLD: odor sites (fly/l_odor, fly/r_odor; spider: leg I tarsus tips), sites.bin = body, local xyz
 comptime NSRC = 2  # WORLD: plume sources, src.bin = x_mm, y_mm, kind, present, remaining per source (world_content.sample_two takes two)
 comptime LSITE = row_major[4 * NSITE]()
@@ -107,7 +108,7 @@ def hud(img: ren.TIMG, state: TGS):
     if x >= BAR_X - 12 and x < BAR_X - 6:  # label glyph at 2x: 6 x 10 px
         if row < -1 or row > 8 or not glyph_bit(bar, (x - (BAR_X - 12)) // 2, (row + 1) // 2):
             return
-        rgb = UInt32(0xFFFFFF)
+        rgb = TEXT_RGB
     elif x >= BAR_X and x < BAR_X + BAR_W and row >= 0 and row < BAR_H:
         var fill = bar_rect(Float32(BAR_X), Float32(BAR_Y), Float32(BAR_W), Float32(BAR_H), state[bar * ren.F])
         if Float32(x - BAR_X) + 0.5 < fill.width:
@@ -181,7 +182,7 @@ def hud_text(img: ren.TIMG, plume: TPLUME):
         which = text_glyph(plume, line, site, ch)
         if not glyph16(which, (cx % 8) // 2, gy):
             return
-    img[y * ren.W + x] = UInt32(0xFFFFFF) | HUD_ALPHA << 24
+    img[y * ren.W + x] = TEXT_RGB | HUD_ALPHA << 24
 
 
 def minimap(img: ren.TIMG, pose: ren.TPOSE, root: TROOT, src: TSRC):

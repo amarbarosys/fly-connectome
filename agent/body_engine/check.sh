@@ -302,13 +302,14 @@ if [ "$stage" = flylink ]; then  # brain-driven fly in live, host transport (BRA
 fi
 if [ "$stage" = world_hud ]; then  # plume world in the live frame (-DWORLD=1, docs/plans/WORLD.md): odor sites sample the plume on the card, the HUD prints the
   # concentrations and draws the sources from the same descriptor, fly (fly/l_odor, fly/r_odor) and spider (leg I tarsus tips), decoy present and absent.
-  # Mutants: food/decoy swapped in the sampler, the presence flag ignored, mini-map y flipped
+  # Mutants: food/decoy swapped in the sampler, the presence flag ignored, mini-map y flipped, text colour back to white (illegible on the pale scene)
   export PYTHONPATH=$PWD
   W="$M -m agent.body_engine.world_check check"
   $W || { echo "FAIL world_hud"; fail=$((fail+1)); }
   ~/iTools/bin/mutant-check agent/body_engine/spectate.mojo 's|    plume\[2 \* s\] = c\[0\]|    plume[2 * s] = c[1]|' -- $W spider || fail=$((fail+1))
   ~/iTools/bin/mutant-check agent/body_engine/spectate.mojo 's|Int32(src\[8\]), src\[9\])|Int32(1), src[9])|' -- $W spider || fail=$((fail+1))
   ~/iTools/bin/mutant-check agent/body_engine/hud.mojo 's|center_y - (source_y - target_y) \* scale|center_y + (source_y - target_y) * scale|' -- $W spider || fail=$((fail+1))
+  ~/iTools/bin/mutant-check agent/body_engine/spectate.mojo 's|comptime TEXT_RGB = UInt32(0x202020)|comptime TEXT_RGB = UInt32(0xFFFFFF)|' -- $W spider || fail=$((fail+1))  # white text on the pale floor: invisible
   [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
   echo "PASS all world_hud checks"; exit 0
 fi
