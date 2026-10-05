@@ -13,7 +13,7 @@ ln -s "$R/.work/agent/gpu-body-port" "$W/.work/agent/gpu-body-port"
 for d in spider-body mujoco-src; do [ -e "$R/.work/agent/body_engine/$d" ] && ln -s "$R/.work/agent/body_engine/$d" "$W/.work/agent/body_engine/$d"; done
 fail=0; bad=""
 for s in "$@"; do
-  if gpu-wait run --priority 70 --timeout 3600 -- "$W/agent/body_engine/check.sh" "$s" > "$L/$C-$s.log" 2>&1; then
+  if gpu-wait run --priority 70 --shared --vram 1 --timeout 3600 -- "$W/agent/body_engine/check.sh" "$s" > "$L/$C-$s.log" 2>&1; then
     echo "PASS $s ($(grep -cE '^PASS' "$L/$C-$s.log") PASS lines)"
   else
     echo "FAIL $s: $L/$C-$s.log"; fail=$((fail+1)); bad="$bad $s"
