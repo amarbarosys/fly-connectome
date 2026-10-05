@@ -5,8 +5,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 if [ -z "${CHECK_LOCK_HELD:-}" ]; then  # a stage that calls another (solver -> loopk) passes the lock down
-  mkdir -p .work; exec 9>.work/check.lock  # one stage per worktree: mutant-check edits sources in place (SHARED rule 13)
-  flock -n 9 || { echo "FAIL check.sh: another stage is running in $(pwd); run stages one at a time"; exit 1; }
+  mkdir -p .work; exec 9>>.work/check.lock  # one stage per worktree: mutant-check edits sources in place (SHARED rule 13)
+  flock -n 9 || { echo "FAIL check.sh: another stage is running in $(pwd) ($(tail -n 1 .work/check.lock)); run stages one at a time"; exit 1; }
+  echo "pid $$ stage ${1:-kinematics} since $(date +%T)" > .work/check.lock
   export CHECK_LOCK_HELD=1
 fi
 stage=${1:-kinematics}; M=.venv/bin/python; X=.work/agent/body_engine; fail=0
