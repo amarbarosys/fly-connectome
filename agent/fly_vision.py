@@ -10,10 +10,13 @@ from agent.eye_map import PATH, annotations
 RMAX, BINS, BG = 150.0, 5, 0.6  # Hz at full darkening, rate levels per image, background luminance
 
 
-def receptors():
-    """MCNS R1-6 indices with a viewing direction, and their (azimuth, elevation) in degrees."""
+LAMINA = r'^(R[1-6]|L[1-3]$)'  # photoreceptors plus their lamina targets L1-L3 (each column's own luminance)
+
+
+def receptors(types=r'^R[1-6]'):
+    """MCNS cells of `types` (regex on type) with a viewing direction, and their (azimuth, elevation) in degrees."""
     m = np.load(PATH)
-    pr = annotations()['type'].fillna('').str.match(r'^R[1-6]').to_numpy() & ~np.isnan(m['az'])
+    pr = annotations()['type'].fillna('').str.match(types).to_numpy() & ~np.isnan(m['az'])
     ids = np.flatnonzero(pr)
     return ids, m['az'][ids], m['el'][ids]
 

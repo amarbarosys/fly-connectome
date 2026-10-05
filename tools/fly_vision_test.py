@@ -17,7 +17,7 @@ from agent.shiu import ShiuGPU
 from agent.visual_side import decode
 
 K = 8
-ids, az, el = fv.receptors()
+ids, az, el = fv.receptors(fv.LAMINA if 'lamina' in sys.argv else r'^R[1-6]')
 a = annotation_table()
 dn = np.flatnonzero(a.superclass.fillna('').str.startswith('descending').to_numpy())
 data = mcns.graph()
