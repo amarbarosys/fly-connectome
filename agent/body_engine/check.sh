@@ -326,6 +326,59 @@ if [ "$stage" = integrator ]; then  # implicitfast (mj_implicitSkip) vs MuJoCo w
   [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
   echo "PASS all integrator checks (implicitfast)"; exit 0
 fi
+if [ "$stage" = implicit ]; then  # full implicit (mj_implicit: qDeriv with mjd_rne_vel, LU) and the implicitfast midpoint of standalone free bodies, vs MuJoCo
+  F=.work/agent/gpu-body-port/body-v2/body.xml; SP=agent/body_engine/models/spider_test.xml; MP=agent/body_engine/models/midpoint.xml
+  SB=.work/agent/body_engine/spider-body/spider.xml; I=$X/implicit; KV=0.01
+  echo "COVERAGE integrator=implicit (2): fly step (shipped kv 0) + actuated (airborne states, kv=$KV), spider_test step (free, ball, hinge, slide), world fly+spider at 8 and 200 mm"
+  echo "COVERAGE integrator=implicitfast (3) midpoint: four standalone free bodies (models/midpoint.xml: simple, aligned, coupled, coupled and rotated), contact-free; contact eligibility in the midpoint_contact part"
+  echo "COVERAGE not covered: fluid and tendon-damping derivatives (refused at export), contact states under full implicit (MEASURED only, active-set float32 noise as the implicitfast gate), WAVE=1"
+  $M -m agent.body_engine.reject_check || { echo "FAIL reject"; fail=$((fail+1)); }
+  ~/iTools/bin/mutant-check agent/body_engine/model.py 's/m.opt.density or m.opt.viscosity or m.tendon_damping.any()/False/' -- $M -m agent.body_engine.reject_check || fail=$((fail+1))
+  export ENGINE_OPT=integrator=2
+  $M -m agent.body_engine.model check $F $I/fly-step step 64 || { echo "FAIL fly step implicit"; fail=$((fail+1)); }
+  $M -m agent.body_engine.model check $SP $I/spider step 64 || { echo "FAIL spider step implicit"; fail=$((fail+1)); }
+  export ENGINE_OPT=integrator=2,kv=$KV
+  A=$($M -m agent.body_engine.model airborne $F $I/fly | tail -1)
+  STATES=$A $M -m agent.body_engine.model check $F $I/fly actuated 64 || { echo "FAIL fly actuated implicit"; fail=$((fail+1)); }
+  # the gate must fail without the Coriolis derivative (mjd_rne_vel's term of qLU), with the damping term of qLU flipped, and without Dcacc inherited from the parent
+  export ENGINE_OPT=integrator=2
+  ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo 's/+= h \* (fr \* cd).reduce_add()/+= 0 * h * (fr * cd).reduce_add()/' -- \
+    $M -m agent.body_engine.model check $F $I/mutant step 64 || fail=$((fail+1))
+  ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo 's/+= h \* (fr \* cd).reduce_add()/+= 0 * h * (fr * cd).reduce_add()/' -- \
+    $M -m agent.body_engine.model check $SP $I/mutant step 64 || fail=$((fail+1))
+  ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo 's/Int(mi\[DDG + v\])) \* F + f\] += h \* mf\[DAMP + v\]/Int(mi[DDG + v])) * F + f] -= h * mf[DAMP + v]/' -- \
+    $M -m agent.body_engine.model check $SP $I/mutant step 64 || fail=$((fail+1))
+  ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo 's/res\[(ODCA + 6 \* badr + r) \* F + f\] = get(res, f, ODCA + 6 \* padr + r)/res[(ODCA + 6 * badr + r) * F + f] = 0/' -- \
+    $M -m agent.body_engine.model check $SP $I/mutant step 64 || fail=$((fail+1))
+  # islands: two animals in one model (own LU rows each), at 200 mm (two islands) and 8 mm
+  export ENGINE_OPT=integrator=2,kv=$KV
+  for off in 200 8; do
+    W=$($M -c "from agent.body_engine.model import combine; print(combine('$F', '$SB', ($off, 0, 0), 'imworld$off'))")
+    AW=$($M -m agent.body_engine.model airborne $W $I/world$off | tail -1)
+    STATES=$AW $M -m agent.body_engine.model check $W $I/world$off actuated 64 || { echo "FAIL implicit world at $off mm"; fail=$((fail+1)); }
+  done
+  # midpoint (implicitfast, mj_midpoint)
+  export ENGINE_OPT=integrator=3
+  $M -m agent.body_engine.model check $MP $I/mid step 64 || { echo "FAIL midpoint step"; fail=$((fail+1)); }
+  ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo 's/if not mid_eligible(mi, res, f, b):/if True:/' -- \
+    $M -m agent.body_engine.model check $MP $I/mutant step 64 || fail=$((fail+1))
+  ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo 's/var dw_body = rot(iquat, 2 \* delta)/var dw_body = rot(iquat, delta)/' -- \
+    $M -m agent.body_engine.model check $MP $I/mutant step 64 || fail=$((fail+1))
+  ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo 's/var du = rot(iquat, 2 \* (x - cross(delta, r_com)))/var du = rot(iquat, 2 * x)/' -- \
+    $M -m agent.body_engine.model check $MP $I/mutant step 64 || fail=$((fail+1))
+  ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo 's/force \/ mass + rot(rot_x2i, m3(mf, GRAV))/force \/ mass/' -- \
+    $M -m agent.body_engine.model check $MP $I/mutant step 64 || fail=$((fail+1))
+  # midpoint_contact: p and q touch in about half the states (live contact: ordinary implicitfast step), r never does (always midpoint)
+  MC=agent/body_engine/models/midpoint_contact.xml
+  $M -m agent.body_engine.midpoint_states $I/mc-states.npz 64
+  STATES=$I/mc-states.npz $M -m agent.body_engine.model check $MC $I/mc contact 64 || { echo "FAIL midpoint contact"; fail=$((fail+1)); }
+  ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo 's/if not mid_eligible(mi, res, f, b):/if True:/' -- \
+    env STATES=$I/mc-states.npz $M -m agent.body_engine.model check $MC $I/mutant contact 64 || fail=$((fail+1))
+  ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo 's/or Int(mi\[GBODY + Int(mi\[CPH + 11 \* p + 1\])\]) == b:/or False:/' -- \
+    env STATES=$I/mc-states.npz $M -m agent.body_engine.model check $MC $I/mutant contact 64 || fail=$((fail+1))
+  [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
+  echo "PASS all implicit checks"; exit 0
+fi
 if [ "$stage" = tendon ]; then  # Flybody flight model, airborne (no contacts) with a spring and damper on its two fixed tendons: full step, actuators incl. trntype 3
   R=~/Projects/science/fly-connectome; FL=${FLIGHT:-$R/.work/flight-body}
   [ -f $FL/flight.xml ] || $R/.work/neural-flies/flight-venv/bin/python agent/body_engine/models/flight_export.py $FL

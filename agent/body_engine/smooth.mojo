@@ -118,7 +118,24 @@ comptime CMOC = CEQM + NEQCH
 # gravcomp (model.py gravcomp_block, last): ints jnt_actgravcomp per joint, floats body_gravcomp per body
 comptime GRAVCOMP = get_defined_int["GRAVCOMP", 0]() == 1
 comptime CGC = CMOC + (NB if NMOCAP > 0 else 0)
-comptime NI = CGC + (NJ if GRAVCOMP else 0)
+comptime CIMP = CGC + (NJ if GRAVCOMP else 0)
+# full implicit integrator (model.py implicit_block, INTEGRATOR 2, last): per body B_rownnz, B_rowadr, ancestor dofs; B_colind; per dof D_rowadr, D_diag, D_rownnz; D_colind; mapM2D
+comptime IMPL = INTEGRATOR == 2
+comptime NBB = get_defined_int["NBB", 0]()  # MuJoCo nB: body-dof nonzeros
+comptime NDD = get_defined_int["NDD", 0]()  # MuJoCo nD: dof-dof nonzeros
+comptime BRN = CIMP
+comptime BRA = BRN + NB
+comptime BANC = BRA + NB
+comptime BCOL = BANC + NB
+comptime DRA = BCOL + NBB
+comptime DDG = DRA + NV
+comptime DRN = DDG + NV
+comptime DCOL = DRN + NV
+comptime M2D = DCOL + NDD
+# implicit midpoint of standalone free bodies (model.py mid_block, implicitfast, after the implicit block): per candidate body, dof address, aligned (ipos = 0)
+comptime NMID = get_defined_int["NMID", 0]()
+comptime CMID = M2D + NDD if IMPL else CIMP
+comptime NI = CMID + 3 * NMID
 comptime CKIND = NI2
 # mf.bin: body_pos, body_quat, jnt_pos, jnt_axis, qpos0, body_ipos, body_iquat, geom_pos, geom_quat
 comptime BPOS = 0
@@ -243,7 +260,14 @@ comptime ORKQ = NROW0  # RK4 scratch (INTEGRATOR 1 only): X0 qpos, then per stag
 comptime ORKV = ORKQ + NQ
 comptime ORKF = ORKV + 4 * NV
 comptime ORKW = ORKF + 4 * NV
-comptime NROW2 = ORKW + NV if INTEGRATOR == 1 else NROW0
+comptime OQLU = NROW0  # INTEGRATOR 2: qLU (D layout), unfinished-row counters of the LU, then Dcvel, Dcacc, Dcfrcbody (6 rows per B entry)
+comptime ORM = OQLU + NDD
+comptime ODCV = ORM + NV
+comptime ODCA = ODCV + 6 * NBB
+comptime ODCF = ODCA + 6 * NBB
+comptime NROWB = ORKW + NV if INTEGRATOR == 1 else (ODCF + 6 * NBB if IMPL else NROW0)
+comptime OQMV = NROWB  # NMID: qvel_mid of every dof (the velocity mj_advance integrates positions with), then one eligibility flag per candidate
+comptime NROW2 = NROWB + (NV + NMID if NMID > 0 else 0)
 comptime OGAME = NROW2  # GAME: four float32 rows per animal, energy health stamina dead; all zero = not started
 comptime NROW = OGAME + (4 if GAME else 0)
 comptime LI = row_major[NI]()
@@ -1434,6 +1458,8 @@ def contacts(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int):
         var best = 0
         if nvert == 0:  # mjraw_SphereSphere: one contact on the centre line, normal from geom1 to geom2
             var r1 = mf[pf + 13]; var r2 = mf[pf + 12]
+            if Int(mi[GBODY + g1]) == 0:  # a world geom (static sphere) is in world coordinates, the animal's frame is shifted by its floating origin
+                pos1 = pos1 - origin(mi, qpos, f, b)
             var dif = pos2 - pos1
             var cd2 = (dif * dif).reduce_add()
             if cd2 > (margin + r1 + r2) * (margin + r1 + r2):
@@ -2483,17 +2509,45 @@ def noslip(mi: TI, mf: TF, res: TO, f: Int):
     for v in range(NV):
         res[(OCQACC + v) * F + f] += get(res, f, OW + v)
 
-def euler(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int):
-    """MuJoCo mj_Euler (or, INTEGRATOR 3, mj_implicitSkip implicitfast) with implicit dof damping (contact-free: qfrc = qfrc_passive - qfrc_bias): qH = M + h diag(damping),
-    factor, solve qH qacc = qfrc (mj_solveLD), qvel += h qacc, mj_integratePos. qvel is read, not written back."""
+@always_inline
+def add6(res: TO, f: Int, row: Int, v: S6):
+    put6(res, f, row, get6(res, f, row) + v)
+
+
+@always_inline
+def rne_acc(mi: TI, qvel: TV, res: TO, f: Int, badr: Int, j: Int):
+    """Dcacc of the current body for dof j (engine_derivative.c:596 forward pass): += (D cdof_dot) qvel_j on the ancestor columns, where
+    D cdof_dot = crossMotion(Dcvel, cdof_j) (mjd_crossMotion_vel is linear in its first argument), then += cdof_dot_j on dof j's own
+    column. Dcvel is read in the state MuJoCo's separate comVel pass had when it set Dcdofdot_j."""
+    var jc = Int(mi[MNNZ + j]) - 1  # dof j's position in its body's B row: its ancestor dofs come first
+    var cd = get6(res, f, OCD + 6 * j)
+    var q = qvel[j * F + f]
+    for c in range(jc):
+        add6(res, f, ODCA + 6 * (badr + c), q * cross_motion(get6(res, f, ODCV + 6 * (badr + c)), cd))
+    add6(res, f, ODCA + 6 * (badr + jc), get6(res, f, OCDD + 6 * j))
+
+
+@always_inline
+def rne_vel_col(mi: TI, res: TO, f: Int, badr: Int, j: Int):
+    """Dcvel of the current body += cdof_j on dof j's own column."""
+    add6(res, f, ODCV + 6 * (badr + Int(mi[MNNZ + j]) - 1), get6(res, f, OCD + 6 * j))
+
+
+def implicit_factor(mi: TI, mf: TF, qvel: TV, res: TO, f: Int):
+    """MuJoCo mj_implicitSkip, full implicit (engine_forward.c:1864, INTEGRATOR 2): qLU = M - h qDeriv in MuJoCo's dof-dof sparsity D
+    (mju_gatherMasked of M through mapM2D, then mju_addToScl), factored in place by mju_factorLUSparse (engine_util_solve.c:841: reverse
+    order, no fill-in on a tree). qDeriv = d(qfrc_actuator + qfrc_passive - qfrc_bias) / d qvel (mjd_smooth_vel, engine_derivative.c:1985):
+    the dof dampers on the diagonal, the actuator velocity term as implicitfast's, and mjd_rne_vel (engine_derivative.c:596) for the bias.
+    mjd_rne_vel keeps, per body, one 6-vector per B entry (the derivative w.r.t. that dof's velocity) of cvel (Dcvel), cacc (Dcacc) and
+    cfrc_body (Dcfrcbody). Its matrix products are linear in the 6-vector, so each is written as the spatial operation it is:
+    D(I cacc + cvel x* (I cvel)) x = I Dcacc + Dcvel x* (I cvel) + cvel x* (I Dcvel)."""
     var h = mf[TSTEP]
-    for c in range(NC):
-        res[(OQH + c) * F + f] = get(res, f, OM + c)
+    for e in range(NDD):
+        var m_ = Int(mi[M2D + e])
+        res[(OQLU + e) * F + f] = get(res, f, OM + m_) if m_ >= 0 else Float32(0)
     for v in range(NV):
-        res[(OQH + Int(mi[MADR + v]) + Int(mi[MNNZ + v]) - 1) * F + f] += h * mf[DAMP + v]
-    comptime if INTEGRATOR == 3 and STAGE >= 7:
-        # mj_implicitSkip (engine_forward.c:1864) implicitfast: qH = M - h qDeriv. The dof damping above is -qDeriv of mjd_passive_vel;
-        # mjd_actuator_vel adds moment' bias_vel moment per joint actuator (diagonal: gear^2 biasprm[2]), skipped where forcerange clamps
+        res[(OQLU + Int(mi[DRA + v]) + Int(mi[DDG + v])) * F + f] += h * mf[DAMP + v]
+    comptime if STAGE >= 7:  # as implicitfast: moment' bias_vel moment per joint actuator, skipped where forcerange clamps
         for u in range(NU):
             var a = CACT + 5 * u
             if mi[a] != 0:
@@ -2503,15 +2557,309 @@ def euler(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int):
             if mi[a + 3] != 0 and (force <= mf[af + 6] or force >= mf[af + 7]):
                 continue
             var dof = Int(mi[a + 1])
-            res[(OQH + Int(mi[MADR + dof]) + Int(mi[MNNZ + dof]) - 1) * F + f] -= h * mf[af + 8] * mf[af + 8] * mf[af + 3]
-    factorI(mi, res, f, OQH, OQHI)
+            res[(OQLU + Int(mi[DRA + dof]) + Int(mi[DDG + dof])) * F + f] -= h * mf[af + 8] * mf[af + 8] * mf[af + 3]
+    # forward pass over bodies: Dcvel, Dcacc, then Dcfrcbody = D(cinert cacc + cvel x (cinert cvel))
+    for b in range(1, NB):
+        var badr = Int(mi[BRA + b])
+        var bnnz = Int(mi[BRN + b])
+        var anc = Int(mi[BANC + b])
+        var padr = Int(mi[BRA + Int(mi[PARENT + b])])
+        for r in range(6 * bnnz):
+            res[(ODCV + 6 * badr + r) * F + f] = 0
+            res[(ODCA + 6 * badr + r) * F + f] = 0
+        for r in range(6 * anc):  # copyFromParent: the ancestor dofs lead the parent's row too
+            res[(ODCV + 6 * badr + r) * F + f] = get(res, f, ODCV + 6 * padr + r)
+            res[(ODCA + 6 * badr + r) * F + f] = get(res, f, ODCA + 6 * padr + r)
+        for jj in range(Int(mi[JNTNUM + b])):
+            var jn = Int(mi[JNTADR + b]) + jj
+            var t = Int(mi[JTYPE + jn])
+            var j = Int(mi[DOFADR + jn])
+            if t == 0:  # free: translations (Dcdofdot 0), then the rotations as a ball
+                for k in range(3):
+                    rne_vel_col(mi, res, f, badr, j + k)
+                for k in range(3):
+                    add6(res, f, ODCA + 6 * (badr + Int(mi[MNNZ + j + k]) - 1), get6(res, f, OCDD + 6 * (j + k)))
+                j += 3
+            if t <= 1:  # ball (or the rotations of a free joint): all three Dcdofdot see Dcvel before any of the three columns is added
+                for k in range(3):
+                    rne_acc(mi, qvel, res, f, badr, j + k)
+                for k in range(3):
+                    rne_vel_col(mi, res, f, badr, j + k)
+            else:  # hinge, slide
+                rne_acc(mi, qvel, res, f, badr, j)
+                rne_vel_col(mi, res, f, badr, j)
+        var cin = OCI + 10 * (b - 1)
+        var cv = get6(res, f, OCV + 6 * (b - 1))
+        var icv = mul_inert(res, f, cin, cv)
+        for c in range(bnnz):
+            var x = get6(res, f, ODCV + 6 * (badr + c))
+            var y = get6(res, f, ODCA + 6 * (badr + c))
+            put6(res, f, ODCF + 6 * (badr + c), mul_inert(res, f, cin, y) + cross_force(x, icv) + cross_force(cv, mul_inert(res, f, cin, x)))
+    # backward pass: addToParent, the child's row is a subset of the parent's (both sorted by dof)
+    for b in range(NB - 1, 0, -1):
+        if Int(mi[BANC + b]) == 0:
+            continue
+        var p = Int(mi[PARENT + b])
+        var i = 0
+        var ip = 0
+        var cn = Int(mi[BRN + b])
+        var pn = Int(mi[BRN + p])
+        while i < cn and ip < pn:
+            var cc = mi[BCOL + Int(mi[BRA + b]) + i]
+            var pc = mi[BCOL + Int(mi[BRA + p]) + ip]
+            if cc == pc:
+                add6(res, f, ODCF + 6 * (Int(mi[BRA + p]) + ip), get6(res, f, ODCF + 6 * (Int(mi[BRA + b]) + i)))
+                i += 1
+                ip += 1
+            else:
+                ip += 1
+    # qDeriv -= D(cdof cfrc_body): row j, entry c of its body's B row; qLU = M - h qDeriv adds h times it
+    for j in range(NV):
+        var b = Int(mi[DBODY + j])
+        var cd = get6(res, f, OCD + 6 * j)
+        for c in range(Int(mi[BRN + b])):
+            var fr = get6(res, f, ODCF + 6 * (Int(mi[BRA + b]) + c))
+            res[(OQLU + Int(mi[DRA + j]) + c) * F + f] += h * (fr * cd).reduce_add()
+    # mju_factorLUSparse
+    for i in range(NV):
+        res[(ORM + i) * F + f] = Float32(Int(mi[DRN + i]))
+    for r in range(NV - 1, -1, -1):
+        var ii = Int(mi[DRA + r]) + Int(get(res, f, ORM + r)) - 1
+        res[(ORM + r) * F + f] -= 1
+        var lu_ii = get(res, f, OQLU + ii)
+        for c in range(r - 1, -1, -1):
+            var ji = Int(mi[DRA + c]) + Int(get(res, f, ORM + c)) - 1
+            if Int(mi[DCOL + ji]) == r:
+                res[(ORM + c) * F + f] -= 1
+                var lu_ji = get(res, f, OQLU + ji) / lu_ii
+                res[(OQLU + ji) * F + f] = lu_ji
+                var icnt = Int(mi[DRA + r])
+                var jcnt = Int(mi[DRA + c])
+                var jend = Int(mi[DRA + c]) + Int(get(res, f, ORM + c))
+                while jcnt < jend:
+                    var ci = mi[DCOL + icnt]
+                    var cj = mi[DCOL + jcnt]
+                    if ci == cj:
+                        res[(OQLU + jcnt) * F + f] -= get(res, f, OQLU + icnt) * lu_ji
+                        icnt += 1
+                        jcnt += 1
+                    else:
+                        jcnt += 1  # only (j,k) non-zero (MuJoCo errors out when only (i,k) is)
+
+
+def implicit_solve(mi: TI, res: TO, f: Int, X: Int):
+    """MuJoCo mju_solveLUSparse (engine_util_solve.c:929): x <- (M - h qDeriv)^-1 x from the LU in rows OQLU.., in place."""
+    for i in range(NV - 1, -1, -1):  # (U + I) x = b, unit diagonal
+        var d1 = Int(mi[DDG + i]) + 1
+        var adr = Int(mi[DRA + i]) + d1
+        var dot: Float32 = 0
+        for t in range(Int(mi[DRN + i]) - d1):
+            dot += get(res, f, OQLU + adr + t) * get(res, f, X + Int(mi[DCOL + adr + t]))
+        res[(X + i) * F + f] -= dot
+    for i in range(NV):  # L x = b
+        var d = Int(mi[DDG + i])
+        var adr = Int(mi[DRA + i])
+        var dot: Float32 = 0
+        for t in range(d):
+            dot += get(res, f, OQLU + adr + t) * get(res, f, X + Int(mi[DCOL + adr + t]))
+        res[(X + i) * F + f] = (get(res, f, X + i) - dot) / get(res, f, OQLU + adr + d)
+
+
+@always_inline
+def conj(q: Q4) -> Q4:
+    """MuJoCo mju_negQuat: the conjugate (not the negative)."""
+    return Q4(q[0], -q[1], -q[2], -q[3])
+
+
+def solve3(J: SIMD[DType.float32, 16], rhs: V3) -> V3:
+    """MuJoCo mju_solve3 (engine_util_solve.c): Gauss-Jordan on a 3x3 system without pivoting; J row-major in lanes 0..8."""
+    var M = SIMD[DType.float32, 16](0)
+    for i in range(3):
+        for j in range(3):
+            M[4 * i + j] = J[3 * i + j]
+        M[4 * i + 3] = rhs[i]
+    for i in range(3):
+        var pivot = M[4 * i + i]
+        for j in range(i, 4):
+            M[4 * i + j] = M[4 * i + j] / pivot
+        for k in range(3):
+            if k != i:
+                var fac = M[4 * k + i]
+                for j in range(i, 4):
+                    M[4 * k + j] -= fac * M[4 * i + j]
+    return V3(M[3], M[7], M[11], 0)
+
+
+def midpoint_newton(inertia: V3, w: V3, tau: V3, h: Float32) -> V3:
+    """MuJoCo midpointNewton (engine_forward.c:1625): w_mid of I (w_new - w) / h = tau - w_mid x (I w_mid), w_mid = (w + w_new) / 2, Newton
+    with a halving line search from w_mid = w. Returned as delta = w_mid - w and iterated on delta (w_mid = w + delta in the cross term only),
+    because the velocity change is what the engine reports (qacc = (new - old) / h) and two nearby float32 velocities cancel. MuJoCo stops at
+    |f| < 1e-13 (1e-6 in single precision) x (1 + i2h |I w|), absolute units that mean nothing at fly scale (I ~ 1e-13): float32 stops at
+    5e-7 of the residual's own terms, or when no step lowers |f|."""
+    var i2h = 2 / h
+    var dI = V3(inertia[2] - inertia[1], inertia[0] - inertia[2], inertia[1] - inertia[0], 0)
+    var i2h_I = i2h * inertia
+    var delta = V3(0)
+    for _ in range(30):
+        var wm = w + delta
+        var cor = cross(wm, inertia * wm)
+        var lin = i2h_I * delta
+        var fv = lin + cor - tau
+        var fnorm = sqrt((fv * fv).reduce_add())
+        if fnorm <= 5e-7 * (sqrt((lin * lin).reduce_add()) + sqrt((tau * tau).reduce_add()) + sqrt((cor * cor).reduce_add())):
+            break
+        var J = SIMD[DType.float32, 16](0)
+        J[0] = i2h_I[0]; J[1] = wm[2] * dI[0]; J[2] = wm[1] * dI[0]
+        J[3] = wm[2] * dI[1]; J[4] = i2h_I[1]; J[5] = wm[0] * dI[1]
+        J[6] = wm[1] * dI[2]; J[7] = wm[0] * dI[2]; J[8] = i2h_I[2]
+        var dx = solve3(J, -fv)
+        var step: Float32 = 1
+        var taken = False
+        for _ in range(20):
+            var dt_ = delta + step * dx
+            var wt = w + dt_
+            var ft = i2h_I * dt_ + cross(wt, inertia * wt) - tau
+            if sqrt((ft * ft).reduce_add()) < fnorm:
+                delta = dt_
+                taken = True
+                break
+            step *= 0.5
+        if not taken:
+            break
+    return delta
+
+
+def midpoint(mi: TI, mf: TF, res: TO, f: Int, k: Int, qvel_old: S6, qfrc: S6, h: Float32) -> S6:
+    """MuJoCo mj_midpoint (engine_forward.c:1708) for candidate k: implicit midpoint of one standalone free body, returning the CHANGE of
+    its velocity (qvel_new - qvel_old; linear in the world frame, angular in the body frame; an aligned body (ipos 0) gets no linear part,
+    MuJoCo leaves that to the ordinary step). The change is formed without subtracting nearby velocities: w_new - w = 2 delta, and with
+    x = vcom_mid - vcom the linear solve keeps MuJoCo's analytic form with b = F/m + g - w_mid x vcom, v_new - v = 2 (x - delta x r_com);
+    the world-frame change rot(xquat_new, u + du) - rot(xquat, u) = rot(xquat, rot(q, u) - u) + rot(xquat_new, du), q the half-step
+    rotation, whose rot(q, u) - u is written out (2 s c a x u + 2 s^2 a x (a x u)). qfrc is the external force without the bias
+    (qfrc_smooth + qfrc_constraint + qfrc_bias)."""
+    var b = Int(mi[CMID + 3 * k])
+    var aligned = mi[CMID + 3 * k + 2] != 0
+    var mass = mf[MASS + b]
+    var inertia = m3(mf, INERTIA + 3 * b)
+    var ipos = m3(mf, IPOS + 3 * b)
+    var iquat = m4(mf, IQUAT + 4 * b)
+    var xquat = body(res, f, b)[1]
+    var iquat_neg = conj(iquat)
+    var fo = V3(qfrc[0], qfrc[1], qfrc[2], 0)
+    var w = rot(iquat_neg, V3(qvel_old[3], qvel_old[4], qvel_old[5], 0))
+    var tau = rot(iquat_neg, V3(qfrc[3], qfrc[4], qfrc[5], 0))
+    var rot_x2i = mul(iquat_neg, conj(xquat))
+    var force = rot(rot_x2i, fo)
+    var r_com = rot(iquat_neg, ipos)
+    var tau_com = tau
+    if not aligned:
+        tau_com = tau - cross(r_com, force)
+    var delta = midpoint_newton(inertia, w, tau_com, h)
+    var w_mid = w + delta
+    var dw_body = rot(iquat, 2 * delta)
+    var out = S6(0)
+    out[3] = dw_body[0]; out[4] = dw_body[1]; out[5] = dw_body[2]
+    if aligned:
+        return out
+    var v = rot(rot_x2i, V3(qvel_old[0], qvel_old[1], qvel_old[2], 0))
+    var i2h = 2 / h
+    var bx = force / mass + rot(rot_x2i, m3(mf, GRAV)) - cross(w_mid, v + cross(w, r_com))
+    var denom = i2h * i2h + (w_mid * w_mid).reduce_add()
+    var x = (i2h * bx + ((w_mid * bx).reduce_add() / i2h) * w_mid - cross(w_mid, bx)) / denom
+    var du = rot(iquat, 2 * (x - cross(delta, r_com)))
+    var u = rot(iquat, v)
+    var w_mid_body = rot(iquat, w_mid)
+    var nrm = sqrt((w_mid_body * w_mid_body).reduce_add())
+    var axis = w_mid_body / nrm if nrm >= 1e-15 else basis(0)
+    var half = 0.5 * h * nrm
+    var s = sin(half)
+    var c = cos(half)
+    var au = cross(axis, u)
+    var dr = 2 * s * c * au + 2 * s * s * cross(axis, au)
+    var xquat_new = mul(xquat, Q4(c, axis[0] * s, axis[1] * s, axis[2] * s))
+    var dl = rot(xquat, dr) + rot(xquat_new, du)
+    out[0] = dl[0]; out[1] = dl[1]; out[2] = dl[2]
+    return out
+
+
+def mid_eligible(mi: TI, res: TO, f: Int, b: Int) -> Bool:
+    """midpoint_eligible (engine_forward.c:1519), the runtime part: no live contact involves a geom of the body (the static part, a
+    standalone free body, is what model.py mid_block lists). Equalities and tendon limits are refused at export."""
+    comptime if STAGE >= 6:
+        for t in range(Int(get(res, f, OPA))):
+            var p = Int(get(res, f, OPA + 1 + t))
+            if Int(mi[GBODY + Int(mi[CPH + 11 * p])]) == b or Int(mi[GBODY + Int(mi[CPH + 11 * p + 1])]) == b:
+                return False
+    return True
+
+
+@always_inline
+def vmid(qvel: TV, res: TO, f: Int, d: Int, h: Float32) -> Float32:
+    """The velocity mj_advance integrates positions with: qvel + h qacc, or the midpoint's for a midpoint dof (OQMV)."""
+    comptime if NMID > 0:
+        return get(res, f, OQMV + d)
+    else:
+        return qvel[d * F + f] + h * get(res, f, OQACC + d)
+
+
+def euler(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int):
+    """MuJoCo mj_Euler (or, INTEGRATOR 3, mj_implicitSkip implicitfast) with implicit dof damping (contact-free: qfrc = qfrc_passive - qfrc_bias): qH = M + h diag(damping),
+    factor, solve qH qacc = qfrc (mj_solveLD), qvel += h qacc, mj_integratePos. qvel is read, not written back."""
+    var h = mf[TSTEP]
+    comptime if IMPL:
+        implicit_factor(mi, mf, qvel, res, f)
+    else:
+        for c in range(NC):
+            res[(OQH + c) * F + f] = get(res, f, OM + c)
+        for v in range(NV):
+            res[(OQH + Int(mi[MADR + v]) + Int(mi[MNNZ + v]) - 1) * F + f] += h * mf[DAMP + v]
+        comptime if INTEGRATOR == 3 and STAGE >= 7:
+            # mj_implicitSkip (engine_forward.c:1864) implicitfast: qH = M - h qDeriv. The dof damping above is -qDeriv of mjd_passive_vel;
+            # mjd_actuator_vel adds moment' bias_vel moment per joint actuator (diagonal: gear^2 biasprm[2]), skipped where forcerange clamps
+            for u in range(NU):
+                var a = CACT + 5 * u
+                if mi[a] != 0:
+                    continue
+                var af = CACF + 9 * u
+                var force = get(res, f, OAF + u)
+                if mi[a + 3] != 0 and (force <= mf[af + 6] or force >= mf[af + 7]):
+                    continue
+                var dof = Int(mi[a + 1])
+                res[(OQH + Int(mi[MADR + dof]) + Int(mi[MNNZ + dof]) - 1) * F + f] -= h * mf[af + 8] * mf[af + 8] * mf[af + 3]
+        factorI(mi, res, f, OQH, OQHI)
     for v in range(NV):
         res[(OQACC + v) * F + f] = get(res, f, OPAS + v) - get(res, f, OBIAS + v)
         comptime if STAGE >= 6:
             res[(OQACC + v) * F + f] += get(res, f, OQFC + v)
         comptime if STAGE >= 7:
             res[(OQACC + v) * F + f] += get(res, f, OQACT + v)
-    solveLD(mi, res, f, OQACC, OQH, OQHI)
+    comptime if IMPL:
+        implicit_solve(mi, res, f, OQACC)
+    else:
+        solveLD(mi, res, f, OQACC, OQH, OQHI)
+    comptime if NMID > 0:  # mj_implicitSkip: qvel_mid = qvel + h qacc, midpoint dofs overwritten by (new + old) / 2, then qacc of those dofs = (new - old) / h
+        for v in range(NV):
+            res[(OQMV + v) * F + f] = qvel[v * F + f] + h * get(res, f, OQACC + v)
+        for k in range(NMID):
+            var b = Int(mi[CMID + 3 * k])
+            var adr = Int(mi[CMID + 3 * k + 1])
+            if not mid_eligible(mi, res, f, b):
+                continue
+            var old = S6(qvel[adr * F + f], qvel[(adr + 1) * F + f], qvel[(adr + 2) * F + f], qvel[(adr + 3) * F + f], qvel[(adr + 4) * F + f], qvel[(adr + 5) * F + f], 0, 0)
+            var qfrc = S6(0)
+            for c in range(6):
+                var t = get(res, f, OPAS + adr + c)
+                comptime if STAGE >= 6:
+                    t += get(res, f, OQFC + adr + c)
+                comptime if STAGE >= 7:
+                    t += get(res, f, OQACT + adr + c)
+                qfrc[c] = t
+            var dq = midpoint(mi, mf, res, f, k, old, qfrc, h)
+            for c in range(3 if mi[CMID + 3 * k + 2] != 0 else 0, 6):
+                res[(OQMV + adr + c) * F + f] = old[c] + 0.5 * dq[c]
+                res[(OQACC + adr + c) * F + f] = dq[c] / h
+                comptime if STAGE >= 6:  # MuJoCo overwrites d->qacc there too (the warm start took the solve's qacc before)
+                    res[(OCQACC + adr + c) * F + f] = dq[c] / h
     for a in range(NQ):
         res[(OQPOS + a) * F + f] = qpos[a * F + f]
     for j in range(NJ):  # mj_integratePos with the new qvel
@@ -2520,13 +2868,13 @@ def euler(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int):
         var t = Int(mi[JTYPE + j])
         if t == 0:
             for c in range(3):
-                res[(OQPOS + a + c) * F + f] += h * (qvel[(da + c) * F + f] + h * get(res, f, OQACC + da + c))
+                res[(OQPOS + a + c) * F + f] += h * vmid(qvel, res, f, da + c, h)
             a += 3
             da += 3
         if t <= 1:  # mju_quatIntegrate: q = unit(q) * quat(axis, h |w|), w in the body frame
             var w = V3(0)
             for c in range(3):
-                w[c] = qvel[(da + c) * F + f] + h * get(res, f, OQACC + da + c)
+                w[c] = vmid(qvel, res, f, da + c, h)
             var n = sqrt((w * w).reduce_add())
             var axis = w / n if n >= 1e-15 else basis(0)
             var half = 0.5 * h * n
@@ -2534,7 +2882,7 @@ def euler(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int):
             var q = unit(Q4(get(res, f, OQPOS + a), get(res, f, OQPOS + a + 1), get(res, f, OQPOS + a + 2), get(res, f, OQPOS + a + 3)))
             put(res, f, OQPOS + a, mul(q, Q4(cos(half), axis[0] * s, axis[1] * s, axis[2] * s)), 4)
         else:
-            res[(OQPOS + a) * F + f] += h * (qvel[da * F + f] + h * get(res, f, OQACC + da))
+            res[(OQPOS + a) * F + f] += h * vmid(qvel, res, f, da, h)
 
 
 def rkintegrate(mi: TI, res: TO, f: Int, h: Float32):
@@ -2809,7 +3157,7 @@ def step(mi: TI, mf: TF, qpos: TQ, qvel: TV, ctrl: TU, res: TO, f: Int, rks: Int
                 I[7] * d0 - I[6] * d1 + I[9] * d5, 0, 0)
             var j = i
             var first = True
-            while j >= 0:
+            for _ in range(Int(mi[MNNZ + i])):  # a simple dof's row (dof_simplenum, a childless free body with ipos 0 and iquat identity) is its diagonal alone
                 var w = OCD + 6 * j
                 var dot: Float32 = 0
                 for k in range(6):
