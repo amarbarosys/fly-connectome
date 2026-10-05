@@ -360,7 +360,26 @@ class ShiuLive(ShiuGPU):
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1,
                                      env=worker_env() | ({'FLY_RECORD': str(record)} if record else {}))
         self.record = record
+        self.continuous_t = 0
         return self
+
+    def advance(self, steps):
+        """Advance the resident worker without resetting any neural state; return cumulative readout counts."""
+        steps = int(steps)
+        if steps <= 0:
+            raise ValueError("advance steps must be positive")
+        np.asarray([steps], np.int32).tofile(self.work / 'advance.bin')
+        self._command('advance')
+        self.continuous_t += steps
+        return np.fromfile(self.work / 'gather.bin', np.int32)[:len(self.readout)].copy()
+
+    def snapshot(self):
+        """Read full worker state for deterministic verification; production advances do not copy state to host."""
+        self._command('dump')
+        names = (('u', np.float32), ('g', np.float32), ('last', np.int32),
+                 ('counts', np.int32), ('ring', np.int32), ('fill', np.int32), ('m', np.float32))
+        return {name: np.fromfile(self.work / f'state_{name}.bin', dtype=dtype)
+                for name, dtype in names} | {'t': np.asarray([self.continuous_t], np.int32)}
 
     def recording(self):
         """The full brain so far: int32 (sniffs, windows, n, flies) spike counts since each sniff began."""
@@ -410,6 +429,7 @@ class ShiuLive(ShiuGPU):
         self.proc.stdin.write('sniff\n')
         self.proc.stdin.flush()
         self._ok()
+        self.continuous_t = 0
         return np.fromfile(self.work / 'gather.bin', np.int32).reshape(len(self.windows), len(self.readout))
 
     def close(self):

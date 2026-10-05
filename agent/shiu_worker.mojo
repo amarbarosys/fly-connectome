@@ -22,9 +22,9 @@ Optional cell groups: cgrp.bin (int32 group per neuron, -1 none) makes a one-sho
 (int32 windows x G x C, spikes per group and column) instead of counts.bin, plus gather.bin for the
 cells in readout.bin when that file is there.
 
-resident: the graph stays on the device and each stdin line "sniff" resets the state, rereads
+resident: the graph stays on the device; each stdin line "sniff" resets the state, rereads
 stim_p.bin, runs to the last window and writes counts at every window for the entries in
-readout.bin only (gather.bin, int32 windows x R), then prints "ok"; "q" ends. Sniff k uses
+readout.bin only (gather.bin, int32 windows x R), then prints "ok"; "advance" advances by the int32 in advance.bin without resetting voltage, conductance, spike times, delay slots, or modulators. Advance preserves one global tick and seed schedule. "q" ends. Sniff k uses
 seed + k, so repeated sniffs draw fresh Poisson events.
 Slow modulation (modp.bin + modk.bin, ShiuBrain.modulate): edges of a modulatory group add to the target's level
 m[plane] instead of g; every step m decays by its plane's factor and the target integrates g x c x max(0, 1 + sum
@@ -34,7 +34,7 @@ window of every sniff to path (int32 sniffs x windows x C x N, counts since the 
 Per step t, three launches in ShiuBrain's order: integrate + threshold + reset, push delivery
 of the spikes from t - DELAY (atomic adds into g; integrate clears g of refractory and just-spiked
 neurons, which equals skipping their arrivals and saves two scattered reads per edge;
-last-spike step is int16 and refractory uint8 to cut integrate bytes, so runs are <= 32000 steps),
+last-spike step is int32 for continuous runs beyond 32000 ticks; refractory remains uint8,
 Poisson kicks. Spikes wait in a ring of DELAY + 1 slots so step t never overwrites the slot it
 delivers. A full slot is counted and fails the run; nothing is dropped silently.
 """
@@ -76,7 +76,7 @@ comptime LMK = row_major[3 * MP]()
 def integrate(
     u: TileTensor[DType.float32, type_of(LS), MutAnyOrigin],
     g: TileTensor[DType.float32, type_of(LS), MutAnyOrigin],
-    last: TileTensor[DType.int16, type_of(LS), MutAnyOrigin],
+    last: TileTensor[DType.int32, type_of(LS), MutAnyOrigin],
     rfc: TileTensor[DType.uint8, type_of(LS), MutAnyOrigin],
     counts: TileTensor[DType.int32, type_of(LS), MutAnyOrigin],
     ring: TileTensor[DType.int32, type_of(LRING), MutAnyOrigin],
@@ -102,7 +102,7 @@ def integrate(
     var gg = g[i]
     if uu == 0.0 and gg == 0.0 and drive == 0.0:  # at rest: stays exactly 0 and cannot spike (v_th > 0); skip 16 B of state
         return
-    var since = t - Int32(last[i])
+    var since = t - last[i]
     var r = Int32(rfc[i])
     if since - 1 < r or since == 1:  # refractory, or spiked last step: the oracle drops these arrivals
         gg = 0.0                      # (deliver adds unconditionally; g is 0 here in the oracle)
@@ -115,7 +115,7 @@ def integrate(
     if since >= r and uu > v_th:
         uu = 0.0
         gg = 0.0
-        last[i] = Int16(t)
+        last[i] = t
         counts[i] += 1
         var k = Atomic.fetch_add(fill.ptr.unsafe_offset(Int(slot)), Int32(1))
         if k < CAP:
@@ -183,7 +183,7 @@ def kick(
     key: TileTensor[DType.int32, type_of(LS), MutAnyOrigin],
     p: TileTensor[DType.float32, type_of(LS), MutAnyOrigin],
     u: TileTensor[DType.float32, type_of(LS), MutAnyOrigin],
-    last: TileTensor[DType.int16, type_of(LS), MutAnyOrigin],
+    last: TileTensor[DType.int32, type_of(LS), MutAnyOrigin],
     fill: TileTensor[DType.int32, type_of(LSLOT), MutAnyOrigin],
     amt: TileTensor[DType.float32, type_of(LS), MutAnyOrigin],
     w0: TileTensor[DType.int32, type_of(LS), MutAnyOrigin],
@@ -198,7 +198,7 @@ def kick(
     if t < w0[k] or t >= w1[k]:  # entry's window [t0, t1) in steps
         return
     var i = Int(stim[k])
-    if Int32(last[i]) != t and uniform(seed, UInt32(t), UInt32(key[k])) < p[k]:
+    if last[i] != t and uniform(seed, UInt32(t), UInt32(key[k])) < p[k]:
         u[i] += amt[k]
 
 
@@ -348,8 +348,8 @@ def main() raises:
         raise Error("invalid run inputs")
     var stim = List[Int32](length=S, fill=0)
     var p = List[Float32](length=S, fill=0.0)
-    if refractory > 255 or Int(windows.unsafe_offset(window_count - 1)[]) > 32000:
-        raise Error("state is int16 last-spike step and uint8 refractory: needs <= 32000 steps, <= 255 refractory steps")
+    if refractory > 255:
+        raise Error("state uses uint8 refractory steps: needs <= 255")
     var rfc = List[UInt8](length=S, fill=UInt8(refractory))
     # drive entries: optional stim_amount.bin (float32 per entry, default the Poisson kick) and stim_window.bin
     # (int32 t0, t1 per entry, steps, default always); only Poisson-kick entries drop the refractory period
@@ -388,7 +388,7 @@ def main() raises:
         ctx.enqueue_copy(kc_b.create_sub_buffer[DType.int32](0, kcs), plastic_raw.unsafe_ptr().unsafe_bitcast[Int32]().unsafe_offset(1))
     var u_b = ctx.enqueue_create_buffer[DType.float32](S)
     var g_b = ctx.enqueue_create_buffer[DType.float32](S)
-    var last_b = ctx.enqueue_create_buffer[DType.int16](S)
+    var last_b = ctx.enqueue_create_buffer[DType.int32](S)
     var rfc_b = ctx.enqueue_create_buffer[DType.uint8](S)
     var counts_b = ctx.enqueue_create_buffer[DType.int32](S)
     var stim_b = ctx.enqueue_create_buffer[DType.int32](S)
@@ -424,7 +424,7 @@ def main() raises:
     ctx.enqueue_copy(w1_b, w1.unsafe_ptr())
     u_b.enqueue_fill(0.0)
     g_b.enqueue_fill(0.0)
-    last_b.enqueue_fill(-32768)
+    last_b.enqueue_fill(-1000000000)
     counts_b.enqueue_fill(0)
     fill_b.enqueue_fill(0)
     var rows_t = TileTensor(row_b, LR)
@@ -488,7 +488,10 @@ def main() raises:
     var rec_file = open(record if record else "/dev/null", "w")
     var rec = List[Int32](length=S if record else 0, fill=0)
     var sniff = 0
+    var sim_t = 0
     while True:
+        var is_advance = False
+        var is_sniff = False
         if resident:
             var line = read_line()
             if line == "q" or line == "":  # empty = EOF (parent gone)
@@ -501,6 +504,39 @@ def main() raises:
                     f.write_bytes(Span(unsafe_ptr=host.unsafe_ptr().unsafe_bitcast[UInt8](), length=len(host) * 4))
                 print("ok", flush=True)
                 continue
+            if line == "dump":
+                var hu = List[Float32](length=S, fill=0.0)
+                var hg = List[Float32](length=S, fill=0.0)
+                var hl = List[Int32](length=S, fill=0)
+                var hc = List[Int32](length=S, fill=0)
+                var hr = List[Int32](length=SLOTS * CAP, fill=0)
+                var hf = List[Int32](length=SLOTS + 1, fill=0)
+                var hm = List[Float32](length=max(Int(mplanes) * S, 1), fill=0.0)
+                ctx.enqueue_copy(hu.unsafe_ptr(), u_b)
+                ctx.enqueue_copy(hg.unsafe_ptr(), g_b)
+                ctx.enqueue_copy(hl.unsafe_ptr(), last_b)
+                ctx.enqueue_copy(hc.unsafe_ptr(), counts_b)
+                ctx.enqueue_copy(hr.unsafe_ptr(), ring_b)
+                ctx.enqueue_copy(hf.unsafe_ptr(), fill_b)
+                if mplanes > 0:
+                    ctx.enqueue_copy(hm.unsafe_ptr(), m_b.create_sub_buffer[DType.float32](0, Int(mplanes) * S))
+                ctx.synchronize()
+                with open(work + "state_u.bin", "w") as f:
+                    f.write_bytes(Span(unsafe_ptr=hu.unsafe_ptr().unsafe_bitcast[UInt8](), length=len(hu) * 4))
+                with open(work + "state_g.bin", "w") as f:
+                    f.write_bytes(Span(unsafe_ptr=hg.unsafe_ptr().unsafe_bitcast[UInt8](), length=len(hg) * 4))
+                with open(work + "state_last.bin", "w") as f:
+                    f.write_bytes(Span(unsafe_ptr=hl.unsafe_ptr().unsafe_bitcast[UInt8](), length=len(hl) * 4))
+                with open(work + "state_counts.bin", "w") as f:
+                    f.write_bytes(Span(unsafe_ptr=hc.unsafe_ptr().unsafe_bitcast[UInt8](), length=len(hc) * 4))
+                with open(work + "state_ring.bin", "w") as f:
+                    f.write_bytes(Span(unsafe_ptr=hr.unsafe_ptr().unsafe_bitcast[UInt8](), length=len(hr) * 4))
+                with open(work + "state_fill.bin", "w") as f:
+                    f.write_bytes(Span(unsafe_ptr=hf.unsafe_ptr().unsafe_bitcast[UInt8](), length=len(hf) * 4))
+                with open(work + "state_m.bin", "w") as f:
+                    f.write_bytes(Span(unsafe_ptr=hm.unsafe_ptr().unsafe_bitcast[UInt8](), length=len(hm) * 4))
+                print("ok", flush=True)
+                continue
             if line == "reward":
                 var d = load(work + "dopamine.bin", planes * C)
                 ctx.enqueue_copy(dopamine_b.create_sub_buffer[DType.float32](0, planes * C), d.unsafe_ptr().unsafe_bitcast[Float32]())
@@ -509,6 +545,12 @@ def main() raises:
                 ctx.synchronize()
                 print("ok", flush=True)
                 continue
+            if line == "advance":
+                is_advance = True
+            if line == "sniff":
+                is_sniff = True
+            if line != "sniff" and line != "advance":
+                raise Error("resident command must be sniff, advance, dump, save, reward, or q")
             var fresh = load(work + "stim_p.bin", stim_count)
             ctx.enqueue_copy(p_b.create_sub_buffer[DType.float32](0, stim_count), fresh.unsafe_ptr().unsafe_bitcast[Float32]())
             if exists(work + "pushed"):  # ShiuLive.push changed settings: the scale row (gains, cuts, silencing)
@@ -521,16 +563,27 @@ def main() raises:
                     ctx.enqueue_copy(w0_b, w0.unsafe_ptr())
                     ctx.enqueue_copy(w1_b, w1.unsafe_ptr())
                 ctx.synchronize()
-            u_b.enqueue_fill(0.0)
-            g_b.enqueue_fill(0.0)
-            last_b.enqueue_fill(-32768)
-            counts_b.enqueue_fill(0)
-            fill_b.enqueue_fill(0)
-            m_b.enqueue_fill(0.0)
+            if is_sniff:
+                u_b.enqueue_fill(0.0)
+                g_b.enqueue_fill(0.0)
+                last_b.enqueue_fill(-1000000000)
+                counts_b.enqueue_fill(0)
+                fill_b.enqueue_fill(0)
+                m_b.enqueue_fill(0.0)
+                sim_t = 0
         var window = 0
         var t = 0
-        while window < window_count:
-            var stop = Int(windows.unsafe_offset(window)[])
+        var stop = Int(windows.unsafe_offset(0)[])
+        if resident and is_advance:
+            var advance_raw = load(work + "advance.bin", 1)
+            var advance_steps = Int(advance_raw.unsafe_ptr().unsafe_bitcast[Int32]().unsafe_offset(0)[])
+            if advance_steps <= 0:
+                raise Error("advance.bin must contain a positive tick count")
+            t = sim_t
+            stop = t + advance_steps
+        while window < (1 if resident and is_advance else window_count):
+            if not (resident and is_advance):
+                stop = Int(windows.unsafe_offset(window)[])
             while t < stop:
                 var slot = Int32(t % SLOTS)
                 var due = Int32((t + 1) % SLOTS)  # == (t - delay) mod SLOTS
@@ -538,7 +591,7 @@ def main() raises:
                     k.unsafe_offset(0)[], k.unsafe_offset(1)[], k.unsafe_offset(2)[], k.unsafe_offset(3)[], Int32(t), slot, Int32(mplanes), grid_dim=(S + BLOCK - 1) // BLOCK, block_dim=BLOCK)
                 ctx.enqueue_function(step_deliver, rows_t, cols_t, w_t, grp_t, scale_t, rank_t, factor_t, g_t, ring_t, fill_t, m_t, modp_t,
                     Int32(t), due, Int32(groups), plastic, punish, Int32(mplanes), grid_dim=DGRID, block_dim=BLOCK)
-                ctx.enqueue_function(step_kick, stim_t, key_t, p_t, u_t, last_t, fill_t, amt_t, w0_t, w1_t, Int32(stim_count), seed + UInt32(sniff), Int32(t),
+                ctx.enqueue_function(step_kick, stim_t, key_t, p_t, u_t, last_t, fill_t, amt_t, w0_t, w1_t, Int32(stim_count), seed + UInt32(sniff if is_sniff else 0), Int32(t),
                     due, grid_dim=kick_grid, block_dim=BLOCK)
                 t += 1
             if gathered:
@@ -554,6 +607,8 @@ def main() raises:
                 ctx.synchronize()
                 rec_file.write_bytes(Span(unsafe_ptr=rec.unsafe_ptr().unsafe_bitcast[UInt8](), length=S * 4))
             window += 1
+        if resident and is_advance:
+            sim_t = t
         if gathered and len(out) > 0:
             ctx.enqueue_copy(out.unsafe_ptr(), got_b.create_sub_buffer[DType.int32](0, len(out)))
         if summed:
@@ -572,4 +627,5 @@ def main() raises:
         if not resident:
             break
         print("ok", flush=True)
-        sniff += 1
+        if is_sniff:
+            sniff += 1
