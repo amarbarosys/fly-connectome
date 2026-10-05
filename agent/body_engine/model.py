@@ -48,9 +48,15 @@ STAGES['contact'] = (6, 'mj_step', STAGES['step'][2] + ('ncon', 'qacc', 'qfrc_co
 # 'actuated' (S3): + mj_transmission (hinge/slide joints, adhesion bodies) and mj_fwdActuation (fixed gain, affine
 # or no bias, no activation dynamics), random controls, actuators on.
 STAGES['actuated'] = (7, 'mj_step', STAGES['contact'][2] + ('actuator_force', 'qfrc_actuator'))
+# 'equality' (S6 without pairs): connect, weld and joint equality constraints (eq_rows), Newton on always-active rows, then
+# the implicit Euler step; contacts and actuation off, random states violate the constraints. Test body models/eq_test.xml.
+STAGES['equality'] = (6, 'mj_step', STAGES['step'][2] + ('ncon', 'qacc', 'qfrc_constraint'))
+# 'mocap': the same fields with mocap bodies (mocap_pos/quat random around the model pose, models/eq_mocap.xml), welded or connected to the animal.
+STAGES['mocap'] = STAGES['equality']
 FEET = '.'  # every plane-mesh pair (55 on the fly: each body part on the floor); 'tarsus5' (6 feet) sank through the floor in MuJoCo too
 VSCALE = float(os.environ.get('VSCALE', 10))  # random qvel in +-VSCALE per dof (10: velocity terms well above float32 noise; qpos moves ~1e-3 per fly step); the flight gate draws up to flapping rate
 REL = 1e-5
+EQ_EULER_BAR = 1e-4  # equality stage, qacc_euler only: see check()
 FLOOR_X = 3  # contact stage: bar = max(REL, 3 x the field's float32 input floor), see check()
 WORLD_FIRST = ('xpos', 'xquat', 'xipos', 'cinert', 'crb', 'cvel')  # body-indexed fields whose row 0 is the world
 ENGINE = Path(__file__).parent
@@ -212,8 +218,8 @@ def load(mjcf):
     m = mjcf if isinstance(mjcf, mujoco.MjModel) else mujoco.MjModel.from_xml_path(str(mjcf))
     if not isinstance(mjcf, mujoco.MjModel):
         override(m)
-    if m.nmocap or m.dof_simplenum.any():
-        raise SystemExit('FAIL export: mocap bodies and simple dofs are not ported')
+    if m.dof_simplenum.any():
+        raise SystemExit('FAIL export: simple dofs are not ported')
     if (m.nflex or m.opt.integrator not in INTEGRATORS or m.body_gravcomp.any() or m.actuator_damping.any()
             or m.dof_dampingpoly.any() or m.jnt_stiffnesspoly.any() or m.opt.disableflags):
         raise SystemExit('FAIL export: only Euler/implicitfast, linear joint springs and dof dampers are ported (no flex, gravcomp, '
@@ -305,7 +311,7 @@ def hpattern(m, couple):
     return hrow
 
 
-def feet(m, regex):
+def feet(m, regex, couple=(), hrows=None):
     """Contact pairs (pairs()): ints, floats and -D sizes for smooth.mojo STAGE 6.
 
     ints   per pair: geom1, geom2, geom2's body, hull vertex count (0: sphere-sphere), hull vertex offset,
@@ -315,6 +321,7 @@ def feet(m, regex):
            pair's deepest dof, ascending), their Jacobian signs (+1 geom2's body only, -1 geom1's only, 0 both or
            neither), H's pattern (rowadr, rownnz, colind as hpattern()), M's entry -> H's entry, opt.iterations,
            opt.ls_iterations, opt.noslip_iterations
+    couple: extra dof sets that H must couple (equality constraints, eqs()); hrows, if a list, receives H's row patterns
     floats per pair: margin, gap, friction 0-1, solref 2, solimp 5, invweight0 translation (both bodies), rbound of
            geom2 and geom1 (14); then hull vertices in the geom frame; then opt.impratio, opt.tolerance, opt.ls_tolerance, opt.noslip_tolerance, stat.meaninertia
     """
@@ -335,7 +342,9 @@ def feet(m, regex):
     two = [(anc(m.geom_bodyid[m.pair_geom1[i]]), anc(m.geom_bodyid[m.pair_geom2[i]])) for i in sel]
     if any(m.body_rootid[m.geom_bodyid[m.pair_geom1[i]]] not in (0, m.body_rootid[m.geom_bodyid[m.pair_geom2[i]]]) for i in sel):
         raise SystemExit('FAIL export: a pair across two animals (Jacobian about one root only)')
-    hrow = hpattern(m, [a ^ b for a, b in two])
+    hrow = hpattern(m, [a ^ b for a, b in two] + list(couple))
+    if hrows is not None:
+        hrows.append(hrow)
     head, first, edges, chains, signs, fl, verts, hulls = [], [], [], [], [], [], [], {}
     nslot = nje = 0
     for i, (a1, a2) in zip(sel, two):
@@ -381,6 +390,94 @@ def feet(m, regex):
     return ints, floats, sizes
 
 
+EQH, EQF = 12, 31  # eq_block: ints and floats per equality constraint
+
+
+def eq_rows(m):
+    """Equality constraints that start active, of the ported kinds (connect, weld, joint), as dicts for eq_block.
+    MuJoCo engine_core_constraint.c:513 mj_instantiateEquality: anchors by body semantic (connect: data[0:3] on obj1,
+    data[3:6] on obj2; weld: data[3:6] on obj1, data[0:3] on obj2, relpose data[6:10], torquescale data[10]) or by site
+    semantic (site_pos, site_quat of both); both reduce to a local anchor, a local quaternion and a body per side."""
+    E, O = mujoco.mjtEq, mujoco.mjtObj
+    def anc(b):
+        c = set()
+        while b > 0:
+            c |= set(range(m.body_dofadr[b], m.body_dofadr[b] + m.body_dofnum[b]))
+            b = m.body_parentid[b]
+        return c
+    if m.neq and (m.opt.solver != mujoco.mjtSolver.mjSOL_NEWTON or m.opt.cone != mujoco.mjtCone.mjCONE_PYRAMIDAL or m.opt.integrator):
+        raise SystemExit('FAIL export: equality constraints are gated with the Newton solver and the pyramidal cone only '
+                         'and the Euler integrator only (check.sh equality, equality_contact); CG, PGS, elliptic cones and implicit integrators with equalities are untested')
+    if m.neq and (m.jnt_limited.any() or m.dof_frictionloss.any()):
+        raise SystemExit('FAIL export: equality constraints with joint limits or dof friction loss (constraint rows not ported)')
+    out = []
+    for i in range(m.neq):
+        if not m.eq_active0[i]:
+            continue
+        t, o1, o2, d = int(m.eq_type[i]), int(m.eq_obj1id[i]), int(m.eq_obj2id[i]), m.eq_data[i]
+        if m.eq_solref[i][0] <= 0 or m.eq_solref[i][1] <= 0:
+            raise SystemExit(f'FAIL export: equality {i} has a direct (non-positive) solref; only the standard format is ported')
+        e = dict(type=t, solref=m.eq_solref[i], solimp=m.eq_solimp[i], data=d[:5], qref=[0.0, 0.0], dof=[-1, -1], qadr=[-1, -1])
+        if t in (E.mjEQ_CONNECT, E.mjEQ_WELD):
+            site = m.eq_objtype[i] == O.mjOBJ_SITE
+            b0, b1 = (m.site_bodyid[o1], m.site_bodyid[o2]) if site else (o1, o2)
+            if site:
+                a0, a1, s0, s1 = m.site_pos[o1], m.site_pos[o2], m.site_quat[o1], m.site_quat[o2]
+            elif t == E.mjEQ_CONNECT:
+                a0, a1, s0, s1 = d[0:3], d[3:6], [1, 0, 0, 0], [1, 0, 0, 0]
+            else:
+                a0, a1, s0, s1 = d[3:6], d[0:3], d[6:10], [1, 0, 0, 0]
+            r0, r1 = m.body_rootid[b0], m.body_rootid[b1]
+            if anc(b0) and anc(b1) and r0 != r1:
+                raise SystemExit(f'FAIL export: equality {i} joins two animals (one floating origin per animal)')
+            e |= dict(b=[int(b0), int(b1)], size=3 if t == E.mjEQ_CONNECT else 6, union=anc(b0) | anc(b1), a=[*a0, *a1], s=[*s0, *s1],
+                      ts=float(d[10]), invw=[m.body_invweight0[b0, 0] + m.body_invweight0[b1, 0], m.body_invweight0[b0, 1] + m.body_invweight0[b1, 1]],
+                      in0=anc(b0), in1=anc(b1), dof=[int(b0 if anc(b0) else b1), -1])  # dof 0: the body whose floating origin frames both anchors
+        elif t == E.mjEQ_JOINT:
+            js = [o1] + ([o2] if o2 >= 0 else [])
+            if any(m.jnt_type[j] not in (mujoco.mjtJoint.mjJNT_HINGE, mujoco.mjtJoint.mjJNT_SLIDE) for j in js):
+                raise SystemExit(f'FAIL export: joint equality {i} on a free or ball joint')
+            e |= dict(b=[0, 0], size=1, union={int(m.jnt_dofadr[j]) for j in js}, a=[0.0] * 6, s=[1, 0, 0, 0, 1, 0, 0, 0], ts=1.0,
+                      invw=[sum(m.dof_invweight0[m.jnt_dofadr[j]] for j in js), 0.0], in0=set(), in1=set(),
+                      dof=[int(m.jnt_dofadr[j]) for j in js] + [-1] * (2 - len(js)), qadr=[int(m.jnt_qposadr[j]) for j in js] + [-1] * (2 - len(js)),
+                      qref=[float(m.qpos0[m.jnt_qposadr[j]]) for j in js] + [0.0] * (2 - len(js)))
+        else:
+            raise SystemExit(f'FAIL export: equality {i} of type {E(t).name} is not ported (connect, weld, joint)')
+        if not e['union']:
+            raise SystemExit(f'FAIL export: equality {i} constrains nothing movable')
+        out.append(e)
+    return out
+
+
+def eq_block(m, eq, hrow):
+    """Equality block (last in mi/mf): ints per constraint (type, body 0, body 1, rows, chain length, chain offset, first
+    row, Jacobian offset, dof 0, dof 1, qpos address 0, 1; connect and weld: the body whose floating origin is the frame), then every chain (H's row pattern of the deepest dof, so
+    J' D J lands on H's rows by chain position, as the contact pairs do) and per chain dof a mask (1: in body 0's
+    chain, 2: body 1's); floats per constraint: local anchors 0 and 1, local quaternions 0 and 1, torquescale, solref 2,
+    solimp 5, inverse weight translation and rotation (joint: dof), joint polynomial data 5, joint qpos0 of both."""
+    J = mujoco.mjtJoint
+    is_quat = lambda c: m.jnt_type[m.dof_jntid[c]] == J.mjJNT_BALL or (m.jnt_type[m.dof_jntid[c]] == J.mjJNT_FREE and c >= m.jnt_dofadr[m.dof_jntid[c]] + 3)
+    head, chains, masks, fl = [], [], [], []
+    nrow = nje = 0
+    for e in eq:
+        chain = hrow[max(e['union'])]
+        head += [e['type'], *e['b'], e['size'], len(chain), len(chains), nrow, nje, *e['dof'], *e['qadr']]
+        nrow, nje = nrow + e['size'], nje + e['size'] * len(chain)
+        chains += chain
+        masks += [(c in e['in0']) + 2 * (c in e['in1']) + 4 * is_quat(c) for c in chain]
+        fl += [*e['a'], *e['s'], e['ts'], *e['solref'], *e['solimp'], *e['invw'], *e['data'], *e['qref']]
+    return (np.array(head + chains + masks), np.array(fl),
+            {'NEQ': len(eq), 'NEQR': nrow, 'NEQCH': len(chains), 'NEQJ': nje})
+
+
+def mocap_block(m):
+    """Mocap bodies (engine_core_smooth.c:86): body_mocapid per body, last block. A mocap body is a child of the world with
+    no joint (MuJoCo's own rule); its pose arrives per animal in ctrl.bin rows nu.. (pos 3, quat 4 per mocap body)."""
+    if not m.nmocap:
+        return None
+    return np.asarray(m.body_mocapid), np.zeros(0), {'NMOCAP': m.nmocap}
+
+
 def actuators(m):
     """S3 tables: ints per actuator (transmission type, dof or body, ctrllimited, forcelimited, qpos address or -1),
     floats per actuator
@@ -408,8 +505,9 @@ def export(mjcf, out, regex=None, act=False):
     sizes = {'NBODY': m.nbody, 'NJNT': m.njnt, 'NQ': m.nq, 'NGEOM': m.ngeom, 'NV': m.nv, 'NC': m.nC, 'NU': m.nu}
     if m.opt.integrator:  # absent = Euler: those binaries are unchanged
         sizes['INTEGRATOR'] = int(m.opt.integrator)
-    if regex:
-        ci, cf, cs = feet(m, regex)
+    eq, hr = eq_rows(m), []
+    if regex or eq:  # equality rows ride the solver block: no pairs (regex '^$') still needs it
+        ci, cf, cs = feet(m, regex or '^$', [e['union'] for e in eq], hr)
         ints, floats, sizes = ints + [ci], floats + [cf], sizes | cs
     if act:
         ai, af = actuators(m)
@@ -417,6 +515,12 @@ def export(mjcf, out, regex=None, act=False):
     for block in (fluid(m), tendons(m)):  # last, so every earlier block keeps its offsets and a model without them its bytes
         if block:
             ints, floats, sizes = ints + [block[0]], floats + [block[1]], sizes | block[2]
+    if eq:  # after the other lanes' blocks too: a model without equalities keeps its bytes
+        block = eq_block(m, eq, hr[0])
+        ints, floats, sizes = ints + [block[0]], floats + [block[1]], sizes | block[2]
+    if mocap_block(m):  # after the equality block: Mojo CMOC follows CEQM
+        block = mocap_block(m)
+        ints, floats, sizes = ints + [block[0]], floats + [block[1]], sizes | block[2]
     np.concatenate(ints).astype(np.int32).tofile(out / 'mi.bin')
     np.concatenate(floats).astype(np.float32).tofile(out / 'mf.bin')
     (out / 'sizes.txt').write_text(' '.join(f'-D{k}={v}' for k, v in sizes.items()) + '\n')
@@ -460,6 +564,25 @@ def meshes(mjcf, out):
     return worst
 
 
+def nearby(m, count, seed=0):
+    """(qpos, qvel) near qpos0, where an equality-constrained model satisfies its constraints: free-joint position +-0.01, every
+    rotation (free, ball) a random rotation of up to ~0.1 rad, hinges +-0.1 rad, slides +-0.01, qvel +-3. The physical regime of
+    the equality stage; EQSPREAD=far swaps in mj_oracle's random states (violations of metres, forces that cancel to
+    float32 noise in qacc_euler: MEASURED, not gated)."""
+    rng, q = np.random.default_rng(seed), np.tile(m.qpos0, (count, 1))
+    for j in range(m.njnt):
+        a, t = m.jnt_qposadr[j], m.jnt_type[j]
+        if t == mujoco.mjtJoint.mjJNT_FREE:
+            q[:, a:a + 3] += rng.uniform(-0.01, 0.01, (count, 3))
+            a += 3
+        if t in (mujoco.mjtJoint.mjJNT_FREE, mujoco.mjtJoint.mjJNT_BALL):
+            r = q[:, a:a + 4] + 0.05 * rng.normal(size=(count, 4))
+            q[:, a:a + 4] = r / np.linalg.norm(r, axis=1, keepdims=True)
+        else:
+            q[:, a] += rng.uniform(-0.1, 0.1, count) if t == mujoco.mjtJoint.mjJNT_HINGE else rng.uniform(-0.01, 0.01, count)
+    return q, rng.uniform(-3, 3, (count, m.nv))
+
+
 def standing(m, count, seed=0):
     """(qpos, qvel) of count states from actuated rollouts of the full model, adhesion on, one state every 2 ms after
     0.2 s of settling: half standing still (all 6 feet down), half with servos jittered +-0.2 rad every 50 ms
@@ -494,10 +617,12 @@ def airborne(mjcf, out, count=64, lift=5.0):
 def check(mjcf, out, stage, count=64, k=0, oracle=None):
     """oracle: MuJoCo runs this MJCF instead of mjcf (same bodies and pair order), e.g. terrain_plane.xml for the
     engine's heightfield terrain.xml; standing states come from it too."""
-    feet = stage in ('contact', 'actuated')
+    feet = stage in ('contact', 'actuated') or (stage == 'equality' and bool(load(mjcf).npair))  # equality + contacts: the contact path
     m, out = export(mjcf, out, FEET if feet else None, stage == 'actuated'), Path(out)
     number, fn, fields = STAGES[stage]
-    q, v = standing(load(oracle) if oracle else m, count) if feet else (states(m, count), velocities(m, count, scale=VSCALE))
+    near = stage in ('equality', 'mocap') and os.environ.get('EQSPREAD') != 'far'
+    far = not near
+    q, v = nearby(m, count) if near else standing(load(oracle) if oracle else m, count) if feet else (states(m, count), velocities(m, count, scale=VSCALE))
     if os.environ.get('STATES'):  # saved states instead (e.g. grooming poses: legs on the head, .work/.../groom_states.npz)
         z = np.load(os.environ['STATES'])
         q, v = z['qpos'][:count], z['qvel'][:count]
@@ -511,10 +636,19 @@ def check(mjcf, out, stage, count=64, k=0, oracle=None):
                 u[:, i] = q[:, m.jnt_qposadr[m.actuator_trnid[i, 0]]] + rng.uniform(-0.3, 0.3, count)
             else:
                 u[:, i] = rng.uniform(0, 1, count)
-    u.astype(np.float32).T.copy().tofile(out / 'ctrl.bin')  # (nu, flies); zeros below the actuated stage
+    mp = mq = None
+    if m.nmocap:  # mocap pose per animal rides in ctrl.bin rows nu..: pos 3, quat 4 per mocap body (quats left unnormalised on purpose)
+        rng = np.random.default_rng(3)
+        b = np.flatnonzero(m.body_mocapid >= 0)[np.argsort(m.body_mocapid[m.body_mocapid >= 0])]
+        spread = 1 if far else 0.15  # near: a few mm and ~0.05 rad around the model pose
+        mp = m.body_pos[b][None] + spread * rng.uniform(-0.03, 0.03, (count, m.nmocap, 3))
+        mq = m.body_quat[b][None] + spread * 0.2 * rng.normal(size=(count, m.nmocap, 4))
+        mq *= rng.uniform(0.9, 1.1, (count, m.nmocap, 1)) / np.linalg.norm(mq, axis=2, keepdims=True)
+        u = np.concatenate([u, np.concatenate([mp, mq], axis=2).reshape(count, -1)], axis=1)
+    u.astype(np.float32).T.copy().tofile(out / 'ctrl.bin')  # (nu + 7 nmocap, flies); zeros below the actuated stage
     if feet:  # only the exported pairs collide; actuators off below S3
         s = load(oracle or mjcf)
-        if stage == 'contact':
+        if stage in ('contact', 'equality'):
             s.opt.disableflags |= mujoco.mjtDisableBit.mjDSBL_ACTUATION
         on = set(pairs(s, FEET)[0])
         for i in range(s.npair):
@@ -534,7 +668,7 @@ def check(mjcf, out, stage, count=64, k=0, oracle=None):
             want['ncon'][n] = sum(c.efc_address >= 0 for c in d.contact[:d.ncon])
             jar = np.zeros(d.nefc)
             mujoco.mj_mulJacVec(s, d, jar, d.qacc)
-            switch[n] = (np.abs(jar - d.efc_aref).min() / max(np.abs(d.efc_aref).max(), 1e-30)) if d.nefc else 1.0
+            switch[n] = (np.abs(jar - d.efc_aref)[d.ne:].min() / max(np.abs(d.efc_aref).max(), 1e-30)) if d.nefc > d.ne else 1.0  # equality rows never switch
             for i in live:
                 g1, g2 = s.pair_geom1[i], s.pair_geom2[i]
                 a, c = s.mesh_vertadr[s.geom_dataid[g2]], s.mesh_vertnum[s.geom_dataid[g2]]
@@ -549,12 +683,42 @@ def check(mjcf, out, stage, count=64, k=0, oracle=None):
         alt['qacc_euler'] = (alt.pop('qvel') - r32(v)) / m.opt.timestep  # same derivation as the reference's
         alt['qpos_next'] = alt.pop('qpos')
         floor = {f: float(np.abs(alt[f] - want[f]).max() / max(np.abs(want[f]).max(), 1e-30)) for f in alt}
+        if stage == 'equality':  # same lift as the contact-free branch below, and proof that the fixture is mixed
+            floor['qacc_euler'] = max(floor['qacc_euler'], EQ_EULER_BAR / FLOOR_X)
+            print(f"equality + contacts: contact rows active in {int((want['ncon'] > 0).sum())}/{count} states")
         if k:  # K-step loop: the state after k chained mj_step calls, ctrl held; its own float32 floor
             chain = ','.join(['mj_step'] * k)
             want = reference(s, chain, ('qpos', 'qvel'), q, v, u)
             alt = reference(s, chain, ('qpos', 'qvel'), r32(q), r32(v), r32(u))
             floor = {f: float(np.abs(alt[f] - want[f]).max() / np.abs(want[f]).max()) for f in alt}
             fields = ('qpos', 'qvel')
+        print('float32 input floor: ' + ', '.join(f'{f} {e:.2e}' for f, e in floor.items()))
+    elif stage in ('equality', 'mocap'):
+        s = load(mjcf)
+        s.opt.disableflags |= mujoco.mjtDisableBit.mjDSBL_CONTACT | mujoco.mjtDisableBit.mjDSBL_ACTUATION
+        ref = tuple(f for f in fields if f not in ('qacc_euler', 'qpos_next')) + ('qpos', 'qvel')
+        r32 = lambda x: x.astype(np.float32).astype(np.float64)
+
+        def run(qq, vv, pp, qm):  # mj_oracle.reference with the mocap pose set per state
+            d, o = mujoco.MjData(s), {f: [] for f in ref}
+            for n in range(count):
+                d.qpos[:], d.qvel[:] = qq[n], vv[n]
+                if s.nmocap:
+                    d.mocap_pos[:], d.mocap_quat[:] = pp[n], qm[n]
+                mujoco.mj_step(s, d)
+                for f in ref:
+                    o[f].append(np.array(getattr(d, f)))
+            return {f: np.array(a) for f, a in o.items()}
+        want = run(q, v, mp, mq)
+        alt = run(r32(q), r32(v), None if mp is None else r32(mp), None if mq is None else r32(mq))  # alt: the float32-rounded input
+        for w, r in ((want, v), (alt, r32(v))):
+            w['qacc_euler'] = (w.pop('qvel') - r) / m.opt.timestep
+            w['qpos_next'] = w.pop('qpos')
+        floor = {f: float(np.abs(alt[f] - want[f]).max() / max(np.abs(want[f]).max(), 1e-30)) for f in alt}
+        # qacc_euler = M^-1 (qfrc_smooth + qfrc_constraint) turns the constraint forces' float32 error (qfrc_constraint within 5e-6 of its
+        # max) into 4.6e-5 of its own max: the rows' forces are D (J qacc - aref), a difference of terms 10-100x larger than itself, and
+        # M^-1 weighs the light rotational dofs 1000x. The bar is lifted to EQ_EULER_BAR; a wrong term moves it by 1e-1 (mutants).
+        floor['qacc_euler'] = max(floor['qacc_euler'], EQ_EULER_BAR / FLOOR_X)
         print('float32 input floor: ' + ', '.join(f'{f} {e:.2e}' for f, e in floor.items()))
     elif stage == 'step':
         s = load(mjcf)
