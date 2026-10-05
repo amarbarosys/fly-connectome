@@ -46,6 +46,7 @@ REGIONS = {
     'WLN2': (3000, 2, 'jin2023: walking leg neuropil 2; size inferred'),
     'WLN3': (3000, 2, 'jin2023: walking leg neuropil 3; size inferred'),
     'WLN4': (3000, 2, 'jin2023: walking leg neuropil 4; size inferred'),
+    'AMm': (6, 2, 'principal-eye tube muscles (Land 1969: 6 per eye); motor neurons per muscle inferred'),
 }
 # (pre, post, ipsilateral only, source)
 TRACTS = [
@@ -63,7 +64,9 @@ TRACTS = [
     ('AB', 'PC', False, 'inferred: arcuate body to premotor protocerebrum'),
     ('MB', 'PC', False, 'inferred'),
     *[(('PC', m, False, 'inferred: descending premotor tract to the appendage neuropils')) for m in MOTOR],
+    ('AM2', 'AMm', True, 'inferred: principal-eye second neuropil to its eye-tube motor neurons (pursuit slice)'),
 ]
+FAN = {('AM2', 'AMm'): 200}  # pre slots per post neuron where it differs from FANIN (the pursuit slice's motor layer)
 
 
 def layout():
@@ -85,8 +88,39 @@ def build(seed=5):
             sides = [sb] if ipsi and REGIONS[a][1] == REGIONS[b][1] else range(REGIONS[a][1])
             pool = np.concatenate([np.arange(*at[(a, sa)]) for sa in sides])
             for j in range(lo, hi):
-                pre.append(rng.choice(pool, FANIN, replace=False)); post.append(np.full(FANIN, j)); tract.append(np.full(FANIN, t))
+                f = FAN.get((a, b), FANIN)
+                pre.append(rng.choice(pool, f, replace=False)); post.append(np.full(f, j)); tract.append(np.full(f, t))
     return at, n, np.concatenate(pre), np.concatenate(post), np.concatenate(tract)
+
+
+def plan(seed=5):
+    """The scaffold as the GPU learner's tables (agent/spider_pool.mojo): slots ordered by (post, tract), so each post
+    neuron's candidate inputs from all its tracts form one row. groups (int32 rows, launch order = tract topological
+    order): post0, npost, row fan, slot base, segment fan, first segment, teach gate (1 = gated by own spikes, 0 =
+    motor). segments (one per group x incoming tract): pre_lo, pre_n (the tract's contiguous pre pool, both sides
+    adjacent in layout()). Returns at, n, idx, groups, segments."""
+    at, n, pre, post, tract = build(seed)
+    o = np.lexsort((tract, post))
+    pre, post, tract = pre[o], post[o], tract[o]
+    order, done = [], {r for r in REGIONS if r.endswith('_retina')}
+    while len(done) < len(REGIONS):  # Kahn over regions: a region launches after all its pre regions
+        for r in REGIONS:
+            if r not in done and all(a in done for a, b, _, _ in TRACTS if b == r):
+                done.add(r); order.append(r)
+    start = np.searchsorted(post, np.arange(n))  # first slot of each post neuron
+    groups, segs = [], []
+    for r in order:
+        ins = [(t, a, ipsi) for t, (a, b, ipsi, _) in enumerate(TRACTS) if b == r]
+        for sd in range(REGIONS[r][1]):
+            lo, hi = at[(r, sd)]
+            f = [FAN.get((a, r), FANIN) for _, a, _ in ins]
+            groups.append([lo, hi - lo, sum(f), int(start[lo]), f[0], len(segs), 0 if r in MOTOR or r == 'AMm' else 1])
+            assert len(set(f)) == 1, r  # one segment fan per group
+            for _, a, ipsi in ins:
+                sides = [sd] if ipsi and REGIONS[a][1] == REGIONS[r][1] else range(REGIONS[a][1])
+                a0, a1 = at[(a, min(sides))][0], at[(a, max(sides))][1]
+                segs.append([a0, a1 - a0])
+    return at, n, pre.astype(np.int32), np.array(groups, np.int32), np.array(segs, np.int32)
 
 
 def reach(start, edges):
@@ -109,7 +143,7 @@ def check():
     for a, b, _, _ in TRACTS:
         fwd.setdefault(a, []).append(b); back.setdefault(b, []).append(a)
     eyes = [r for r in REGIONS if r.endswith('_retina')]
-    down, up = reach(eyes, fwd), reach(list(MOTOR), back)
+    down, up = reach(eyes, fwd), reach([*MOTOR, 'AMm'], back)
     orphan = [r for r in REGIONS if r not in down or r not in up]
     ok2 = not orphan
     print(f"{'PASS' if ok2 else 'FAIL'} S2 every region on a retina-to-motor path; orphans: {orphan}")

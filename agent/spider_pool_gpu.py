@@ -11,7 +11,10 @@ check  (1) parity: oracle vs GPU from the same nonzero weights, 3 steps x 32 col
            circuit, P2 random-sign feedback control >= 2 x learned, P3 before training > 2 x hand
 usage: gpu-wait run --priority 70 --timeout 3600 -- .venv/bin/python -m agent.spider_pool_gpu check [ITERS]
 """
+import functools
+import hashlib
 import json
+import os
 import subprocess
 import sys
 import time
@@ -25,11 +28,19 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tools'))
 import spider_blank_pool_test as P  # noqa: E402
 
-B, NR, N1, N2, NM, F12, FM = 32, 1200, 2000, 2000, 12, 20, 200
-NT = NR + N1 + N2 + NM
-POST0, NPOST, FAN = (NR, NR + N1, NR + N1 + N2), (N1, N2, NM), (F12, F12, FM)
-SBASE = (0, N1 * F12, 2 * N1 * F12)
-NS = N1 * F12 + N2 * F12 + NM * FM
+B, NM, FREF = 32, 12, 20
+SLICE = os.environ.get('SLICE') == '1'  # 1: the 3-layer slice (5,212 neurons); default: the whole scaffold
+if SLICE:
+    NR, N1, N2, F12, FM = 1200, 2000, 2000, 20, 200
+    NT, NS = NR + N1 + N2 + NM, N1 * F12 + N2 * F12 + NM * FM
+    # group rows: post0, npost, row fan, slot base, segment fan, first segment, teach gate; segments: pre_lo, pre_n
+    G = np.array([[NR, N1, F12, 0, F12, 0, 1], [NR + N1, N2, F12, N1 * F12, F12, 1, 1], [NR + N1 + N2, NM, FM, 2 * N1 * F12, FM, 2, 0]], np.int32)
+    SEG = np.array([[0, NR], [NR, N1], [NR + N1, N2]], np.int32)
+else:
+    import agent.spider_scaffold as SC
+    AT, NT, IDX, G, SEG = SC.plan()
+    NR, NS = AT[('PME_retina', 1)][1], len(IDX)
+OUT0 = NT - NM  # the eye motors are the last NM neurons (slice layer 3; scaffold AMm, both sides)
 S, REFR, SUB, V_TH, KICK, GAIN, P_NOISE, ETA = 20, 5, 5e-4, 7.0, np.float32(0.275 * 250), 400.0, np.float32(30 * 5e-4), 0.01
 THETA, WMAX, FRAC = 0.02, 0.3, 0.3
 DIR = ROOT / '.work/agent/spider/pool-gpu'
@@ -37,15 +48,21 @@ MOJO = Path.home() / 'iTools/bin/mojo-cached'
 
 
 def init(seed=2):
-    """Slots (global pre ids), empty weights, feedback, receptor channels."""
+    """Slots (global pre ids), empty weights, feedback, receptor channels. Teaching mask (astra rank 1): feedback only
+    on the pursuit pathway (AM1, AM2 random +-1; eye motors right/left); every other region has fb 0 and never learns
+    from the pursuit error. ch: receptor k of each principal retina -> 12 motion channels; other retinas silent (-1)."""
     rng = np.random.default_rng(seed)
-    pre_lo = (0, NR, NR + N1)
-    pre_n = (NR, N1, N2)
-    idx = np.concatenate([np.stack([rng.choice(pre_n[l], FAN[l], replace=False) for _ in range(NPOST[l])]).ravel() + pre_lo[l] for l in range(3)]).astype(np.int32)
     fb = np.zeros((NT, 2), np.float32)
-    fb[NR:NR + N1 + N2] = rng.choice([-1.0, 1.0], (N1 + N2, 2))
-    fb[POST0[2]:] = np.r_[np.tile([1, -1], (6, 1)), np.tile([-1, 1], (6, 1))]
-    ch = (np.arange(NR) // 100 * 2 + (np.arange(NR) % 100 >= 50)).astype(np.int32)
+    if SLICE:
+        pre_lo, pre_n, fan = (0, NR, NR + N1), (NR, N1, N2), (F12, F12, FM)
+        idx = np.concatenate([np.stack([rng.choice(pre_n[l], fan[l], replace=False) for _ in range(G[l][1])]).ravel() + pre_lo[l] for l in range(3)]).astype(np.int32)
+        hid, ch = slice(NR, NR + N1 + N2), np.arange(NR)
+    else:
+        idx, lo, hi = IDX.copy(), AT[('AM1', 0)][0], AT[('AM2', 1)][1]
+        hid, ch = slice(lo, hi), np.r_[np.arange(1200), np.arange(1200), np.full(NR - 2400, -1)]
+    fb[hid] = rng.choice([-1.0, 1.0], (hid.stop - hid.start, 2))
+    fb[OUT0:OUT0 + NM] = np.r_[np.tile([1, -1], (6, 1)), np.tile([-1, 1], (6, 1))]
+    ch = np.where(ch < 0, -1, ch // 100 * 2 + (ch % 100 >= 50)).astype(np.int32)
     return idx, np.zeros(NS, np.float32), fb, ch
 
 
@@ -68,13 +85,12 @@ class HashPathway:
         spk = np.zeros((B, NT), f)
         e_all = (np.arange(B)[:, None] * NT + np.arange(NT)[None]).astype(np.uint32)
         v = m[:, self.ch // 2]
-        rate = (f(GAIN * SUB) * np.where(self.ch % 2 == 0, np.maximum(v, 0), np.maximum(-v, 0))).astype(f)
+        rate = (f(GAIN * SUB) * np.where(self.ch % 2 == 0, np.maximum(v, 0), np.maximum(-v, 0)) * (self.ch >= 0)).astype(f)
         for _ in range(S):
             s = (uniform(self.seed, self.t, e_all[:, :NR]) < rate).astype(f)
             spk[:, :NR] = s
             self.tr[:, :NR] = self.tr[:, :NR] * dk + s; self.ps[:, :NR] += self.tr[:, :NR]
-            for l in range(3):
-                a, n, fan, sb = POST0[l], NPOST[l], FAN[l], SBASE[l]
+            for a, n, fan, sb, *_ in G:
                 ii = self.idx[sb:sb + n * fan].reshape(n, fan); ww = self.w[sb:sb + n * fan].reshape(n, fan)
                 drive = (ww[None] * spk[:, ii]).sum(-1, dtype=f)
                 noise = np.where(uniform(self.seed + 1, self.t, e_all[:, a:a + n]) < P_NOISE, KICK, f(0))
@@ -88,41 +104,53 @@ class HashPathway:
                 self.act[:, a:a + n] += sp
                 self.tr[:, a:a + n] = self.tr[:, a:a + n] * dk + sp; self.ps[:, a:a + n] += self.tr[:, a:a + n]
             self.t += 1
-        return self.act[:, POST0[2]:].astype(np.uint16)
+        return self.act[:, OUT0:OUT0 + NM].astype(np.uint16)
 
     def teach(self, err):
-        for l in range(3):
-            a, n, fan, sb = POST0[l], NPOST[l], FAN[l], SBASE[l]
+        for a, n, fan, sb, _, _, gate in G:
             ii = self.idx[sb:sb + n * fan].reshape(n, fan)
-            h = (err @ self.fb[a:a + n].T) * ((self.act[:, a:a + n] > 0) if l < 2 else 1)  # (B, n); motor layer ungated
-            self.w[sb:sb + n * fan] += (np.float32(ETA) * np.float32(F12) / np.float32(fan) * np.einsum('bj,bjk->jk', h, self.ps[:, ii]) / B).ravel()
+            h = (err @ self.fb[a:a + n].T) * ((self.act[:, a:a + n] > 0) if gate else 1)  # (B, n); motor layer ungated
+            self.w[sb:sb + n * fan] += (np.float32(ETA) * np.float32(FREF) / np.float32(fan) * np.einsum('bj,bjk->jk', h, self.ps[:, ii]) / B).ravel()
             np.clip(self.w[sb:sb + n * fan], -WMAX, WMAX, out=self.w[sb:sb + n * fan])  # the kernel clamps every step
-        alive = []
-        for l in range(3):  # prune kernel
-            ww = self.w[SBASE[l]:SBASE[l] + NPOST[l] * FAN[l]]
+        alive = np.zeros(len(SEG), np.int64)
+        segof = []
+        for _, n, fan, sb, sf, s0, _ in G:  # prune kernel: survivors counted per segment
+            ww = self.w[sb:sb + n * fan]
             ww[np.abs(ww) < np.float32(THETA)] = 0
-            alive.append(int((ww != 0).sum()))
-        pre_lo, pre_n = (0, NR, NR + N1), (NR, N1, N2)
-        for l in range(3):  # regrow kernel
-            n, sb = NPOST[l] * FAN[l], SBASE[l]
-            ww, ii = self.w[sb:sb + n], self.idx[sb:sb + n]
-            sl = np.arange(sb, sb + n).astype(np.uint32)
-            q = np.float32((np.float32(0.3) * np.float32(n) - np.float32(alive[l])) / np.float32(max(n - alive[l], 1)))
+            sg = s0 + np.arange(n * fan) % fan // sf
+            np.add.at(alive, sg, ww != 0); segof.append(sg)
+        for (_, n, fan, sb, sf, s0, _), sg in zip(G, segof):  # regrow kernel
+            ww, ii = self.w[sb:sb + n * fan], self.idx[sb:sb + n * fan]
+            sl = np.arange(sb, sb + n * fan).astype(np.uint32)
+            m, a = np.float32(n * sf), alive[sg].astype(np.float32)
+            q = ((np.float32(0.3) * m - a) / np.maximum(m - a, np.float32(1))).astype(np.float32)
             grow = (ww == 0) & (uniform(self.seed + 2, self.tstep, sl) < q)
             pick = uniform(self.seed + 3, self.tstep, sl)
-            ii[grow] = (pre_lo[l] + np.minimum((pick * np.float32(pre_n[l])).astype(np.int32), pre_n[l] - 1))[grow]
+            lo, pn = SEG[sg, 0], SEG[sg, 1]
+            ii[grow] = (lo + np.minimum((pick * pn.astype(np.float32)).astype(np.int32), pn - 1))[grow]
             ww[grow] = np.where(uniform(self.seed + 4, self.tstep, sl) < 0.5, np.float32(1.5 * THETA), np.float32(-1.5 * THETA))[grow]
         self.tstep += 1
+
+
+@functools.cache
+def build():
+    """One build per process (mojo-cached): every arm of a run uses the same binary, even if the source changes mid-run."""
+    flags = [f'-D{k}={v}' for k, v in dict(B=B, NR=NR, NT=NT, NS=NS, NG=len(G), NSEG=len(SEG), OUT0=OUT0, NM=NM).items()]
+    src = ROOT / 'agent/spider_pool.mojo'
+    tag = hashlib.sha1(src.read_bytes() + ' '.join(flags).encode()).hexdigest()[:10]  # a later edit builds a new file
+    binary = ROOT / f'.work/agent/spider/build/spider_pool_{tag}'
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run([str(MOJO), 'build', *flags, str(src), '-o', str(binary) + '.tmp'], check=True, capture_output=True)
+    os.replace(str(binary) + '.tmp', binary)
+    return binary
 
 
 class GPUPathway:
     def __init__(self, idx, w, fb, ch, seed=7):
         DIR.mkdir(parents=True, exist_ok=True)
         idx.tofile(DIR / 'idx.bin'); w.tofile(DIR / 'w.bin'); fb.tofile(DIR / 'fb.bin'); ch.tofile(DIR / 'ch.bin')
-        src = ROOT / 'agent/spider_pool.mojo'
-        binary = ROOT / f'.work/agent/spider/build/spider_pool_b{B}'
-        if not binary.is_file() or binary.stat().st_mtime < src.stat().st_mtime:
-            subprocess.run([str(MOJO), 'build', f'-DB={B}', str(src), '-o', str(binary)], check=True, capture_output=True)
+        np.concatenate([G.ravel(), SEG.ravel()]).astype(np.int32).tofile(DIR / 'plan.bin')
+        binary = build()
         self.p = subprocess.Popen([str(binary), str(DIR) + '/', str(seed)], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
 
     def _cmd(self, code, *payload):

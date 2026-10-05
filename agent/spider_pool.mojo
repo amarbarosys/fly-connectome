@@ -2,10 +2,12 @@
 scaffold slice of tools/spider_scaffold_learn_test.py (retina -> AM1 -> AM2 -> eye-muscle motor neurons, sparse fan-in
 slots, empty at start) with its teaching rule. Every trial is one column b; all state stays on the card.
 
-Neurons are numbered globally: retina 0..NR-1, then layer 1, 2, 3 (motor). Per neuron and column: u (float32), refr
+Neurons are numbered globally: retinas 0..NR-1, then the groups (agent/spider_scaffold.py plan(): one group per
+region-side, launched in tract topological order; the 3-layer slice is the same with 3 groups). Per neuron and column: u (float32), refr
 (uint8 substeps left), spike (uint8, this substep), act (uint16 spikes this 10 ms step), tr (float32 pre trace),
 ps (float32 sum of tr over the step, the eligibility). Synapse slots (int32 global pre id, float32 weight) are grouped
-per layer, post-major: slot base + (j - post0) * fan + k.
+per group, post-major: slot base + (j - post0) * row fan + k; a row is its incoming tracts' segments in turn (segment
+k // segment fan), each with its own contiguous pre pool for regrowth.
 Per substep, launches in order: retina (Poisson at the motion rate of the receptor's patch and direction), then each
 layer (gather drive over its fan-in from this substep's spikes, Poisson noise kick, LIF, spike, trace). Random numbers:
 uniform(seed + stream, substep counter, column * NT + neuron), shiu_worker's counter hash.
@@ -17,8 +19,9 @@ stdin commands (int32 code, then payload; replies on stdout):
   4 GETW                               -> w (NS float32), idx (NS int32)
   5 SETW  w, idx                       (host rewiring between trials)
   0 quit
-usage: spider_pool DIR/ SEED   (DIR: idx.bin, w.bin, fb.bin (NT x 2 float32), ch.bin (NR int32: patch * 2 + dir))
-build: mojo build -DB=.. -DNR=.. -DN1=.. -DN2=.. -DNM=.. -DF12=.. -DFM=.. agent/spider_pool.mojo
+usage: spider_pool DIR/ SEED   (DIR: idx.bin, w.bin, fb.bin (NT x 2 float32), ch.bin (NR int32: patch * 2 + dir, -1 silent),
+       plan.bin (int32: NG x 7 group rows, then NSEG x 2 segment rows, see spider_scaffold.plan))
+build: mojo build -DB=.. -DNR=.. -DNT=.. -DNS=.. -DNG=.. -DNSEG=.. -DOUT0=.. -DNM=.. agent/spider_pool.mojo
 """
 from std.atomic import Atomic
 from std.ffi import external_call
@@ -30,13 +33,13 @@ from layout import TileTensor, row_major
 
 comptime B = get_defined_int["B", 32]()
 comptime NR = get_defined_int["NR", 1200]()
-comptime N1 = get_defined_int["N1", 2000]()
-comptime N2 = get_defined_int["N2", 2000]()
+comptime NT = get_defined_int["NT", 5212]()
+comptime NS = get_defined_int["NS", 82400]()
+comptime NG = get_defined_int["NG", 3]()
+comptime NSEG = get_defined_int["NSEG", 3]()
+comptime OUT0 = get_defined_int["OUT0", 5200]()  # first motor neuron read out by STEP
 comptime NM = get_defined_int["NM", 12]()
-comptime F12 = get_defined_int["F12", 20]()
-comptime FM = get_defined_int["FM", 200]()
-comptime NT = NR + N1 + N2 + NM
-comptime NS = N1 * F12 + N2 * F12 + NM * FM
+comptime FREF = 20  # fan-in the teaching rate is set for; a row of fan f learns at ETA * FREF / f
 comptime S = 20  # substeps of 0.5 ms per 10 ms step
 comptime REFR = UInt8(5)  # 2.2 ms refractory at 0.5 ms substeps: blocks 5 substeps, as the CPU slice's float countdown
 comptime SUB = Float32(5e-4)
@@ -48,7 +51,9 @@ comptime ETA = Float32(0.01)
 comptime WMAX = Float32(0.3)
 comptime THETA = Float32(0.02)
 comptime FRAC = Float32(0.3)
-comptime LK = row_major[8]()
+comptime LK = row_major[NSEG]()
+comptime LG = row_major[2 * NSEG]()
+comptime TG = TileTensor[DType.int32, type_of(LG), MutAnyOrigin]
 comptime TK = TileTensor[DType.int32, type_of(LK), MutAnyOrigin]
 comptime LN = row_major[B * NT]()
 comptime LS = row_major[NS]()
@@ -91,6 +96,10 @@ def retina(m: TM, ch: TC, spk: TNb, tr: TNf, ps: TNf, seed: UInt32, t: UInt32, d
     var b = i // NR
     var k = i % NR
     var c = Int(ch[k])
+    if c < 0:
+        spk[b * NT + k] = 0
+        trace(tr, ps, b * NT + k, 0, dk)
+        return
     var v = m[b * 12 + c // 2]
     var rate = GAIN * SUB * (max(v, Float32(0)) if c % 2 == 0 else max(-v, Float32(0)))
     var e = b * NT + k
@@ -141,11 +150,11 @@ def teach(idx: TSi, w: TSf, act: TNa, ps: TNf, fb: TF, err: TE, post0_: Int32, n
     for b in range(B):
         if gate == 0 or act[b * NT + g] > 0:  # motor layer ungated (as the pool test's w_out): a silent motor can recover
             acc += (err[2 * b] * fb[2 * g] + err[2 * b + 1] * fb[2 * g + 1]) * ps[b * NT + pre]
-    w[sbase + i] = min(max(w[sbase + i] + ETA * Float32(F12) / Float32(fan) * acc / Float32(B), -WMAX), WMAX)  # bounded every step, as the CPU slice
+    w[sbase + i] = min(max(w[sbase + i] + ETA * Float32(FREF) / Float32(fan) * acc / Float32(B), -WMAX), WMAX)  # bounded every step, as the CPU slice
 
 
-def prune(w: TSf, alive: TK, l: Int32, n_: Int32, sbase_: Int32):
-    """Structural pass 1 (every teach step, all slots of layer l): |w| < THETA -> 0; count the survivors."""
+def prune(w: TSf, alive: TK, seg0: Int32, segfan: Int32, rowfan: Int32, n_: Int32, sbase_: Int32):
+    """Structural pass 1 (every teach step, all slots of one group): |w| < THETA -> 0; count survivors per segment."""
     var i = Int(block_idx.x * block_dim.x + thread_idx.x)
     if i >= Int(n_):
         return
@@ -153,20 +162,22 @@ def prune(w: TSf, alive: TK, l: Int32, n_: Int32, sbase_: Int32):
     if abs(w[s]) < THETA:
         w[s] = 0
     else:
-        _ = Atomic.fetch_add(alive.ptr.unsafe_offset(Int(l)), Int32(1))
+        _ = Atomic.fetch_add(alive.ptr.unsafe_offset(Int(seg0) + i % Int(rowfan) // Int(segfan)), Int32(1))
 
 
-def regrow(idx: TSi, w: TSf, alive: TK, l: Int32, n_: Int32, sbase_: Int32, pre_lo: Int32, pre_n: Int32, seed: UInt32, step: UInt32):
+def regrow(idx: TSi, w: TSf, alive: TK, seg0: Int32, segfan: Int32, rowfan: Int32, n_: Int32, sbase_: Int32, segs: TG, seed: UInt32, step: UInt32):
     """Structural pass 2: each empty slot regrows with probability (FRAC n - alive) / (n - alive), at a new random pre
     of the same tract, weight +-1.5 THETA; random numbers from the counter hash (stream seed + 2)."""
     var i = Int(block_idx.x * block_dim.x + thread_idx.x)
-    var n = Int(n_)
-    if i >= n:
+    if i >= Int(n_):
         return
     var s = Int(sbase_) + i
     if w[s] != 0:
         return
-    var a = Int(alive[Int(l)])
+    var g = Int(seg0) + i % Int(rowfan) // Int(segfan)
+    var n = Int(n_) // Int(rowfan) * Int(segfan)  # slots of this segment
+    var pre_lo, pre_n = segs[2 * g], segs[2 * g + 1]
+    var a = Int(alive[g])
     var q = (FRAC * Float32(n) - Float32(a)) / Float32(max(n - a, 1))
     if uniform(seed + 2, step, UInt32(s)) < q:
         var pick = uniform(seed + 3, step, UInt32(s))
@@ -246,17 +257,24 @@ def main() raises:
     var dk = exp(-SUB / Float32(5e-3))
     var t = UInt32(0)
     var code = ctx.enqueue_create_host_buffer[DType.int32](1)
-    var alive_b = ctx.enqueue_create_buffer[DType.int32](8)
+    var alive_b = ctx.enqueue_create_buffer[DType.int32](NSEG)
     var kp = ctx.compile_function[prune]()
     var kg = ctx.compile_function[regrow]()
     var tstep = UInt32(0)
-    var PL = [0, NR, NR + N1]
-    var PN = [NR, N1, N2]
-    # per layer: post0, npost, fan, slot base
-    var P0 = [NR, NR + N1, NR + N1 + N2]
-    var NP = [N1, N2, NM]
-    var FN = [F12, F12, FM]
-    var SB = [0, N1 * F12, N1 * F12 + N2 * F12]
+    raw = load(dir + "plan.bin", NG * 7 + NSEG * 2)
+    var pl = raw.unsafe_ptr().unsafe_bitcast[Int32]()
+    var P0 = List[Int]()
+    var NP = List[Int]()
+    var FN = List[Int]()
+    var SB = List[Int]()
+    var SF = List[Int]()
+    var S0 = List[Int]()
+    var GT = List[Int]()
+    for g in range(NG):  # group rows: post0, npost, row fan, slot base, segment fan, first segment, teach gate
+        P0.append(Int(pl[7 * g])); NP.append(Int(pl[7 * g + 1])); FN.append(Int(pl[7 * g + 2])); SB.append(Int(pl[7 * g + 3]))
+        SF.append(Int(pl[7 * g + 4])); S0.append(Int(pl[7 * g + 5])); GT.append(Int(pl[7 * g + 6]))
+    var segs_b = ctx.enqueue_create_buffer[DType.int32](2 * NSEG)
+    ctx.enqueue_copy(segs_b, pl.unsafe_offset(7 * NG))
     ctx.synchronize()
     while True:
         if not io(0, code.unsafe_ptr().unsafe_bitcast[UInt8](), 4, False) or code.unsafe_ptr()[] == 0:
@@ -270,7 +288,7 @@ def main() raises:
             for _ in range(S):
                 ctx.enqueue_function(kr, TileTensor(m_b, LM), TileTensor(ch_b, LC), spk, tr, ps, seed, t, dk,
                                      grid_dim=(B * NR + 255) // 256, block_dim=256)
-                for l in range(3):
+                for l in range(NG):
                     ctx.enqueue_function(kl, idx, w, u, refr, spk, act, tr, ps, Int32(P0[l]), Int32(NP[l]), Int32(FN[l]), Int32(SB[l]), seed, t, decay, dk,
                                          grid_dim=(B * NP[l] + 255) // 256, block_dim=256)
                 t += 1
@@ -280,23 +298,23 @@ def main() raises:
             var op = out_h.unsafe_ptr()
             for b in range(B):
                 for j in range(NM):
-                    op[b * NM + j] = ap[b * NT + NR + N1 + N2 + j]
+                    op[b * NM + j] = ap[b * NT + OUT0 + j]
             if not io(1, out_h.unsafe_ptr().unsafe_bitcast[UInt8](), B * NM * 2, True):
                 return
         elif code.unsafe_ptr()[] == 2:
             if not io(0, err_h.unsafe_ptr().unsafe_bitcast[UInt8](), B * 2 * 4, False):
                 return
             ctx.enqueue_copy(err_b, err_h)
-            for l in range(3):
-                ctx.enqueue_function(kt, idx, w, act, ps, TileTensor(fb_b, LF), TileTensor(err_b, LE), Int32(P0[l]), Int32(NP[l]), Int32(FN[l]), Int32(SB[l]), Int32(1 if l < 2 else 0),
+            for l in range(NG):
+                ctx.enqueue_function(kt, idx, w, act, ps, TileTensor(fb_b, LF), TileTensor(err_b, LE), Int32(P0[l]), Int32(NP[l]), Int32(FN[l]), Int32(SB[l]), Int32(GT[l]),
                                      grid_dim=(NP[l] * FN[l] + 255) // 256, block_dim=256)
             alive_b.enqueue_fill(0)
-            for l in range(3):
-                ctx.enqueue_function(kp, w, TileTensor(alive_b, LK), Int32(l), Int32(NP[l] * FN[l]), Int32(SB[l]),
+            for l in range(NG):
+                ctx.enqueue_function(kp, w, TileTensor(alive_b, LK), Int32(S0[l]), Int32(SF[l]), Int32(FN[l]), Int32(NP[l] * FN[l]), Int32(SB[l]),
                                      grid_dim=(NP[l] * FN[l] + 255) // 256, block_dim=256)
-            for l in range(3):
-                ctx.enqueue_function(kg, idx, w, TileTensor(alive_b, LK), Int32(l), Int32(NP[l] * FN[l]), Int32(SB[l]),
-                                     Int32(PL[l]), Int32(PN[l]), seed, tstep, grid_dim=(NP[l] * FN[l] + 255) // 256, block_dim=256)
+            for l in range(NG):
+                ctx.enqueue_function(kg, idx, w, TileTensor(alive_b, LK), Int32(S0[l]), Int32(SF[l]), Int32(FN[l]), Int32(NP[l] * FN[l]), Int32(SB[l]),
+                                     TileTensor(segs_b, LG), seed, tstep, grid_dim=(NP[l] * FN[l] + 255) // 256, block_dim=256)
             tstep += 1
             ctx.synchronize()
         elif code.unsafe_ptr()[] == 3:
