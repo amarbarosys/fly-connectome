@@ -95,7 +95,10 @@ comptime NTEN = get_defined_int["NTEN", 0]()  # fixed tendons; tendon ints: wrap
 comptime NWRAP = get_defined_int["NWRAP", 0]()
 comptime TNI = FLI + (2 * NFLROW + NFLBOX if NFLUID else 0)
 comptime NCV = get_defined_int["NCV", 0]()  # convex pairs (box or ellipsoid vs mesh, convex.mojo): per pair its kind, between the tendon and equality blocks
-comptime NI2 = TNI + 2 * NTEN + 2 * NWRAP
+# model.py spatial() right after the tendon arrays: per wrap type, body, sidesite body; per tendon the frame body; floats 11 per wrap
+comptime SPATIAL = get_defined_int["SPATIAL", 0]() == 1
+comptime CSP = TNI + 2 * NTEN + 2 * NWRAP
+comptime NI2 = CSP + (3 * NWRAP + NTEN if SPATIAL else 0)
 # equality constraints (model.py eq_block, last block): per constraint 12 ints, then every chain, then its masks
 comptime NEQ = get_defined_int["NEQ", 0]()
 comptime NEQR = get_defined_int["NEQR", 0]()  # rows: connect 3, weld 6, joint 1
@@ -146,7 +149,8 @@ comptime CACF = HFO + (NP if HFG >= 0 else 0)  # STAGE 7: per actuator gain, bia
 comptime NFL1 = CACF + 9 * NU if STAGE >= 7 else (CACF if STAGE >= 6 else NFL0)
 comptime FLF = NFL1  # fluid floats: density, viscosity, wind 3, then per ellipsoid row semi-axes 3 and the 12 geom_fluid coefs
 comptime TNF = FLF + (5 + 15 * NFLROW if NFLUID else 0)  # tendon floats: wrap coefs, then stiffness, damping, lengthspring 2 per tendon
-comptime NFL2 = TNF + NWRAP + 4 * NTEN
+comptime CSPF = TNF + NWRAP + 4 * NTEN
+comptime NFL2 = CSPF + (11 * NWRAP if SPATIAL else 0)
 comptime CCV = NFL2  # NCV: opt.ccd_tolerance, heightfield size 0-3 and origin z (HFEXACT), then per pair geom1's size (3)
 comptime CEQF = NFL2 + (6 + 3 * NCP if NCV > 0 else 0)  # per equality: anchors 0 and 1, quaternions 0 and 1, torquescale, solref, solimp, invweight 2, joint data 5, qpos0 2
 comptime CGF = CEQF + EQF * NEQ
@@ -180,7 +184,11 @@ comptime OQFC = OCQACC + NV
 comptime OAF = OQFC + NV  # STAGE 7: actuator_force, qfrc_actuator
 comptime OQACT = OAF + NU
 comptime NOUT = OSC if STAGE == 1 else (OM + NC if STAGE == 2 else (OLDI + NV if STAGE == 3 else (OQH if STAGE == 4 else (OQPOS + NQ if STAGE == 5 else (OQFC + NV if STAGE == 6 else OQACT + NV)))))
-comptime OCACC = NOUT  # scratch rows after the output: cacc, cfrc_body per body (world included)
+comptime OTLEN = NOUT  # SPATIAL: tendon outputs after the stage's own: ten_length, ten_velocity, ten_J (dense, NV per tendon)
+comptime OTVEL = OTLEN + NTEN
+comptime OTJ = OTVEL + NTEN
+comptime NOUTX = OTJ + NTEN * NV if SPATIAL else NOUT
+comptime OCACC = NOUTX  # scratch rows after the output: cacc, cfrc_body per body (world included)
 comptime OCFRC = OCACC + 6 * NB
 comptime NSLOT = get_defined_int["NSLOT", 0]()  # contact slots: 3 per plane-mesh pair (MuJoCo maxplanemesh), 1 per sphere pair
 comptime NJE = get_defined_int["NJE", 0]()  # Jacobian entries: 4 rows x slots x chain length, summed over pairs
@@ -607,6 +615,377 @@ def fluid(mi: TI, mf: TF, res: TO, f: Int):
         res[(OPAS + v) * F + f] += (get6(res, f, OCD + 6 * v) * get6(res, f, OFLW + 6 * Int(mi[DBODY + v]))).reduce_add()
 
 
+comptime P4 = SIMD[DType.float32, 4]
+comptime MINVAL: Float32 = 1e-15
+
+
+@always_inline
+def acosp(x: Float32) -> Float32:
+    """acos on [-1, 1] (amdgpu has no acosf): atan2(sqrt((1 - x)(1 + x)), x)."""
+    var c = min(max(x, Float32(-1)), Float32(1))
+    return atan2p(sqrt((1 - c) * (1 + c)), c)
+
+
+@always_inline
+def asinp(x: Float32) -> Float32:
+    var c = min(max(x, Float32(-1)), Float32(1))
+    var a = atan2p(abs(c), sqrt((1 - c) * (1 + c)))
+    return a if c >= 0 else -a
+
+
+@always_inline
+def is_intersect(e: P4, sl: P4) -> Bool:
+    """mju_wrap's is_intersect (engine_util_misc.c:34): do the segments end0-sol0 and end1-sol1 cross; e and sl hold (x0, y0, x1, y1)."""
+    var det = (sl[3] - e[3]) * (sl[0] - e[0]) - (sl[2] - e[2]) * (sl[1] - e[1])
+    if abs(det) < MINVAL:
+        return False
+    var a = ((sl[2] - e[2]) * (e[1] - e[3]) - (sl[3] - e[3]) * (e[0] - e[2])) / det
+    var b = ((sl[0] - e[0]) * (e[1] - e[3]) - (sl[1] - e[1]) * (e[0] - e[2])) / det
+    return a >= 0 and a <= 1 and b >= 0 and b <= 1
+
+
+@always_inline
+def length_circle(p: P4, ind: Int, radius: Float32) -> Float32:
+    """Curve length along the circle between p's two points (engine_util_misc.c:55); ind picks the long way round."""
+    var n0 = sqrt(p[0] * p[0] + p[1] * p[1]); var n1 = sqrt(p[2] * p[2] + p[3] * p[3])
+    var ax = p[0] / n0 if n0 > MINVAL else Float32(1); var ay = p[1] / n0 if n0 > MINVAL else Float32(0)
+    var bx = p[2] / n1 if n1 > MINVAL else Float32(1); var by = p[3] / n1 if n1 > MINVAL else Float32(0)
+    var angle = acosp(ax * bx + ay * by)
+    var cr = p[1] * p[2] - p[0] * p[3]
+    if (cr > 0 and ind != 0) or (cr < 0 and ind == 0):
+        angle = 2 * 3.14159265358979 - angle
+    return radius * angle
+
+
+def wrap_circle(end: P4, hasside: Bool, side: P4, radius: Float32) -> Tuple[Float32, P4]:
+    """MuJoCo wrap_circle (engine_util_misc.c:78): tangent points of the shorter (or sidesite-side) path around a circle,
+    returns (curve length or -1, 2 x 2D points); side holds the 2D side point in its first two lanes."""
+    var sqlen0 = end[0] * end[0] + end[1] * end[1]
+    var sqlen1 = end[2] * end[2] + end[3] * end[3]
+    var sqrad = radius * radius
+    var none = P4(0)
+    if sqlen0 < sqrad or sqlen1 < sqrad or radius < MINVAL:
+        return (Float32(-1), none)
+    var dx = end[2] - end[0]; var dy = end[3] - end[1]
+    var dd = dx * dx + dy * dy
+    if dd < MINVAL:
+        return (Float32(-1), none)
+    var a = -(dx * end[0] + dy * end[1]) / dd
+    a = min(max(a, Float32(0)), Float32(1))
+    var tx = a * dx + end[0]; var ty = a * dy + end[1]
+    if tx * tx + ty * ty > sqrad and (not hasside or side[0] * tx + side[1] * ty >= 0):
+        return (Float32(-1), none)
+    var sqrt0 = sqrt(sqlen0 - sqrad); var sqrt1 = sqrt(sqlen1 - sqrad)
+    var sol0 = P4(0); var sol1 = P4(0)
+    var good0: Float32 = 0; var good1: Float32 = 0
+    for i in range(2):
+        var sgn: Float32 = 1 if i == 0 else -1
+        var sol = P4((end[0] * sqrad + sgn * radius * end[1] * sqrt0) / sqlen0, (end[1] * sqrad - sgn * radius * end[0] * sqrt0) / sqlen0,
+                     (end[2] * sqrad - sgn * radius * end[3] * sqrt1) / sqlen1, (end[3] * sqrad + sgn * radius * end[2] * sqrt1) / sqlen1)
+        var good: Float32
+        if hasside:
+            var ux = sol[0] + sol[2]; var uy = sol[1] + sol[3]
+            var un = sqrt(ux * ux + uy * uy)
+            if un > MINVAL:
+                ux = ux / un
+                uy = uy / un
+            else:
+                ux = 1
+                uy = 0
+            good = ux * side[0] + uy * side[1]
+        else:
+            var vx = sol[0] - sol[2]; var vy = sol[1] - sol[3]
+            good = -(vx * vx + vy * vy)
+        if is_intersect(end, sol):
+            good = -10000
+        if i == 0:
+            sol0 = sol
+            good0 = good
+        else:
+            sol1 = sol
+            good1 = good
+    var pick = 0 if good0 > good1 else 1
+    var pnt = sol0 if pick == 0 else sol1
+    if is_intersect(end, pnt):
+        return (Float32(-1), none)
+    return (length_circle(pnt, pick, radius), pnt)
+
+
+comptime D4 = SIMD[DType.float64, 4]
+
+
+@always_inline
+def atan2d(y: Float64, x: Float64) -> Float64:
+    """atan2 for y >= 0 in float64 (atan2p's reduction, 2 half-angle steps, Taylor to z^9: error ~1e-15)."""
+    var r = sqrt(x * x + y * y)
+    if r + x <= 0:
+        return 3.14159265358979323846 if r > 0 else 0.0
+    var z = y / (r + x)
+    var flip = z > 1
+    if flip:
+        z = 1 / z
+    z = z / (1 + sqrt(1 + z * z))
+    z = z / (1 + sqrt(1 + z * z))
+    var z2 = z * z
+    var a = 4 * z * (1 + z2 * (-1.0 / 3 + z2 * (1.0 / 5 + z2 * (-1.0 / 7 + z2 / 9))))
+    return 2 * (1.5707963267948966 - a if flip else a)
+
+
+@always_inline
+def asin64(x: Float64) -> Float64:
+    var c = min(max(x, Float64(-1)), Float64(1))
+    var a = atan2d(abs(c), sqrt((1 - c) * (1 + c)))
+    return a if c >= 0 else -a
+
+
+@always_inline
+def acos64(x: Float64) -> Float64:
+    var c = min(max(x, Float64(-1)), Float64(1))
+    return atan2d(sqrt((1 - c) * (1 + c)), c)
+
+
+def wrap_inside(end32: P4, radius32: Float32) -> Tuple[Float32, P4]:
+    """MuJoCo wrap_inside (engine_util_misc.c:158), sidesite inside the circle: Newton on asin(A z) + asin(B z) - 2 asin(z) + G = 0
+    with z starting at 1 - 1e-7 and stopping at |f| < 1e-6. In float32 asin(z) near 1 moves 1e-4 per ulp of z, so the loop cannot
+    reach its tolerance (3 of 64 gate states failed): it runs in float64 (a few iterations, only for such a wrap). Returns
+    (0 for a wrap, -1 for none, the wrap point twice)."""
+    var end = D4(Float64(end32[0]), Float64(end32[1]), Float64(end32[2]), Float64(end32[3]))
+    var radius = Float64(radius32)
+    var minval: Float64 = 1e-15
+    var zinit: Float64 = 1 - 1e-7
+    var len0 = sqrt(end[0] * end[0] + end[1] * end[1]); var len1 = sqrt(end[2] * end[2] + end[3] * end[3])
+    var dx = end[2] - end[0]; var dy = end[3] - end[1]
+    var dd = dx * dx + dy * dy
+    var none = P4(0)
+    if len0 <= radius or len1 <= radius or radius < minval or len0 < minval or len1 < minval:
+        return (Float32(-1), none)
+    if dd > minval:
+        var a = -(dx * end[0] + dy * end[1]) / dd
+        if a > 0 and a < 1:
+            var tx = end[0] + a * dx; var ty = end[1] + a * dy
+            if sqrt(tx * tx + ty * ty) <= radius:
+                return (Float32(-1), none)
+    var mx = 0.5 * (end[0] + end[2]); var my = 0.5 * (end[1] + end[3])
+    var mn = sqrt(mx * mx + my * my)
+    if mn > minval:
+        mx = mx / mn
+        my = my / mn
+    else:
+        mx = 1
+        my = 0
+    var dflt = P4(Float32(radius * mx), Float32(radius * my), Float32(radius * mx), Float32(radius * my))
+    var A = radius / len0; var B = radius / len1
+    var cosG = (len0 * len0 + len1 * len1 - dd) / (2 * len0 * len1)
+    if cosG < -1 + minval:
+        return (Float32(-1), none)
+    elif cosG > 1 - minval:
+        return (Float32(0), dflt)
+    var G = acos64(cosG)
+    var z = zinit
+    var fz = asin64(A * z) + asin64(B * z) - 2 * asin64(z) + G
+    if fz > 0:
+        return (Float32(0), dflt)
+    var iter = 0
+    while iter < 20 and abs(fz) > 1e-6:
+        var df = A / max(minval, sqrt(1 - z * z * A * A)) + B / max(minval, sqrt(1 - z * z * B * B)) - 2 / max(minval, sqrt(1 - z * z))
+        if df > -minval:
+            return (Float32(0), dflt)
+        var z1 = z - fz / df
+        if z1 > z:
+            return (Float32(0), dflt)
+        z = z1
+        fz = asin64(A * z) + asin64(B * z) - 2 * asin64(z) + G
+        if fz > 1e-6:
+            return (Float32(0), dflt)
+        iter += 1
+    if iter >= 20:
+        return (Float32(0), dflt)
+    var vx: Float64; var vy: Float64; var ang: Float64
+    if end[0] * end[3] - end[1] * end[2] > 0:
+        vx = end[0]
+        vy = end[1]
+        ang = asin64(z) - asin64(A * z)
+    else:
+        vx = end[2]
+        vy = end[3]
+        ang = asin64(z) - asin64(B * z)
+    var vn = sqrt(vx * vx + vy * vy)
+    if vn > minval:
+        vx = vx / vn
+        vy = vy / vn
+    else:
+        vx = 1
+        vy = 0
+    var ca = cos(Float32(ang)); var sa = sin(Float32(ang))  # no float64 sin/cos on the GPU; the angle is already converged
+    var px = Float32(radius) * (ca * Float32(vx) - sa * Float32(vy)); var py = Float32(radius) * (sa * Float32(vx) + ca * Float32(vy))
+    return (Float32(0), P4(px, py, px, py))
+
+
+def wrap_geom(x0: V3, x1: V3, gpos: V3, gq: Q4, radius: Float32, cylinder: Bool, hasside: Bool, sidepos: V3) -> Tuple[Float32, V3, V3]:
+    """MuJoCo mju_wrap (engine_util_misc.c:281): wrap the straight path x0-x1 around a sphere or cylinder (geom frame gpos, gq,
+    radius): returns (wrap length or -1, the two tangent points in world coordinates)."""
+    var gi = Q4(gq[0], -gq[1], -gq[2], -gq[3])
+    var p0 = rot(gi, x0 - gpos); var p1 = rot(gi, x1 - gpos)
+    var zero = V3(0)
+    var n0 = sqrt((p0 * p0).reduce_add()); var n1 = sqrt((p1 * p1).reduce_add())
+    if n0 < MINVAL or n1 < MINVAL:
+        return (Float32(-1), zero, zero)
+    var axis0 = V3(1, 0, 0, 0); var axis1 = V3(0, 1, 0, 0)
+    if not cylinder:
+        axis0 = p0 / n0
+        var normal = cross(p0, p1)
+        var nrm = sqrt((normal * normal).reduce_add())
+        if nrm >= MINVAL:
+            normal = normal / nrm
+        else:
+            var i = 0
+            if abs(axis0[1]) > abs(axis0[0]) and abs(axis0[1]) > abs(axis0[2]):
+                i = 1
+            if abs(axis0[2]) > abs(axis0[0]) and abs(axis0[2]) > abs(axis0[1]):
+                i = 2
+            var a1 = V3(1, 1, 1, 0)
+            a1[i] = 0
+            normal = cross(axis0, a1)
+            var nn = sqrt((normal * normal).reduce_add())
+            normal = normal / nn if nn > MINVAL else V3(1, 0, 0, 0)
+        axis1 = cross(normal, axis0)
+        var an = sqrt((axis1 * axis1).reduce_add())
+        axis1 = axis1 / an if an > MINVAL else V3(0, 1, 0, 0)
+    var d = P4((p0 * axis0).reduce_add(), (p0 * axis1).reduce_add(), (p1 * axis0).reduce_add(), (p1 * axis1).reduce_add())
+    var sd = P4(0)
+    var s = V3(0)
+    if hasside:
+        s = rot(gi, sidepos - gpos)
+        var sx = (s * axis0).reduce_add(); var sy = (s * axis1).reduce_add()
+        var sn = sqrt(sx * sx + sy * sy)
+        if sn > MINVAL:
+            sx = sx / sn
+            sy = sy / sn
+        else:
+            sx = 1
+            sy = 0
+        sd = P4(radius * sx, radius * sy, 0, 0)
+    var res: Tuple[Float32, P4]
+    if hasside and sqrt((s * s).reduce_add()) < radius:
+        res = wrap_inside(d, radius)
+    else:
+        res = wrap_circle(d, hasside, sd, radius)
+    var wlen = res[0]
+    if wlen < 0:
+        return (Float32(-1), zero, zero)
+    var pnt = res[1]
+    var r0 = axis0 * pnt[0] + axis1 * pnt[1]
+    var r1 = axis0 * pnt[2] + axis1 * pnt[3]
+    if cylinder:
+        var L0 = sqrt((p0[0] - r0[0]) * (p0[0] - r0[0]) + (p0[1] - r0[1]) * (p0[1] - r0[1]))
+        var L1 = sqrt((p1[0] - r1[0]) * (p1[0] - r1[0]) + (p1[1] - r1[1]) * (p1[1] - r1[1]))
+        r0[2] = p0[2] + (p1[2] - p0[2]) * L0 / (L0 + wlen + L1)
+        r1[2] = p0[2] + (p1[2] - p0[2]) * (L0 + wlen) / (L0 + wlen + L1)
+        var height = abs(r1[2] - r0[2])
+        wlen = sqrt(wlen * wlen + height * height)
+    return (wlen, rot(gq, r0) + gpos, rot(gq, r1) + gpos)
+
+
+@always_inline
+def tpoint(mi: TI, mf: TF, qpos: TQ, res: TO, f: Int, bi: Int, local: V3, frame: V3) -> V3:
+    """A body-fixed point in the tendon's frame (the floating origin of its path): xpos + R local, shifted by the body's tree origin minus the frame's."""
+    var b = body(res, f, bi)
+    return rot(b[1], local) + b[0] + (origin(mi, qpos, f, bi) - frame)
+
+
+def tjac(mi: TI, qpos: TQ, res: TO, f: Int, row: Int, bi: Int, point: V3, dir: V3, scale: Float32, frame: V3):
+    """J[row] += scale jacp(body, point)' dir over the body's dofs (mj_jacDifPair's endpoint Jacobian under the chain rule of
+    mj_tendon): jacp = cdof_lin + cdof_ang x (point - subtree_com of the body's root)."""
+    var r = 3 * Int(mi[ROOT + bi])
+    var com = V3(get(res, f, OSC + r), get(res, f, OSC + r + 1), get(res, f, OSC + r + 2), 0) + (origin(mi, qpos, f, bi) - frame)
+    var off = point - com
+    var b = bi
+    while b > 0:
+        for d in range(Int(mi[BDOFADR + b]), Int(mi[BDOFADR + b]) + Int(mi[BDOFNUM + b])):
+            var cd = OCD + 6 * d
+            var ang = V3(get(res, f, cd), get(res, f, cd + 1), get(res, f, cd + 2), 0)
+            var lin = V3(get(res, f, cd + 3), get(res, f, cd + 4), get(res, f, cd + 5), 0)
+            res[(row + d) * F + f] += scale * ((lin + cross(ang, off)) * dir).reduce_add()
+        b = Int(mi[PARENT + b])
+
+
+def tseg(mi: TI, qpos: TQ, res: TO, f: Int, row: Int, ba: Int, pa: V3, bb: Int, pb: V3, divisor: Float32, frame: V3):
+    """One path segment between points in different bodies: J += (jac(bb, pb) - jac(ba, pa))' unit(pb - pa) / divisor."""
+    if ba == bb:
+        return
+    var dif = pb - pa
+    var n = sqrt((dif * dif).reduce_add())
+    dif = dif / n if n > MINVAL else V3(1, 0, 0, 0)
+    tjac(mi, qpos, res, f, row, bb, pb, dif, 1 / divisor, frame)
+    tjac(mi, qpos, res, f, row, ba, pa, dif, -1 / divisor, frame)
+
+
+def spatial(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int):
+    """MuJoCo mj_tendon (engine_core_smooth.c:922) for every tendon, fixed and spatial: ten_length, ten_J (dense rows OTJ) and
+    ten_velocity = J qvel. A spatial path is a run of sites with sphere or cylinder wraps (mju_wrap, sidesite) and pulleys
+    (divisor); a segment adds its endpoint Jacobian difference along its direction where its two ends sit in different bodies."""
+    for t in range(NTEN):
+        var adr = Int(mi[TNI + t]); var num = Int(mi[TNI + NTEN + t])
+        var jr = OTJ + t * NV
+        for v in range(NV):
+            res[(jr + v) * F + f] = 0
+        var L: Float32 = 0
+        if Int(mi[CSP + adr]) == 1:  # fixed (joint wraps): length = sum coef q, J = coef
+            for w in range(adr, adr + num):
+                L += mf[TNF + w] * qpos[Int(mi[TNI + 2 * NTEN + NWRAP + w]) * F + f]
+                res[(jr + Int(mi[TNI + 2 * NTEN + w])) * F + f] += mf[TNF + w]
+        else:
+            var frame = origin(mi, qpos, f, Int(mi[CSP + 3 * NWRAP + t]))
+            var divisor: Float32 = 1
+            var j = 0
+            while j < num - 1:
+                var w0 = adr + j
+                var type0 = Int(mi[CSP + w0]); var type1 = Int(mi[CSP + w0 + 1])
+                if type0 == 2 or type1 == 2:  # pulley
+                    if type0 == 2:
+                        divisor = mf[TNF + w0]
+                    j += 1
+                    continue
+                var b0 = Int(mi[CSP + NWRAP + w0])
+                var p0 = tpoint(mi, mf, qpos, res, f, b0, m3(mf, CSPF + 11 * w0), frame)
+                var geom = type1 == 4 or type1 == 5
+                var w1 = w0 + 2 if geom else w0 + 1
+                var b1 = Int(mi[CSP + NWRAP + w1])
+                var p1 = tpoint(mi, mf, qpos, res, f, b1, m3(mf, CSPF + 11 * w1), frame)
+                var wlen: Float32 = -1
+                var wa = V3(0); var wb = V3(0)
+                var gb = 0
+                if geom:
+                    var wg = w0 + 1
+                    gb = Int(mi[CSP + NWRAP + wg])
+                    var gB = body(res, f, gb)
+                    var gpos = rot(gB[1], m3(mf, CSPF + 11 * wg)) + gB[0] + (origin(mi, qpos, f, gb) - frame)
+                    var gq = mul(gB[1], m4(mf, CSPF + 11 * wg + 3))
+                    var sb = Int(mi[CSP + 2 * NWRAP + wg])
+                    var sidepos = V3(0)
+                    if sb >= 0:
+                        sidepos = tpoint(mi, mf, qpos, res, f, sb, m3(mf, CSPF + 11 * wg + 8), frame)
+                    var wr = wrap_geom(p0, p1, gpos, gq, mf[CSPF + 11 * wg + 7], type1 == 5, sb >= 0, sidepos)
+                    wlen = wr[0]
+                    wa = wr[1]
+                    wb = wr[2]
+                if wlen < 0:
+                    var d = p1 - p0
+                    L += sqrt((d * d).reduce_add()) / divisor
+                    tseg(mi, qpos, res, f, jr, b0, p0, b1, p1, divisor, frame)
+                else:
+                    var d0 = wa - p0; var d1 = p1 - wb
+                    L += (sqrt((d0 * d0).reduce_add()) + wlen + sqrt((d1 * d1).reduce_add())) / divisor
+                    tseg(mi, qpos, res, f, jr, b0, p0, gb, wa, divisor, frame)
+                    tseg(mi, qpos, res, f, jr, gb, wb, b1, p1, divisor, frame)
+                j += 2 if geom else 1
+        res[(OTLEN + t) * F + f] = L
+        var vel: Float32 = 0
+        for v in range(NV):
+            vel += get(res, f, jr + v) * qvel[v * F + f]
+        res[(OTVEL + t) * F + f] = vel
+
+
 @always_inline
 def tendon(mi: TI, mf: TF, qpos: TQ, qvel: TV, f: Int, t: Int) -> Tuple[Float32, Float32]:
     """MuJoCo mj_tendon for a fixed tendon (engine_core_smooth.c): length = sum coef qpos, velocity = sum coef qvel."""
@@ -625,10 +1004,16 @@ def tendon_passive(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int):
     damper, along the constant tendon Jacobian (the wrap coefs) into qfrc_passive."""
     for t in range(NTEN):
         var lv = tendon(mi, mf, qpos, qvel, f, t)
+        comptime if SPATIAL:  # spatial() has them, with the moment rows
+            lv = (get(res, f, OTLEN + t), get(res, f, OTVEL + t))
         var lo = mf[TNF + NWRAP + 2 * NTEN + 2 * t]
         var hi = mf[TNF + NWRAP + 2 * NTEN + 2 * t + 1]
         var x = lv[0] - hi if lv[0] > hi else (lv[0] - lo if lv[0] < lo else Float32(0))
         var frc = -x * mf[TNF + NWRAP + t] - lv[1] * mf[TNF + NWRAP + NTEN + t]
+        comptime if SPATIAL:  # qfrc += J' frc over the tendon's moment row
+            for v in range(NV):
+                res[(OPAS + v) * F + f] += get(res, f, OTJ + t * NV + v) * frc
+            continue
         var a = Int(mi[TNI + t])
         for w in range(a, a + Int(mi[TNI + NTEN + t])):
             res[(OPAS + Int(mi[TNI + 2 * NTEN + w])) * F + f] += mf[TNF + w] * frc
@@ -714,6 +1099,8 @@ def velocity(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int):
                 res[(OPAS + da + c) * F + f] += -k * axis[c] * speed
         else:  # slide, hinge
             res[(OPAS + da) * F + f] += -k * (qpos[a * F + f] - mf[QSPRING + a])
+    comptime if SPATIAL:
+        spatial(mi, mf, qpos, qvel, res, f)
     comptime if NTEN > 0:
         tendon_passive(mi, mf, qpos, qvel, res, f)
     comptime if NFLUID:
@@ -1120,10 +1507,16 @@ def actuation(mi: TI, mf: TF, qpos: TQ, qvel: TV, ctrl: TU, res: TO, f: Int):
         elif mi[a] == 3:  # fixed tendon: moment = gear x the wrap coefs, length and velocity = gear x the tendon's
             var t = Int(mi[a + 1])
             var lv = tendon(mi, mf, qpos, qvel, f, t)
+            comptime if SPATIAL:
+                lv = (get(res, f, OTLEN + t), get(res, f, OTVEL + t))
             var force = mf[af] * c + mf[af + 1] + mf[af + 2] * (lv[0] * gear) + mf[af + 3] * (lv[1] * gear)
             if mi[a + 3] != 0:
                 force = min(max(force, mf[af + 6]), mf[af + 7])
             res[(OAF + u) * F + f] = force
+            comptime if SPATIAL:
+                for v in range(NV):
+                    res[(OQACT + v) * F + f] += gear * get(res, f, OTJ + t * NV + v) * force
+                continue
             var w0 = Int(mi[TNI + t])
             for w in range(w0, w0 + Int(mi[TNI + NTEN + t])):
                 res[(OQACT + Int(mi[TNI + 2 * NTEN + w])) * F + f] += gear * mf[TNF + w] * force
@@ -2236,7 +2629,7 @@ def main() raises:
     ctx.enqueue_copy(host.unsafe_ptr(), o_b)
     ctx.synchronize()
     with open(dir + "smooth.bin", "w") as file:
-        file.write_bytes(Span(unsafe_ptr=host.unsafe_ptr().unsafe_bitcast[UInt8](), length=NOUT * F * 4))
+        file.write_bytes(Span(unsafe_ptr=host.unsafe_ptr().unsafe_bitcast[UInt8](), length=NOUTX * F * 4))
     comptime if DUMP and STAGE >= 6:
         with open(dir + "dump.bin", "w") as file:
             file.write_bytes(Span(unsafe_ptr=host.unsafe_ptr().unsafe_bitcast[UInt8](), length=NROW * F * 4))

@@ -42,6 +42,10 @@ STAGES = {  # name: (STAGE number in smooth.mojo, MuJoCo functions run in order,
 # 'step': one mj_step with contacts, constraints and actuators off (S1 is contact-free): mj_Euler with implicit
 # dof damping. qacc_euler = (qvel after - qvel) / dt and qpos_next are derived from MuJoCo's own step.
 STAGES['step'] = (5, 'mj_step', STAGES['rne'][2] + ('qH', 'qHDiagInv', 'qacc_euler', 'qpos_next'))
+# 'sptendon': 'step' plus the tendon outputs (mj_tendon: ten_length, ten_velocity, ten_J as dense rows) on a model with spatial tendons
+# (models/tendon_spatial.xml); the tendons' spring and damper reach qfrc_passive, so every step field sees them.
+STAGES['sptendon'] = (5, 'mj_step', STAGES['step'][2] + ('ten_length', 'ten_velocity', 'ten_J'))
+TENDON_FIELDS = ('ten_length', 'ten_velocity', 'ten_J')
 # 'contact' (S2 probe): plane-mesh pairs whose mesh geom matches FEET, pyramidal cone, Newton solver, then the
 # implicit Euler step. States come from an actuated MuJoCo rollout (feet on the floor), not random poses.
 STAGES['contact'] = (6, 'mj_step', STAGES['step'][2] + ('ncon', 'qacc', 'qfrc_constraint'))
@@ -51,6 +55,7 @@ STAGES['actuated'] = (7, 'mj_step', STAGES['contact'][2] + ('actuator_force', 'q
 CONVEX_POOL = 48  # box and ellipsoid contacts one animal can hold at once (the fly at a wall: a few parts x 1-5 contacts)
 HF_POOL = 192  # exact heightfield contacts one animal can hold at once (bumpy terrain: ~80 on average, 55 pairs x up to 16)
 HF_SLOTS = 16  # contacts kept per heightfield pair with exact heightfield contact (check.sh terrain_exact reports MuJoCo's maximum)
+STAGES['sptendon_act'] = (7, 'mj_step', STAGES['actuated'][2] + ('ten_length', 'ten_velocity', 'ten_J'))  # the actuated path on spatial tendons (tendon servo, tendon passive)
 # 'equality' (S6 without pairs): connect, weld and joint equality constraints (eq_rows), Newton on always-active rows, then
 # the implicit Euler step; contacts and actuation off, random states violate the constraints. Test body models/eq_test.xml.
 STAGES['equality'] = (6, 'mj_step', STAGES['step'][2] + ('ncon', 'qacc', 'qfrc_constraint'))
@@ -287,9 +292,9 @@ def load(mjcf):
             or m.dof_dampingpoly.any() or m.jnt_stiffnesspoly.any() or m.opt.disableflags):
         raise SystemExit('FAIL export: only Euler/implicitfast, linear joint springs and dof dampers are ported (no flex, '
                          'actuator damping, polynomial springs or dampers, disable flags)')
-    if (m.wrap_type != mujoco.mjtWrap.mjWRAP_JOINT).any() or m.tendon_limited.any() or m.tendon_frictionloss.any() \
+    if m.tendon_limited.any() or m.tendon_frictionloss.any() \
             or m.tendon_stiffnesspoly.any() or m.tendon_dampingpoly.any() or m.tendon_actfrclimited.any():
-        raise SystemExit('FAIL export: only fixed tendons (joint wraps), unlimited, no friction loss, linear spring and damper are ported')
+        raise SystemExit('FAIL export: only unlimited tendons without friction loss, with linear spring and damper, are ported')
     if m.opt.integrator == mujoco.mjtIntegrator.mjINT_IMPLICITFAST:
         if m.opt.density or m.opt.viscosity or m.tendon_damping.any():  # mjd_passive_vel fluid and tendon-damper terms of qDeriv: not ported
             raise SystemExit('FAIL export: implicitfast needs the fluid and tendon-damping velocity derivatives (mjd_passive_vel), not ported')
@@ -328,11 +333,54 @@ def tendons(m):
     New wrap kinds (spatial tendons) append their own arrays after these."""
     if not m.ntendon:
         return None
-    if (m.jnt_type[m.wrap_objid] > 3).any() or (m.jnt_type[m.wrap_objid] < 2).any():
+    joint = m.wrap_type == mujoco.mjtWrap.mjWRAP_JOINT  # spatial wraps (site, geom, pulley) carry no joint: placeholder 0, see spatial()
+    obj = np.where(joint, m.wrap_objid, 0)
+    if (m.jnt_type[obj][joint] > 3).any() or (m.jnt_type[obj][joint] < 2).any():
         raise SystemExit('FAIL export: tendon wraps only on hinge and slide joints')
-    ints = np.concatenate([m.tendon_adr, m.tendon_num, m.jnt_dofadr[m.wrap_objid], m.jnt_qposadr[m.wrap_objid]])
+    ints = np.concatenate([m.tendon_adr, m.tendon_num, np.where(joint, m.jnt_dofadr[obj], 0), np.where(joint, m.jnt_qposadr[obj], 0)])
     floats = np.concatenate([m.wrap_prm, m.tendon_stiffness, m.tendon_damping, m.tendon_lengthspring.ravel()])
     return ints, floats, {'NTEN': m.ntendon, 'NWRAP': m.nwrap}
+
+
+def spatial(m):
+    """Spatial tendons (mj_tendon, engine_core_smooth.c:922; wrap geometry mju_wrap, engine_util_misc.c:281), appended right after
+    tendons(): ints per wrap its type (mjtWrap), its body (site: the site's; sphere, cylinder: the geom's) and its sidesite's body
+    (-1: none), then per tendon the body whose floating origin frames the whole path; floats per wrap 11: local position (site or
+    geom), local quaternion (geom), radius, sidesite local position. Pulley divisors, sidesite ids and the fixed tendons' coefs are
+    already in tendons()' wrap_prm. Refused: a path across two animals (one floating origin per animal)."""
+    W = mujoco.mjtWrap
+    if not m.ntendon or (m.wrap_type == W.mjWRAP_JOINT).all():
+        return None
+    body = np.zeros(m.nwrap, int)
+    side = np.full(m.nwrap, -1)
+    fl = np.zeros((m.nwrap, 11))
+    for w in range(m.nwrap):
+        t, o = m.wrap_type[w], m.wrap_objid[w]
+        if t == W.mjWRAP_SITE:
+            body[w], fl[w, :3] = m.site_bodyid[o], m.site_pos[o]
+        elif t in (W.mjWRAP_SPHERE, W.mjWRAP_CYLINDER):
+            body[w], fl[w, :3], fl[w, 3:7], fl[w, 7] = m.geom_bodyid[o], m.geom_pos[o], m.geom_quat[o], m.geom_size[o][0]
+            sid = int(round(m.wrap_prm[w]))
+            if sid >= 0:
+                side[w], fl[w, 8:11] = m.site_bodyid[sid], m.site_pos[sid]
+    frame = []
+    for i in range(m.ntendon):
+        ws = range(m.tendon_adr[i], m.tendon_adr[i] + m.tendon_num[i])
+        bs = [int(b) for w in ws for b in (body[w], side[w]) if b >= 0 and m.wrap_type[w] != W.mjWRAP_JOINT]
+        moving = [b for b in bs if any(m.body_dofnum[a] for a in _ancestors(m, b))]
+        if len({m.body_rootid[b] for b in moving}) > 1:
+            raise SystemExit(f'FAIL export: tendon {i} joins two animals (one floating origin per animal)')
+        frame.append(moving[0] if moving else 0)
+    return np.concatenate([m.wrap_type, body, side, frame]), fl.ravel(), {'SPATIAL': 1}
+
+
+def _ancestors(m, b):
+    """b and its ancestor bodies up to (not including) the world."""
+    out = []
+    while b > 0:
+        out.append(b)
+        b = m.body_parentid[b]
+    return out
 
 
 def pairs(m, regex, convex=False):
@@ -572,6 +620,49 @@ def with_gravcomp(mjcf, out):
     return str(out)
 
 
+def with_spatial_tendons(mjcf, out, stiffness=5.0, damping=0.05):
+    """mjcf plus three spatial tendons, for the gate on bodies that ship none (fly, spider): a straight site-site tendon between two
+    far-apart bodies, the same two sites with a sphere wrap placed on the straight path at qpos0 (a sphere geom, no mass, no
+    contact, on a body between them), and a three-site pulley split. Sites sit near body origins at 2 percent of the model's
+    extent. MjSpec, mesh paths made absolute (combine() does the same); written to `out`; returns the path."""
+    spec = mujoco.MjSpec.from_file(str(mjcf))
+    base = Path(mjcf).parent / (spec.meshdir or '')
+    for mesh in spec.meshes:
+        mesh.file = str((base / mesh.file).resolve()) if mesh.file else mesh.file
+    spec.meshdir = ''
+    m0 = spec.compile()
+    ext = float(m0.stat.extent)
+    names = [b.name for b in spec.bodies if b.name != 'world']
+    moving = [n for n in names if m0.body_dofnum[m0.body(n).id] or m0.body_parentid[m0.body(n).id] > 0]
+    pick = [moving[i] for i in (len(moving) // 5, len(moving) // 2, 4 * len(moving) // 5, len(moving) // 3)]  # a, mid, b, c
+    for k, n in enumerate(pick):
+        spec.body(n).add_site(name=f'tsite{k}', pos=[0.02 * ext * (1 + k), 0.01 * ext, 0.0], size=[0.002 * ext] * 3)
+    d0 = mujoco.MjData(m0)
+    m1 = spec.compile()
+    d1 = mujoco.MjData(m1)
+    d1.qpos[:] = m1.qpos0
+    mujoco.mj_forward(m1, d1)
+    pa, pb = d1.site('tsite0').xpos, d1.site('tsite2').xpos
+    mid = spec.body(pick[1])
+    c = (pa + pb) / 2
+    local = d1.body(pick[1]).xmat.reshape(3, 3).T @ (c - d1.body(pick[1]).xpos)
+    mid.add_geom(name='tsphere', type=mujoco.mjtGeom.mjGEOM_SPHERE, size=[0.25 * np.linalg.norm(pb - pa), 0, 0], pos=list(local), mass=0,
+                 contype=0, conaffinity=0, group=5)
+    side = mid.add_site(name='tside', pos=list(local + 0.5 * np.linalg.norm(pb - pa) * np.array([0, 0, 1.0])), size=[0.002 * ext] * 3)
+    for name, parts in (('tstraight', ['tsite0', 'tsite2']), ('twrap', ['tsite0', ('tsphere', 'tside'), 'tsite2']), ('tsplit', ['tsite3', 'tsite0', 'PULLEY', 'tsite0', 'tsite2', 'PULLEY', 'tsite0', 'tsite1'])):
+        t = spec.add_tendon(name=name, stiffness=stiffness, damping=damping)
+        for part in parts:
+            if part == 'PULLEY':
+                t.wrap_pulley(2.0)
+            elif isinstance(part, tuple):
+                t.wrap_geom(part[0], part[1])
+            else:
+                t.wrap_site(part)
+    Path(out).parent.mkdir(parents=True, exist_ok=True)
+    Path(out).write_text(spec.to_xml())
+    return str(out)
+
+
 def gravcomp_block(m):
     """Body gravity compensation (engine_passive.c:817), last block: ints jnt_actgravcomp per joint (those joints' share goes to
     qfrc_actuator, engine_forward.c:770, only when the model has actuators), floats body_gravcomp per body. Refused with joint-level
@@ -617,7 +708,7 @@ def export(mjcf, out, regex=None, act=False, convex=False, hfexact=False):
     if act:
         ai, af = actuators(m)
         ints, floats = ints + [ai], floats + [af]
-    for block in (fluid(m), tendons(m), convex_block(m, regex, convex, hfexact) if regex and (convex or hfexact) else None):  # last, so every earlier block keeps its offsets and a model without them its bytes
+    for block in (fluid(m), tendons(m), spatial(m), convex_block(m, regex, convex, hfexact) if regex and (convex or hfexact) else None):  # last, so every earlier block keeps its offsets and a model without them its bytes
         if block:
             ints, floats, sizes = ints + [block[0]], floats + [block[1]], sizes | block[2]
     if eq:  # after the other lanes' blocks too: a model without equalities keeps its bytes
@@ -745,13 +836,38 @@ def airborne(mjcf, out, lift=5.0, count=64):
     return str(out / 'airborne.npz')
 
 
+def tendon_dense(s, want, q, v, count, show=True):
+    """MuJoCo's tendon Jacobian is sparse rows (ten_J_rowadr/rownnz/colind): dense NTEN x NV per state, in place in `want`; also prints
+    in how many states a geom wrap (sphere, cylinder) actually bends each path (the coverage of the gate)."""
+    if 'ten_J' not in want:
+        return
+    dense = np.zeros((count, s.ntendon, s.nv))
+    for n in range(count):
+        for t in range(s.ntendon):
+            a, z = s.ten_J_rowadr[t], s.ten_J_rownnz[t]
+            dense[n, t, s.ten_J_colind[a:a + z]] = want['ten_J'][n][a:a + z]
+    want['ten_J'] = dense.reshape(count, -1)
+    if not show:
+        return
+    d = mujoco.MjData(s)
+    W = mujoco.mjtWrap
+    geom = [i for i in range(s.ntendon) if any(s.wrap_type[w] in (W.mjWRAP_SPHERE, W.mjWRAP_CYLINDER) for w in range(s.tendon_adr[i], s.tendon_adr[i] + s.tendon_num[i]))]
+    bent = {i: 0 for i in geom}
+    for n in range(count):
+        d.qpos[:], d.qvel[:] = q[n], v[n]
+        mujoco.mj_forward(s, d)
+        for i in geom:
+            bent[i] += int(d.ten_wrapnum[i] > s.tendon_num[i] - 1)  # a wrap adds its two tangent points to the sites
+    print('wrapped paths: ' + ', '.join(f"{mujoco.mj_id2name(s, mujoco.mjtObj.mjOBJ_TENDON, i)} bent in {b}/{count} states" for i, b in bent.items()))
+
+
 def check(mjcf, out, stage, count=64, k=0, oracle=None):
     """oracle: MuJoCo runs this MJCF instead of mjcf (same bodies and pair order), e.g. terrain_plane.xml for the
     engine's heightfield terrain.xml; standing states come from it too."""
     hfexact = bool(os.environ.get('HFEXACT'))  # exact heightfield contact (GJK + EPA per cell prism) instead of the tangent plane
     convex = bool(os.environ.get('CONVEX'))  # box and ellipsoid vs mesh pairs too (GJK + EPA), states moved into the arena's walls and stones
-    feet = stage in ('contact', 'actuated') or (stage == 'equality' and bool(load(mjcf).npair))  # equality + contacts: the contact path
-    m, out = export(mjcf, out, FEET if feet else None, stage == 'actuated', convex, hfexact), Path(out)
+    feet = stage in ('contact', 'actuated', 'sptendon_act') or (stage == 'equality' and bool(load(mjcf).npair))  # equality + contacts: the contact path
+    m, out = export(mjcf, out, FEET if feet else None, stage in ('actuated', 'sptendon_act'), convex, hfexact), Path(out)
     number, fn, fields = STAGES[stage]
     near = stage in ('equality', 'mocap') and os.environ.get('EQSPREAD') != 'far'
     far = not near
@@ -764,7 +880,7 @@ def check(mjcf, out, stage, count=64, k=0, oracle=None):
     if feet and Path(mjcf).name.startswith('cube'):  # every face of the cube carries states
         q, v = onfaces(q, v, float(Path(mjcf).stem[4:]))
     u = np.zeros((count, m.nu))
-    if stage == 'actuated':  # servos within 0.3 rad of the current joint angle, adhesion anywhere in [0, 1]
+    if stage in ('actuated', 'sptendon_act'):  # servos within 0.3 rad of the current joint angle, adhesion anywhere in [0, 1]
         rng = np.random.default_rng(2)
         for i in range(m.nu):
             if m.actuator_trntype[i] == mujoco.mjtTrn.mjTRN_JOINT:
@@ -792,6 +908,7 @@ def check(mjcf, out, stage, count=64, k=0, oracle=None):
         want = reference(s, fn, tuple(f for f in fields if f not in ('qacc_euler', 'qpos_next')) + ('qpos', 'qvel'), q, v, u)
         want['qacc_euler'] = (want.pop('qvel') - v) / m.opt.timestep
         want['qpos_next'] = want.pop('qpos')
+        tendon_dense(s, want, q, v, count)
         d = mujoco.MjData(s)  # ncon: contacts that carry constraint rows (MuJoCo also lists excluded ones)
         ambiguous = np.zeros(count, int)  # pairs whose deepest vertex sits within float32 resolution of the margin
         switch = np.zeros(count)  # per state: the constraint row nearest its active-set switch, |J qacc - aref| / max |aref|
@@ -819,6 +936,7 @@ def check(mjcf, out, stage, count=64, k=0, oracle=None):
         alt = reference(s, fn, tuple(f for f in fields if f not in ('qacc_euler', 'qpos_next', 'ncon')) + ('qpos', 'qvel'), r32(q), r32(v), r32(u))
         alt['qacc_euler'] = (alt.pop('qvel') - r32(v)) / m.opt.timestep  # same derivation as the reference's
         alt['qpos_next'] = alt.pop('qpos')
+        tendon_dense(s, alt, r32(q), r32(v), count, show=False)
         floor = {f: float(np.abs(alt[f] - want[f]).max() / max(np.abs(want[f]).max(), 1e-30)) for f in alt}
         if stage == 'equality':  # same lift as the contact-free branch below, and proof that the fixture is mixed
             floor['qacc_euler'] = max(floor['qacc_euler'], EQ_EULER_BAR / FLOOR_X)
@@ -857,12 +975,13 @@ def check(mjcf, out, stage, count=64, k=0, oracle=None):
         # M^-1 weighs the light rotational dofs 1000x. The bar is lifted to EQ_EULER_BAR; a wrong term moves it by 1e-1 (mutants).
         floor['qacc_euler'] = max(floor['qacc_euler'], EQ_EULER_BAR / FLOOR_X)
         print('float32 input floor: ' + ', '.join(f'{f} {e:.2e}' for f, e in floor.items()))
-    elif stage == 'step':
+    elif stage in ('step', 'sptendon'):
         s = load(mjcf)
         s.opt.disableflags |= mujoco.mjtDisableBit.mjDSBL_CONTACT | mujoco.mjtDisableBit.mjDSBL_CONSTRAINT | mujoco.mjtDisableBit.mjDSBL_ACTUATION
-        want = reference(s, fn, fields[:-2] + ('qpos', 'qvel'), q, v)
+        want = reference(s, fn, tuple(f for f in fields if f not in ('qacc_euler', 'qpos_next')) + ('qpos', 'qvel'), q, v)
         want['qacc_euler'] = (want.pop('qvel') - v) / m.opt.timestep
         want['qpos_next'] = want.pop('qpos')
+        tendon_dense(s, want, q, v, count)
     else:
         want = reference(m, fn, fields, q, v)
     if oracle and 'geom_xpos' in want:  # world geoms are constants: take the engine model's (the heightfield sits elsewhere than its twin plane)
