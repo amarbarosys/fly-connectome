@@ -322,6 +322,36 @@ if [ "$stage" = worldgame ]; then  # `live.py watch K world-game` as a user meet
   [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
   echo "PASS all worldgame checks"; exit 0
 fi
+if [ "$stage" = flygait ]; then  # the FlyGym gait on the card (fly_gait.mojo, live.mojo -DBRAIN=3): the kernel vs HybridTurningController on a 400-step drive sequence, max abs err <= 1e-5.
+  # Mutants: the coupling's phase difference reversed (sin(a - pi) = -sin(a + pi): the bias sign itself cannot be a mutant), the adhesion window, the drive sign
+  export PYTHONPATH=$PWD
+  G="$M -m agent.body_engine.fly_gait check"
+  $G || { echo "FAIL flygait"; fail=$((fail+1)); }
+  ~/iTools/bin/mutant-check agent/body_engine/fly_gait.mojo 's|sin64(theta\[j\] - theta\[i\] - 3.141592653589793)|sin64(theta[i] - theta[j] - 3.141592653589793)|' -- $G || fail=$((fail+1))
+  ~/iTools/bin/mutant-check agent/body_engine/fly_gait.mojo 's|ph < swing_end)|ph < swing_end - 0.5)|' -- $G || fail=$((fail+1))
+  ~/iTools/bin/mutant-check agent/body_engine/fly_gait.mojo 's|freq\[leg\] = FREQ if d >= 0 else -FREQ|freq[leg] = FREQ|' -- $G || fail=$((fail+1))
+  [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
+  echo "PASS all flygait checks"; exit 0
+fi
+if [ "$stage" = shiures ]; then  # the resident Shiu brain on a caller-owned DeviceContext (agent/shiu_resident.mojo) vs ShiuLive.advance: counts and voltages bit-equal. Mutant: a tick counter that skips ticks
+  export PYTHONPATH=$PWD
+  R="$M -m agent.verify_shiu_resident"
+  $R || { echo "FAIL shiures"; fail=$((fail+1)); }
+  ~/iTools/bin/mutant-check agent/shiu_resident.mojo 's|            self.t += 1|            self.t += 2|' -- $R || fail=$((fail+1))
+  [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
+  echo "PASS all shiures checks"; exit 0
+fi
+if [ "$stage" = flylink3 ]; then  # brain-driven fly, ONE DeviceContext (live.mojo -DBRAIN=3): fly_link's gates plus no host copy per step (rocprofv3 --memory-copy-trace). Submit with --vram 4.
+  # Mutants: the brain step dropped, the silence flag ignored, left and right drive merged
+  export PYTHONPATH=$PWD
+  L="$M -m agent.body_engine.fly_link3 check"
+  $L || { echo "FAIL flylink3"; fail=$((fail+1)); }
+  ~/iTools/bin/mutant-check agent/body_engine/live.mojo 's|            fly3.step(ctx, TileTensor(u_b, eng.LU), fr, max(eng.K, 1))|            pass|' -- $L || fail=$((fail+1))
+  ~/iTools/bin/mutant-check agent/body_engine/fly_brain.mojo 's|    if cfg\[2\] != 0 or not active:|    if not active:|' -- $L || fail=$((fail+1))
+  ~/iTools/bin/mutant-check agent/body_engine/fly_brain.mojo 's|drive\[1\] = min(max(rr /|drive[1] = min(max(rl /|' -- $L || fail=$((fail+1))
+  [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
+  echo "PASS all flylink3 checks"; exit 0
+fi
 if [ "$stage" = fluid ]; then  # Flybody flight model: mj_fluid (ellipsoid wings + inertia boxes) inside qfrc_passive, wing velocities up to flapping rate
   R=~/Projects/science/fly-connectome; FL=${FLIGHT:-$R/.work/flight-body}
   [ -f $FL/flight.xml ] || $R/.work/neural-flies/flight-venv/bin/python agent/body_engine/models/flight_export.py $FL
