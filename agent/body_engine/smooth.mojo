@@ -49,6 +49,7 @@ comptime GRID = F if WAVE else (F + 63) // 64
 comptime DUMP = get_defined_int["DUMP", 0]() == 1  # diagnostics (row_diag.py): write every scratch row and their offsets
 comptime STOP = get_defined_int["STOP", 99]()
 comptime INTEGRATOR = get_defined_int["INTEGRATOR", 0]()  # opt.integrator: 0 Euler, 1 RK4, 3 implicitfast (model.py export; absent = Euler)
+comptime SOLVER = get_defined_int["SOLVER", 2]()  # opt.solver: 0 PGS, 1 CG, 2 Newton (model.py export; absent = Newton)
 comptime K = get_defined_int["K", 0]()  # K > 0 (STAGE >= 5): K steps per launch, qpos/qvel written back in place
 comptime STEPTOL = Float32(get_defined_int["STEPTOL_E7", 1 if get_defined_int["ELLIPTIC", 0]() == 1 else 10]()) * 1e-7  # Newton stops when a step moves qacc less than this
 comptime LSFLOOR = Float32(get_defined_int["LSFLOOR_E7", 10]()) * 1e-7  # line-search slope floor, relative to alpha = 0  # phase timing (phases.sh): return after phase STOP
@@ -268,7 +269,16 @@ comptime ODCF = ODCA + 6 * NBB
 comptime NROWB = ORKW + NV if INTEGRATOR == 1 else (ODCF + 6 * NBB if IMPL else NROW0)
 comptime OQMV = NROWB  # NMID: qvel_mid of every dof (the velocity mj_advance integrates positions with), then one eligibility flag per candidate
 comptime NROW2 = NROWB + (NV + NMID if NMID > 0 else 0)
-comptime OGAME = NROW2  # GAME: four float32 rows per animal, energy health stamina dead; all zero = not started
+comptime OSOL = NROW2  # CG scratch (SOLVER 1 only): M^-1 grad, then grad and M^-1 grad of the last iteration
+comptime OCGM = OSOL
+comptime OCGO = OCGM + NV
+comptime OCGMO = OCGO + NV
+comptime OGF = OSOL  # PGS scratch (SOLVER 0 only): force, visitation order, 1/diag of AR per row; then z = L^-T J' f
+comptime OGP = OGF + NEFC
+comptime OGA = OGP + NEFC
+comptime OGZ = OGA + NEFC
+comptime SOLROWS = 3 * NV if SOLVER == 1 else (3 * NEFC + NV if SOLVER == 0 else 0)
+comptime OGAME = OSOL + SOLROWS  # GAME: four float32 rows per animal, energy health stamina dead; all zero = not started
 comptime NROW = OGAME + (4 if GAME else 0)
 comptime LI = row_major[NI]()
 comptime LF = row_major[NFL]()
@@ -1961,6 +1971,23 @@ def gradient(mi: TI, res: TO, f: Int):
         res[(OSRCH + v) * F + f] = -get(res, f, OSRCH + v)
 
 
+def gradient_cg(mi: TI, res: TO, f: Int, first: Bool):
+    """MuJoCo PrimalUpdateGradient (CG, engine_solver.c:1201): grad = M qacc - qfrc_smooth - qfrc_constraint, preconditioned with the
+    plain M factor, Mgrad = M^-1 grad (mj_solveLD with qLD). The previous grad and Mgrad are kept for the Polak-Ribiere beta; the
+    first call also starts the search along -Mgrad."""
+    for v in range(NV):
+        if not first:
+            res[(OCGO + v) * F + f] = get(res, f, OGRAD + v)
+            res[(OCGMO + v) * F + f] = get(res, f, OCGM + v)
+        var g = get(res, f, OMA + v) - get(res, f, OQSM + v) - get(res, f, OQFC + v)
+        res[(OGRAD + v) * F + f] = g
+        res[(OCGM + v) * F + f] = g
+    solveLD(mi, res, f, OCGM, OLD, OLDI)
+    if first:
+        for v in range(NV):
+            res[(OSRCH + v) * F + f] = -get(res, f, OCGM + v)
+
+
 comptime PNT = SIMD[DType.float32, 4]  # line-search point: alpha, cost, deriv0, deriv1
 
 
@@ -2154,6 +2181,165 @@ def start(mi: TI, mf: TF, res: TO, f: Int, src: Int) -> Float32:
     return update(mi, mf, res, f)
 
 
+@always_inline
+def rowpair(mi: TI, res: TO, f: Int, r: Int) -> Int:
+    """The exported pair a constraint row belongs to: its slot r // 4 lies in [sbase, sbase + nslot) of exactly one pair."""
+    for ip in range(Int(get(res, f, OPA))):
+        var q = Int(get(res, f, OPA + 1 + ip))
+        if r // 4 >= sbase(mi, res, f, q) and r // 4 < sbase(mi, res, f, q) + nslot(mi, res, f, q):
+            return q
+    return 0
+
+
+@always_inline
+def pcg32(mut state: UInt64) -> UInt32:
+    """MuJoCo pcg32_next (engine_solver.c:240), inc = 1."""
+    var old = state
+    state = old * 6364136223846793005 + 1
+    var xorshifted = UInt32(((old >> 18) ^ old) >> 27)
+    var rot = UInt32(old >> 59)
+    return (xorshifted >> rot) | (xorshifted << ((UInt32(0) - rot) & 31))
+
+
+def pgs(mi: TI, mf: TF, res: TO, f: Int):
+    """MuJoCo mj_solPGS (engine_solver.c:416), pyramidal rows (no equality, friction loss or elliptic cones): dual projected
+    Gauss-Seidel on AR = J M^-1 J' + R over the valid rows, each sweep in the order MuJoCo's fixed-seed pcg32 Fisher-Yates
+    shuffle gives, force = max(0, force - res / AR_ii), improvement from costChange, stop below opt.tolerance. Matrix-free as
+    noslip: w = L^-T J' per row, A(i, j) = w_i' D^-1 w_j, z = L^-T J' f kept current. Warmstart (engine_forward.c warmstart):
+    force = -D jar at qacc_warmstart, zero when its dual cost f.b + f.AR.f / 2 is positive. Then mj_dualFinish; the result
+    is left in Newton's representation (OST, OJAR = -f / D, OQFC = J' f, OCQACC) so noslip continues from it unchanged."""
+    for v in range(NV):
+        res[(OQSM + v) * F + f] = get(res, f, OPAS + v) - get(res, f, OBIAS + v)
+        comptime if STAGE >= 7:
+            res[(OQSM + v) * F + f] += get(res, f, OQACT + v)
+        res[(OQACCS + v) * F + f] = get(res, f, OQSM + v)
+    solveLD(mi, res, f, OQACCS, OLD, OLDI)
+    res[ONCON * F + f] = get(res, f, OACT)
+    res[ODIAG * F + f] = 0
+    res[(ODIAG + 1) * F + f] = 0
+    res[(ODIAG + 2) * F + f] = 0
+    _ = start(mi, mf, res, f, OQACCS)  # OJAR = J qacc_smooth - aref = efc_b on the valid rows
+    var na = 4 * Int(get(res, f, OACT))
+    for v in range(NV):
+        res[(OGZ + v) * F + f] = 0
+    for ip in range(Int(get(res, f, OPA))):  # w = L^-T J' of every valid row (OWC), AR_ii, and the warmstart force with its z
+        var p = Int(get(res, f, OPA + 1 + ip))
+        var nch = Int(mi[CPH + 11 * p + 6]); var choff = Int(mi[CPH + 11 * p + 7])
+        for sl in range(nslot(mi, res, f, p)):
+            if get(res, f, OVALID + sbase(mi, res, f, p) + sl) == 0:
+                continue
+            for k in range(4):
+                var r = 4 * (sbase(mi, res, f, p) + sl) + k
+                var jo = jbase(mi, res, f, p) + (4 * sl + k) * nch
+                ltsolve(mi, res, f, OW, OJ + jo, nch, choff)
+                var a: Float32 = 0
+                for c in range(nch):
+                    var i = Int(mi[CCHAIN + choff + c])
+                    var w = get(res, f, OW + i)
+                    res[(OWC + jo + c) * F + f] = w
+                    a += w * w * get(res, f, OLDI + i)
+                res[(OGA + r) * F + f] = 1 / (a + 1 / get(res, f, OD + r))
+                var jw: Float32 = 0  # J qacc_warmstart: zero at the fresh state (K = 0), the last step's qacc otherwise
+                comptime if K > 0:
+                    jw = jdot(mi, res, f, OJ + jo, nch, choff, OWARM)
+                var jar = jw - get(res, f, OAREF + r)
+                var fr: Float32 = -get(res, f, OD + r) * jar if jar < 0 else 0
+                res[(OGF + r) * F + f] = fr
+                for c in range(nch):
+                    res[(OGZ + Int(mi[CCHAIN + choff + c])) * F + f] += get(res, f, OWC + jo + c) * fr
+    var cost: Float32 = 0  # f.b + f.AR.f / 2: AR f = w' D^-1 z + R f
+    for ip in range(Int(get(res, f, OPA))):
+        var p = Int(get(res, f, OPA + 1 + ip))
+        var nch = Int(mi[CPH + 11 * p + 6]); var choff = Int(mi[CPH + 11 * p + 7])
+        for sl in range(nslot(mi, res, f, p)):
+            if get(res, f, OVALID + sbase(mi, res, f, p) + sl) == 0:
+                continue
+            for k in range(4):
+                var r = 4 * (sbase(mi, res, f, p) + sl) + k
+                var jo = jbase(mi, res, f, p) + (4 * sl + k) * nch
+                var fr = get(res, f, OGF + r)
+                if fr == 0:
+                    continue
+                var arf: Float32 = 0
+                for c in range(nch):
+                    var i = Int(mi[CCHAIN + choff + c])
+                    arf += get(res, f, OWC + jo + c) * get(res, f, OLDI + i) * get(res, f, OGZ + i)
+                cost += fr * get(res, f, OJAR + r) + 0.5 * fr * (arf + fr / get(res, f, OD + r))
+    if cost > 0:
+        for r in range(NEFC):
+            res[(OGF + r) * F + f] = 0
+        for v in range(NV):
+            res[(OGZ + v) * F + f] = 0
+    var scale = 1 / (mf[COPT + 4] * Float32(NV))
+    var tol = mf[COPT + 1]
+    for troot in range(1, NB):  # one island per kinematic tree (MuJoCo mj_solPGS_island: own rows, own fixed-seed shuffle, own stop); a pair never joins two trees
+        if mi[PARENT + troot] != 0:
+            continue
+        var ni = 0
+        for c in range(na):
+            var rp = rowpair(mi, res, f, 4 * Int(get(res, f, OACT + 1 + c // 4)) + c % 4)
+            if Int(mi[ROOT + Int(mi[CPH + 11 * rp + 2])]) == troot:
+                res[(OGP + ni) * F + f] = Float32(c)
+                ni += 1
+        if ni == 0:
+            continue
+        var rng: UInt64 = 0
+        _ = pcg32(rng)
+        for _ in range(Int(mi[CITER])):
+            res[ODIAG * F + f] += 1
+            for i in range(ni - 1, 0, -1):  # Fisher-Yates over the persistent order
+                var j = Int(pcg32(rng) % UInt32(i + 1))
+                var t = get(res, f, OGP + i)
+                res[(OGP + i) * F + f] = get(res, f, OGP + j)
+                res[(OGP + j) * F + f] = t
+            var improvement: Float32 = 0
+            for bi in range(ni):
+                var c = Int(get(res, f, OGP + bi))
+                var r = 4 * Int(get(res, f, OACT + 1 + c // 4)) + c % 4
+                var p = rowpair(mi, res, f, r)
+                var nch = Int(mi[CPH + 11 * p + 6]); var choff = Int(mi[CPH + 11 * p + 7])
+                var jo = jbase(mi, res, f, p) + (4 * (r // 4 - sbase(mi, res, f, p)) + r % 4) * nch
+                var rs = get(res, f, OJAR + r)
+                for q in range(nch):
+                    var i = Int(mi[CCHAIN + choff + q])
+                    rs += get(res, f, OWC + jo + q) * get(res, f, OLDI + i) * get(res, f, OGZ + i)
+                var old = get(res, f, OGF + r)
+                rs += old / get(res, f, OD + r)
+                var new = max(old - rs * get(res, f, OGA + r), Float32(0))
+                var delta = new - old
+                var change = 0.5 * delta * delta / get(res, f, OGA + r) + delta * rs
+                if change > 1e-10:
+                    continue
+                improvement -= change
+                if delta != 0:
+                    res[(OGF + r) * F + f] = new
+                    for q in range(nch):
+                        res[(OGZ + Int(mi[CCHAIN + choff + q])) * F + f] += get(res, f, OWC + jo + q) * delta
+            if improvement * scale < tol:
+                break
+    for v in range(NV):  # mj_dualFinish: qfrc_constraint = J' f, qacc = qacc_smooth + M^-1 qfrc_constraint
+        res[(OQFC + v) * F + f] = 0
+    for ip in range(Int(get(res, f, OPA))):
+        var p = Int(get(res, f, OPA + 1 + ip))
+        var nch = Int(mi[CPH + 11 * p + 6]); var choff = Int(mi[CPH + 11 * p + 7])
+        for sl in range(nslot(mi, res, f, p)):
+            if get(res, f, OVALID + sbase(mi, res, f, p) + sl) == 0:
+                continue
+            for k in range(4):
+                var r = 4 * (sbase(mi, res, f, p) + sl) + k
+                var fr = get(res, f, OGF + r)
+                res[(OST + r) * F + f] = 1 if fr > 0 else 0
+                res[(OJAR + r) * F + f] = -fr / get(res, f, OD + r) if fr > 0 else Float32(1)
+                var jadr = OJ + jbase(mi, res, f, p) + (4 * sl + k) * nch
+                for c in range(nch):
+                    res[(OQFC + Int(mi[CCHAIN + choff + c])) * F + f] += get(res, f, jadr + c) * fr
+    for v in range(NV):
+        res[(OW + v) * F + f] = get(res, f, OQFC + v)
+    solveLD(mi, res, f, OW, OLD, OLDI)
+    for v in range(NV):
+        res[(OCQACC + v) * F + f] = get(res, f, OQACCS + v) + get(res, f, OW + v)
+
+
 def newton(mi: TI, mf: TF, res: TO, f: Int):
     """MuJoCo mj_solPrimal (Newton), one island: start at qacc_smooth, line search, Hessian rebuilt when the
     active set changes (MuJoCo updates it incrementally; same matrix)."""
@@ -2176,10 +2362,14 @@ def newton(mi: TI, mf: TF, res: TO, f: Int):
     comptime if K > 0:  # mj warmstart: the last step's qacc unless qacc_smooth costs less
         var cw = start(mi, mf, res, f, OWARM)
         cost = start(mi, mf, res, f, OQACCS) if cw > cost else cw
-    hessian(mi, mf, res, f)
+    comptime if SOLVER != 1:
+        hessian(mi, mf, res, f)
     comptime if STOP == 9:
         return
-    gradient(mi, res, f)
+    comptime if SOLVER == 1:
+        gradient_cg(mi, res, f, True)
+    else:
+        gradient(mi, res, f)
     comptime if STOP == 8:
         return
     for _ in range(Int(mi[CITER])):
@@ -2203,7 +2393,7 @@ def newton(mi: TI, mf: TF, res: TO, f: Int):
         comptime if ELL:  # the cone Hessian moves with jar: rebuilt every iteration, no rank-1 shortcut
             changed = True
             cheap = False
-        if changed and not ELL:
+        if changed and not ELL and SOLVER != 1:
             comptime if WAVE:  # one sequential walk per animal on lane 0; its verdict shared so all lanes agree
                 sync()
                 if lane() == 0:
@@ -2215,25 +2405,41 @@ def newton(mi: TI, mf: TF, res: TO, f: Int):
                 cheap = lowrank(mi, res, f)
         var oldcost = cost
         cost = update(mi, mf, res, f)
-        if changed and not cheap:
-            hessian(mi, mf, res, f)
-        gradient(mi, res, f)
+        comptime if SOLVER != 1:
+            if changed and not cheap:
+                hessian(mi, mf, res, f)
+        comptime if SOLVER == 1:
+            gradient_cg(mi, res, f, False)
+        else:
+            gradient(mi, res, f)
         var gn: Float32 = 0
         for v in range(NV):
             gn += get(res, f, OGRAD + v) * get(res, f, OGRAD + v)
-        if scale * (oldcost - cost) < tol or scale * sqrt(gn) < tol:
-            break
+        comptime if SOLVER != 1:  # CG runs on: MuJoCo's two tests end it after ~80 float64 iterations, in float32 they fire at ~37 (rounding in cost and
+            # gradient) with qacc 2e-3 off; the line search ends it when alpha is 0, the iteration cap otherwise
+            if scale * (oldcost - cost) < tol or scale * sqrt(gn) < tol:
+                break
         # float32 stop: MuJoCo's 1e-8 tests sit below float32 noise, so a few animals ran all 100 iterations and
         # held their wave. Stop once a step moves qacc by under 1e-6 of its size (max norms): further steps only
         # move it within float32 rounding. (Stopping when a full step kept the active set was wrong: with stiff
         # contacts H is ill-conditioned, so one float32 Newton step is not exact.)
-        var dq: Float32 = 0
-        var qa: Float32 = 0
-        for v in range(NV):
-            dq = max(dq, abs(alpha * get(res, f, OSRCH + v)))
-            qa = max(qa, abs(get(res, f, OCQACC + v)))
-        if dq <= STEPTOL * qa:
-            break
+        comptime if SOLVER != 1:  # CG has no such stop: its steps are small by construction, MuJoCo's own tests end it
+            var dq: Float32 = 0
+            var qa: Float32 = 0
+            for v in range(NV):
+                dq = max(dq, abs(alpha * get(res, f, OSRCH + v)))
+                qa = max(qa, abs(get(res, f, OCQACC + v)))
+            if dq <= STEPTOL * qa:
+                break
+        comptime if SOLVER == 1:  # Polak-Ribiere: beta = grad . (Mgrad - Mgradold) / gradold . Mgradold, reset when negative
+            var num: Float32 = 0
+            var den: Float32 = 0
+            for v in range(NV):
+                num += get(res, f, OGRAD + v) * (get(res, f, OCGM + v) - get(res, f, OCGMO + v))
+                den += get(res, f, OCGO + v) * get(res, f, OCGMO + v)
+            var beta = max(num / max(den, Float32(1e-15)), Float32(0))
+            for v in range(NV):
+                res[(OSRCH + v) * F + f] = -get(res, f, OCGM + v) + beta * get(res, f, OSRCH + v)
 
 
 @always_inline
@@ -3215,7 +3421,10 @@ def step(mi: TI, mf: TF, qpos: TQ, qvel: TV, ctrl: TU, res: TO, f: Int, rks: Int
                 res[(OGAME + 3) * F + f] = next.dead
         comptime if STOP == 5:
             return
-        newton(mi, mf, res, f)
+        comptime if SOLVER == 0:
+            pgs(mi, mf, res, f)
+        else:
+            newton(mi, mf, res, f)
         comptime if STOP == 8 or STOP == 9:
             return
         noslip(mi, mf, res, f)
