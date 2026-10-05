@@ -256,12 +256,12 @@ def main() raises:
     var act = TileTensor(act_b, LN)
     var decay = exp(-SUB / Float32(20e-3))
     var dk = exp(-SUB / Float32(5e-3))
-    var t = UInt32(0)
+    var t = UInt32(Int(String(a[3]))) if len(a) > 3 else UInt32(0)  # a restart continues the substep and teach counters,
     var code = ctx.enqueue_create_host_buffer[DType.int32](1)
     var alive_b = ctx.enqueue_create_buffer[DType.int32](NSEG)
     var kp = ctx.compile_function[prune]()
     var kg = ctx.compile_function[regrow]()
-    var tstep = UInt32(0)
+    var tstep = UInt32(Int(String(a[4]))) if len(a) > 4 else UInt32(0)  # so its noise and regrow streams do not replay from 0
     raw = load(dir + "plan.bin", NG * 7 + NSEG * 2)
     var pl = raw.unsafe_ptr().unsafe_bitcast[Int32]()
     var P0 = List[Int]()

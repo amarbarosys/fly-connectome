@@ -149,12 +149,14 @@ def build():
 
 
 class GPUPathway:
-    def __init__(self, idx, w, fb, ch, seed=7):
+    def __init__(self, idx, w, fb, ch, seed=7, t=0, tstep=0):
+        """t, tstep: counters to continue from (a restarted binary, e.g. after a neuron recruit)."""
+        self.t, self.tstep = t, tstep
         DIR.mkdir(parents=True, exist_ok=True)
         idx.tofile(DIR / 'idx.bin'); w.tofile(DIR / 'w.bin'); fb.tofile(DIR / 'fb.bin'); ch.tofile(DIR / 'ch.bin')
         np.concatenate([G.ravel(), SEG.ravel()]).astype(np.int32).tofile(DIR / 'plan.bin')
         binary = build()
-        self.p = subprocess.Popen([str(binary), str(DIR) + '/', str(seed)], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        self.p = subprocess.Popen([str(binary), str(DIR) + '/', str(seed), str(t), str(tstep)], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
 
     def _cmd(self, code, *payload):
         self.p.stdin.write(np.int32(code).tobytes() + b''.join(np.ascontiguousarray(x).tobytes() for x in payload)); self.p.stdin.flush()
@@ -163,10 +165,12 @@ class GPUPathway:
         self._cmd(3)
 
     def step(self, m):
+        self.t += S
         self._cmd(1, m.astype(np.float32))
         return np.frombuffer(self.p.stdout.read(B * NM * 2), np.uint16).reshape(B, NM)
 
     def teach(self, err):
+        self.tstep += 1
         self._cmd(2, err.astype(np.float32))
 
     def weights(self):
