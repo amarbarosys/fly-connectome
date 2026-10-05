@@ -9,6 +9,8 @@ the physical actuator force used with velocity to account for work. Game bars
 and tagged scenario events are game-layer extensions, not MuJoCo physics ports.
 """
 
+from std.sys import argv
+
 @fieldwise_init
 struct GameState(Copyable, Movable):
     var energy: Float32
@@ -79,8 +81,65 @@ def actuator_scale(state: GameState, floor_scale: Float32) -> Float32:
     return stamina
 
 
+def replay_binary_stream(input_path: String, rows_path: String, source_path: String) raises:
+    """Replay packed seven-word events and write packed state rows for oracle comparison."""
+    var raw = open(input_path, "r").read_bytes()
+    var words = raw.unsafe_ptr().unsafe_bitcast[Int32]()
+    var vals = raw.unsafe_ptr().unsafe_bitcast[Float32]()
+    var animals = [GameState(1.0, 1.0, 1.0, 0.0), GameState(1.0, 1.0, 1.0, 0.0)]
+    var source_remaining: Int32 = 1
+    var seen_hazards: List[Int32] = []
+    var seen_resources: List[Int32] = []
+    var nrecords = len(raw) // 28
+    for record in range(nrecords):
+        var base = record * 7
+        var animal_index = Int(words.unsafe_offset(base)[])
+        var hazard_id = words.unsafe_offset(base + 3)[]
+        var resource_id = words.unsafe_offset(base + 4)[]
+        var source_id = words.unsafe_offset(base + 5)[]
+        var duplicate_hazard = False
+        if hazard_id > 0:
+            for prior in range(len(seen_hazards) // 2):
+                if seen_hazards[prior * 2] == words.unsafe_offset(base)[] and seen_hazards[prior * 2 + 1] == hazard_id:
+                    duplicate_hazard = True
+            if not duplicate_hazard:
+                seen_hazards.append(words.unsafe_offset(base)[])
+                seen_hazards.append(hazard_id)
+        var resource_granted = False
+        var duplicate_resource = False
+        if resource_id > 0:
+            for prior in range(len(seen_resources)):
+                if seen_resources[prior] == resource_id:
+                    duplicate_resource = True
+            if not duplicate_resource and source_id == 0 and source_remaining > 0:
+                source_remaining -= 1
+                resource_granted = True
+                seen_resources.append(resource_id)
+        var event_hazard = hazard_id > 0 and not duplicate_hazard
+        var next = advance_state(animals[animal_index], vals.unsafe_offset(base + 1)[], event_hazard,
+                                 words.unsafe_offset(base + 2)[] != 0, resource_granted,
+                                 0.1, 0.1, 0.4, 0.0, 0.25, 0.5)
+        animals[animal_index] = next.copy()
+    var output = List[Float32](length=4 * len(animals), fill=0.0)
+    for animal in range(len(animals)):
+        output[animal * 4] = animals[animal].energy
+        output[animal * 4 + 1] = animals[animal].health
+        output[animal * 4 + 2] = animals[animal].stamina
+        output[animal * 4 + 3] = animals[animal].dead
+    var row_file = open(rows_path, "w")
+    row_file.write_bytes(Span(unsafe_ptr=output.unsafe_ptr().unsafe_bitcast[UInt8](), length=len(output) * 4))
+    var source_output = [source_remaining]
+    var source_file = open(source_path, "w")
+    source_file.write_bytes(Span(unsafe_ptr=source_output.unsafe_ptr().unsafe_bitcast[UInt8](), length=4))
+
+
 def main() raises:
     comptime assert 4 * 4 == 16, "GameState row is four float32 values"
+    var args = argv()
+    if len(args) == 4:
+        replay_binary_stream(String(args[1]), String(args[2]), String(args[3]))
+        print("GAME_STATE PASS: replayed shared binary event stream")
+        return
     var alive = GameState(1.0, 1.0, 1.0, 0.0)
     var drained = advance_state(alive, 2.0, False, False, False, 0.0, 0.1,
                                 0.0, 0.0, 0.1, 0.0)
