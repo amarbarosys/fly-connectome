@@ -4,6 +4,8 @@
 # usage: gpu-wait run --timeout 1200 -- [env BODY=path.xml] agent/body_engine/check.sh [STAGE]
 set -euo pipefail
 cd "$(dirname "$0")/../.."
+mkdir -p .work; exec 9>.work/check.lock  # one stage per worktree: mutant-check edits sources in place (SHARED rule 13)
+flock -n 9 || { echo "FAIL check.sh: another stage is running in $(pwd); run stages one at a time"; exit 1; }
 stage=${1:-kinematics}; M=.venv/bin/python; X=.work/agent/body_engine; fail=0
 if [ "$stage" = convex ]; then  # GJK + EPA narrowphase (convex.mojo, CPU build) vs MuJoCo mj_collision, per pair kind: float64 exact, float32 bars
   KINDS=${KINDS:-ellipsoid box}
