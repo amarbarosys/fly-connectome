@@ -62,6 +62,10 @@ def descending_name_sets():
                         'unmatched_types': sorted(wanted - matched),
                         'flywire_cells': len(frows), 'matched_mcns_cells': len(mrows),
                         'flywire_cells_of_matched_types': int(frows.cell_type.isin(matched).sum())}
+    counts['turning']['mcns_side_cells'] = {'left': len(sets['turn_left']), 'right': len(sets['turn_right'])}
+    counts['forward']['mcns_side_cells'] = {'left': len(sets['forward_left']),
+                                             'right': len(sets['forward_right']),
+                                             'center': len(sets['forward_center'])}
     counts['all_descending'] = {'flywire_types': len(fw_types - {''}),
                                 'matched_types': len((fw_types - {''}) & mcns_types),
                                 'unmatched_types': sorted((fw_types - {''}) - mcns_types),
