@@ -43,7 +43,7 @@ else:
 OUT0 = NT - NM  # the eye motors are the last NM neurons (slice layer 3; scaffold AMm, both sides)
 S, REFR, SUB, V_TH, KICK, GAIN, P_NOISE, ETA = 20, 5, 5e-4, 7.0, np.float32(0.275 * 250), 400.0, np.float32(30 * 5e-4), 0.01
 THETA, WMAX, FRAC = 0.02, 0.3, 0.3
-DIR = ROOT / f'.work/agent/spider/pool-gpu/{os.getpid()}'  # per process: concurrent runs (slice vs scaffold) must not share idx.bin
+DIR = ROOT / '.work/agent/spider/pool-gpu'  # + /<pid> at construction: concurrent runs and forked workers must not share idx.bin
 MOJO = Path.home() / 'iTools/bin/mojo-cached'
 
 
@@ -60,7 +60,9 @@ def init(seed=2):
     else:
         idx, lo, hi = IDX.copy(), AT[('AM1', 0)][0], AT[('AM2', 1)][1]
         hid, ch = slice(lo, hi), np.r_[np.arange(1200), np.arange(1200), np.full(NR - 2400, -1)]
-    fb[hid] = rng.choice([-1.0, 1.0], (hid.stop - hid.start, 2))
+    # +-[1, -1] per row: the error is [slip, -slip], so a row [1, 1] or [-1, -1] (half of independent +-1 draws) projects
+    # it to exactly 0 and that neuron never learns (astra-progress 2026-10-05)
+    fb[hid] = rng.choice([-1.0, 1.0], (hid.stop - hid.start, 1)) * np.array([1.0, -1.0])
     fb[OUT0:OUT0 + NM] = np.r_[np.tile([1, -1], (6, 1)), np.tile([-1, 1], (6, 1))]
     ch = np.where(ch < 0, -1, ch // 100 * 2 + (ch % 100 >= 50)).astype(np.int32)
     return idx, np.zeros(NS, np.float32), fb, ch
@@ -152,11 +154,12 @@ class GPUPathway:
     def __init__(self, idx, w, fb, ch, seed=7, t=0, tstep=0):
         """t, tstep: counters to continue from (a restarted binary, e.g. after a neuron recruit)."""
         self.t, self.tstep = t, tstep
-        DIR.mkdir(parents=True, exist_ok=True)
-        idx.tofile(DIR / 'idx.bin'); w.tofile(DIR / 'w.bin'); fb.tofile(DIR / 'fb.bin'); ch.tofile(DIR / 'ch.bin')
-        np.concatenate([G.ravel(), SEG.ravel()]).astype(np.int32).tofile(DIR / 'plan.bin')
+        d = DIR / str(os.getpid())
+        d.mkdir(parents=True, exist_ok=True)
+        idx.tofile(d / 'idx.bin'); w.tofile(d / 'w.bin'); fb.tofile(d / 'fb.bin'); ch.tofile(d / 'ch.bin')
+        np.concatenate([G.ravel(), SEG.ravel()]).astype(np.int32).tofile(d / 'plan.bin')
         binary = build()
-        self.p = subprocess.Popen([str(binary), str(DIR) + '/', str(seed), str(t), str(tstep)], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        self.p = subprocess.Popen([str(binary), str(d) + '/', str(seed), str(t), str(tstep)], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
 
     def _cmd(self, code, *payload):
         self.p.stdin.write(np.int32(code).tobytes() + b''.join(np.ascontiguousarray(x).tobytes() for x in payload)); self.p.stdin.flush()
