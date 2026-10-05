@@ -49,7 +49,7 @@ STAGES['contact'] = (6, 'mj_step', STAGES['step'][2] + ('ncon', 'qacc', 'qfrc_co
 # or no bias, no activation dynamics), random controls, actuators on.
 STAGES['actuated'] = (7, 'mj_step', STAGES['contact'][2] + ('actuator_force', 'qfrc_actuator'))
 FEET = '.'  # every plane-mesh pair (55 on the fly: each body part on the floor); 'tarsus5' (6 feet) sank through the floor in MuJoCo too
-VSCALE = 10  # random qvel in +-10 per dof: velocity terms well above float32 noise; qpos moves ~1e-3 per fly step
+VSCALE = float(os.environ.get('VSCALE', 10))  # random qvel in +-VSCALE per dof (10: velocity terms well above float32 noise; qpos moves ~1e-3 per fly step); the flight gate draws up to flapping rate
 REL = 1e-5
 FLOOR_X = 3  # contact stage: bar = max(REL, 3 x the field's float32 input floor), see check()
 WORLD_FIRST = ('xpos', 'xquat', 'xipos', 'cinert', 'crb', 'cvel')  # body-indexed fields whose row 0 is the world
@@ -208,13 +208,14 @@ def fluid(m):
 
 def tendons(m):
     """Fixed tendons (mj_tendon: length = sum coef q, J = coef, constant) plus mj_passive's tendon spring and damper
-    (engine_passive.c:775): ints per tendon wrap start and count, then each wrap's dof address; floats each wrap's
-    coef, then per tendon stiffness, damping, lengthspring 2. Joints are hinge or slide only."""
+    (engine_passive.c:775): ints per tendon wrap start and count, then each wrap's dof address, then each wrap's qpos
+    address; floats each wrap's coef, then per tendon stiffness, damping, lengthspring 2. Joints are hinge or slide only.
+    New wrap kinds (spatial tendons) append their own arrays after these."""
     if not m.ntendon:
         return None
     if (m.jnt_type[m.wrap_objid] > 3).any() or (m.jnt_type[m.wrap_objid] < 2).any():
         raise SystemExit('FAIL export: tendon wraps only on hinge and slide joints')
-    ints = np.concatenate([m.tendon_adr, m.tendon_num, m.jnt_dofadr[m.wrap_objid]])
+    ints = np.concatenate([m.tendon_adr, m.tendon_num, m.jnt_dofadr[m.wrap_objid], m.jnt_qposadr[m.wrap_objid]])
     floats = np.concatenate([m.wrap_prm, m.tendon_stiffness, m.tendon_damping, m.tendon_lengthspring.ravel()])
     return ints, floats, {'NTEN': m.ntendon, 'NWRAP': m.nwrap}
 
@@ -341,11 +342,11 @@ def actuators(m):
     T = mujoco.mjtTrn
     for i in range(m.nu):
         joint = m.actuator_trntype[i] == T.mjTRN_JOINT and m.jnt_type[m.actuator_trnid[i, 0]] in (mujoco.mjtJoint.mjJNT_HINGE, mujoco.mjtJoint.mjJNT_SLIDE)
-        if (not (joint or m.actuator_trntype[i] == T.mjTRN_BODY) or m.actuator_gaintype[i] != mujoco.mjtGain.mjGAIN_FIXED
+        if (not (joint or m.actuator_trntype[i] in (T.mjTRN_BODY, T.mjTRN_TENDON)) or m.actuator_gaintype[i] != mujoco.mjtGain.mjGAIN_FIXED
                 or m.actuator_biastype[i] not in (mujoco.mjtBias.mjBIAS_NONE, mujoco.mjtBias.mjBIAS_AFFINE)
                 or m.actuator_dyntype[i] != mujoco.mjtDyn.mjDYN_NONE or m.actuator_actearly[i] or m.actuator_delay[i]):
-            raise SystemExit(f'FAIL export: actuator {i} is not a ported kind (hinge/slide joint or adhesion body, fixed gain, no dynamics)')
-    ints = np.array([[m.actuator_trntype[i], m.jnt_dofadr[m.actuator_trnid[i, 0]] if m.actuator_trntype[i] == T.mjTRN_JOINT else m.actuator_trnid[i, 0],
+            raise SystemExit(f'FAIL export: actuator {i} is not a ported kind (hinge/slide joint, adhesion body or fixed tendon, fixed gain, no dynamics)')
+    ints = np.array([[m.actuator_trntype[i], m.jnt_dofadr[m.actuator_trnid[i, 0]] if m.actuator_trntype[i] == T.mjTRN_JOINT else m.actuator_trnid[i, 0],  # tendon: its id
                       m.actuator_ctrllimited[i], m.actuator_forcelimited[i],
                       m.jnt_qposadr[m.actuator_trnid[i, 0]] if m.actuator_trntype[i] == T.mjTRN_JOINT else -1] for i in range(m.nu)])
     bias = np.where((m.actuator_biastype == mujoco.mjtBias.mjBIAS_AFFINE)[:, None], m.actuator_biasprm[:, :3], 0)
