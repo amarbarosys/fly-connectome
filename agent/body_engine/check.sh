@@ -266,7 +266,7 @@ if [ "$stage" = world_hud ]; then  # plume world in the live frame (-DWORLD=1, d
   W="$M -m agent.body_engine.world_check check"
   $W || { echo "FAIL world_hud"; fail=$((fail+1)); }
   ~/iTools/bin/mutant-check agent/body_engine/spectate.mojo 's|    plume\[2 \* s\] = c\[0\]|    plume[2 * s] = c[1]|' -- $W spider || fail=$((fail+1))
-  ~/iTools/bin/mutant-check agent/body_engine/spectate.mojo 's|Int32(src\[3\]), src\[4\],|Int32(1), src[4],|' -- $W spider || fail=$((fail+1))
+  ~/iTools/bin/mutant-check agent/body_engine/spectate.mojo 's|Int32(src\[8\]), src\[9\])|Int32(1), src[9])|' -- $W spider || fail=$((fail+1))
   ~/iTools/bin/mutant-check agent/body_engine/hud.mojo 's|center_y - (source_y - target_y) \* scale|center_y + (source_y - target_y) * scale|' -- $W spider || fail=$((fail+1))
   [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
   echo "PASS all world_hud checks"; exit 0
