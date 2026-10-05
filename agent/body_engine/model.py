@@ -219,8 +219,8 @@ def onfaces(q, v, side):
     return q, v
 
 
-INTEGRATORS = (mujoco.mjtIntegrator.mjINT_EULER, mujoco.mjtIntegrator.mjINT_RK4, mujoco.mjtIntegrator.mjINT_IMPLICITFAST)  # ported (full implicit: not)
-STALE_RK4 = ('qH', 'qHDiagInv')  # mj_RungeKutta never factors qH: MuJoCo's d->qH after an RK4 step is stale, not compared
+INTEGRATORS = (mujoco.mjtIntegrator.mjINT_EULER, mujoco.mjtIntegrator.mjINT_RK4, mujoco.mjtIntegrator.mjINT_IMPLICIT, mujoco.mjtIntegrator.mjINT_IMPLICITFAST)
+STALE_RK4 = ('qH', 'qHDiagInv')  # mj_RungeKutta and mj_implicit (LU in qLU) never factor qH: MuJoCo's d->qH after such a step is stale, not compared
 
 
 def override(m):
@@ -301,8 +301,10 @@ def load(mjcf):
     m = mjcf if isinstance(mjcf, mujoco.MjModel) else mujoco.MjModel.from_xml_path(str(mjcf))
     if not isinstance(mjcf, mujoco.MjModel):
         override(m)
-    if m.dof_simplenum.any():
-        raise SystemExit('FAIL export: simple dofs are not ported')
+    for d in np.flatnonzero(m.dof_simplenum):  # simple = ipos 0 and iquat identity on a childless free body: M0 is the crb diagonal, every shortcut is exact
+        b = m.dof_bodyid[d]
+        if not (m.jnt_type[m.dof_jntid[d]] == mujoco.mjtJoint.mjJNT_FREE and m.tree_dofnum[m.dof_treeid[d]] == 6 and m.body_subtreemass[b] == m.body_mass[b]):
+            raise SystemExit('FAIL export: simple dofs other than a standalone free body are not ported')
     if (m.nflex or m.opt.integrator not in INTEGRATORS or m.actuator_damping.any()
             or m.dof_dampingpoly.any() or m.jnt_stiffnesspoly.any() or m.opt.disableflags):
         raise SystemExit('FAIL export: only Euler/implicitfast, linear joint springs and dof dampers are ported (no flex, '
@@ -312,13 +314,9 @@ def load(mjcf):
     if m.tendon_limited.any() or m.tendon_frictionloss.any() \
             or m.tendon_stiffnesspoly.any() or m.tendon_dampingpoly.any() or m.tendon_actfrclimited.any():
         raise SystemExit('FAIL export: only unlimited tendons without friction loss, with linear spring and damper, are ported')
-    if m.opt.integrator == mujoco.mjtIntegrator.mjINT_IMPLICITFAST:
+    if m.opt.integrator in (mujoco.mjtIntegrator.mjINT_IMPLICIT, mujoco.mjtIntegrator.mjINT_IMPLICITFAST):
         if m.opt.density or m.opt.viscosity or m.tendon_damping.any():  # mjd_passive_vel fluid and tendon-damper terms of qDeriv: not ported
-            raise SystemExit('FAIL export: implicitfast needs the fluid and tendon-damping velocity derivatives (mjd_passive_vel), not ported')
-        for j in np.flatnonzero(m.jnt_type == mujoco.mjtJoint.mjJNT_FREE):  # engine_forward.c midpoint_eligible: mj_midpoint integrates these
-            b = m.jnt_bodyid[j]
-            if m.tree_dofnum[m.dof_treeid[m.jnt_dofadr[j]]] == 6 and m.body_subtreemass[b] == m.body_mass[b]:
-                raise SystemExit(f'FAIL export: implicitfast integrates the standalone free body {b} by implicit midpoint (mj_midpoint), not ported')
+            raise SystemExit('FAIL export: implicit and implicitfast need the fluid and tendon-damping velocity derivatives (mjd_passive_vel), not ported')
     return m
 
 
@@ -696,6 +694,35 @@ def gravcomp_block(m):
     return np.asarray(m.jnt_actgravcomp), np.asarray(m.body_gravcomp), {'GRAVCOMP': 1}
 
 
+def implicit_block(m):
+    """Full implicit integrator (mj_implicitSkip, engine_forward.c:1864), last block, only with opt.integrator implicit: MuJoCo's body-dof
+    sparsity B (a body's row = its branch: ancestor dofs, own dofs, subtree dofs; rows of bodies welded to the world are never read),
+    the dof-dof sparsity D (a dof's row = its body's row, diagonal at D_diag) and mapM2D (D entry -> M entry, M in M_rowadr layout),
+    plus per body the number of ancestor dofs as copyFromParent counts them (engine_derivative.c:468). Ints per body (rownnz, rowadr,
+    ancestor count), then B_colind, then per dof (rowadr, diag, rownnz), then D_colind and mapM2D."""
+    if m.opt.integrator != mujoco.mjtIntegrator.mjINT_IMPLICIT:
+        return None
+    anc = np.zeros(m.nbody, int)
+    for n in range(1, m.nbody):
+        a = m.body_weldid[m.body_parentid[n]]
+        while a > 0:
+            anc[n] += m.body_dofnum[a]
+            a = m.body_weldid[m.body_parentid[a]]
+    ints = np.concatenate([m.B_rownnz, m.B_rowadr, anc, m.B_colind, m.D_rowadr, m.D_diag, m.D_rownnz, m.D_colind, m.mapM2D])
+    return ints, np.zeros(0), {'NBB': m.nB, 'NDD': m.nD}
+
+
+def mid_block(m):
+    """Implicit midpoint of standalone free bodies (mj_midpoint, engine_forward.c:1708), last block, implicitfast only: per free joint of a
+    childless one-joint tree (midpoint_eligible's static part, engine_forward.c:1519) its body, dof address and aligned flag (ipos 0).
+    The runtime part (no live contact on the body) is smooth.mojo mid_eligible. Equalities are refused with non-Euler integrators."""
+    if m.opt.integrator != mujoco.mjtIntegrator.mjINT_IMPLICITFAST:
+        return None
+    rows = [[b, m.jnt_dofadr[j], int(not m.body_ipos[b].any())] for j in np.flatnonzero(m.jnt_type == mujoco.mjtJoint.mjJNT_FREE)
+            for b in [m.jnt_bodyid[j]] if m.tree_dofnum[m.dof_treeid[m.jnt_dofadr[j]]] == 6 and m.body_subtreemass[b] == m.body_mass[b]]
+    return (np.array(rows).ravel(), np.zeros(0), {'NMID': len(rows)}) if rows else None
+
+
 def actuators(m):
     """S3 tables: ints per actuator (transmission type, dof or body, ctrllimited, forcelimited, qpos address or -1),
     floats per actuator
@@ -736,7 +763,7 @@ def export(mjcf, out, regex=None, act=False, convex=False, hfexact=False):
     if eq:  # after the other lanes' blocks too: a model without equalities keeps its bytes
         block = eq_block(m, eq, hr[0])
         ints, floats, sizes = ints + [block[0]], floats + [block[1]], sizes | block[2]
-    for block in (mocap_block(m), gravcomp_block(m)):  # after the equality block, in Mojo's order: CMOC follows CEQM, CGC follows CMOC
+    for block in (mocap_block(m), gravcomp_block(m), implicit_block(m), mid_block(m)):  # after the equality block, in Mojo's order: CMOC follows CEQM, CGC follows CMOC, CIMP follows CGC, CMID follows the implicit block
         if block:
             ints, floats, sizes = ints + [block[0]], floats + [block[1]], sizes | block[2]
     np.concatenate(ints).astype(np.int32).tofile(out / 'mi.bin')
@@ -1052,7 +1079,7 @@ def check(mjcf, out, stage, count=64, k=0, oracle=None):
         compare({'qfrc_constraint (ambiguous states)': (want['qfrc_constraint'].reshape(count, -1)[flip], got[i][flip])}, 1.0) if flip.any() else None
         want['qfrc_constraint'] = want['qfrc_constraint'].reshape(count, -1)[~flip]
         got[i] = got[i][~flip]
-    skip = STALE_RK4 if m.opt.integrator == mujoco.mjtIntegrator.mjINT_RK4 else ()
+    skip = STALE_RK4 if m.opt.integrator in (mujoco.mjtIntegrator.mjINT_RK4, mujoco.mjtIntegrator.mjINT_IMPLICIT) else ()
     bad += [b for f, g in zip(fields, got) if f not in skip for b in compare({f: (want[f].reshape(len(g), -1), g)}, max(REL, fx * floor.get(f, 0)))]
     if bad:
         print(f'FAIL {len(bad)}/{len(fields)} {stage} fields: {" ".join(bad)}')
