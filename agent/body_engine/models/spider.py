@@ -22,6 +22,8 @@ OUT = Path('.work/agent/body_engine/spider-body')
 SEG = [('coxa', 0.5, 0.0), ('femur', 1.8, 35.0), ('patella', 0.8, -70.0), ('tibia', 1.3, -20.0),
        ('metatarsus', 1.2, -15.0), ('tarsus', 0.6, -10.0)]  # name, length mm, pitch relative to parent (deg, + up)
 LEGS = [(1, 55.0, 1.10, 0.55), (2, 25.0, 0.90, 0.45), (3, -20.0, 0.90, 0.40), (4, -60.0, 1.05, 0.40)]  # pair, yaw, scale, radius
+JUMP_S = 95.6  # servo boost of the jump variant (see build)
+PREY_R = 0.5  # mm, prey ellipsoid radius (a ~1 mm fly-sized dot)
 KP, FMAX, DAMP = 2700.0, 4000.0, 3.0  # servo gain and force limit, dof damping (fly 45 / 65 / 0.06, x ~60 for ~20x mass and ~3x length)
 
 
@@ -60,10 +62,17 @@ def ellipsoid(path, ax, ay, az, n=10):
             f.write(struct.pack('<12fH', 0, 0, 0, *v[t[0]], *v[t[1]], *v[t[2]], 0))
 
 
-def build(out=OUT):
+def build(out=OUT, prey=False, jump=False):
+    """prey=True adds a free prey body (dark ellipsoid, free joint, no contacts, no servos; slide joints would be 'simple dofs', which the export refuses) and writes spider_prey.xml:
+    its qpos is set each control step by the environment (eyes.mojo prey kernel), never by the brain.
+    jump=True writes spider_jump.xml: the first four servos of every leg (coxa yaw and pitch, femur, patella) get JUMP_S x the gain and
+    force limit and the joint damping 3 + 0.3 JUMP_S (an explicit servo stays stable only for damping >= kp dt): the model's stand-in for
+    the hydraulic leg extension real salticids jump with (they have no extensor muscles at two leg joints). Walking uses spider.xml."""
     out.mkdir(parents=True, exist_ok=True)
     ellipsoid(out / 'prosoma.stl', 1.3, 1.1, 0.7)
     ellipsoid(out / 'opisthosoma.stl', 1.5, 1.1, 0.9)
+    if prey:
+        ellipsoid(out / 'prey.stl', PREY_R, PREY_R, PREY_R, n=6)
     assets, geoms, actuators, pairs = ['<mesh name="prosoma" file="prosoma.stl"/>', '<mesh name="opisthosoma" file="opisthosoma.stl"/>'], [], [], []
 
     def leg(side, pair, yaw, scale, radius):
@@ -86,8 +95,9 @@ def build(out=OUT):
                 xml.append(f'<body name="{mesh}" pos="{prev:.3f} 0 0" quat="{q[0]:.6f} 0 {q[2]:.6f} 0">')
                 joints = [(f'{name}_{seg}', '0 0 1' if seg == 'tibia' else '0 1 0')]
             for j, axis in joints:
-                xml.append(f'<joint name="{j}" axis="{axis}" range="-60 60"/>')
-                actuators.append(f'<position name="{j}" joint="{j}" kp="{KP}" forcelimited="true" forcerange="{-FMAX} {FMAX}"/>')
+                boost = JUMP_S if jump and not j.endswith(('tibia', 'metatarsus', 'tarsus')) else 1.0
+                xml.append(f'<joint name="{j}" axis="{axis}" range="-60 60"' + (f' damping="{DAMP + 0.3 * boost}"' if boost > 1 else '') + '/>')
+                actuators.append(f'<position name="{j}" joint="{j}" kp="{KP * boost}" forcelimited="true" forcerange="{-FMAX * boost} {FMAX * boost}"/>')
             xml.append(f'<geom name="{mesh}" type="mesh" mesh="{mesh}"/>')
             pairs.append(mesh)
             close.append('</body>')
@@ -96,6 +106,13 @@ def build(out=OUT):
 
     legs = '\n'.join(leg(s, *p) for s in (1, -1) for p in LEGS)
     pairs = ['prosoma', 'opisthosoma'] + pairs
+    PREYBODY = ''
+    if prey:
+        assets.append('<mesh name="prey" file="prey.stl"/>')
+        PREYBODY = ('<body name="prey" pos="0 0 0">\n<freejoint name="prey"/>\n'
+                    '<geom name="prey" type="mesh" mesh="prey" rgba="0.02 0.02 0.02 1"/>\n'
+                    '<body name="prey_tip" pos="0 0 0"><geom type="sphere" size="1e-3" mass="1e-9"/></body>\n</body>\n')  # a child: a leaf free body is a "simple dof"
+
     xml = f'''<mujoco model="spider">
 <compiler angle="degree" meshdir="."/>
 <option timestep="1e-4" gravity="0 0 -9810" cone="pyramidal" iterations="100" ls_iterations="50"/>
@@ -118,7 +135,7 @@ def build(out=OUT):
 </body>
 {legs}
 </body>
-</worldbody>
+{PREYBODY}</worldbody>
 <contact>
 {chr(10).join(f'<pair geom1="ground_plane" geom2="{g}" solref="2e-4 1" solimp="0.98 0.99 1e-5 0.5 3" friction="1 1" margin="0.001"/>' for g in pairs)}
 </contact>
@@ -129,8 +146,9 @@ def build(out=OUT):
 </actuator>
 </mujoco>
 '''
-    (out / 'spider.xml').write_text(xml)
-    return out / 'spider.xml'
+    name = 'spider_prey.xml' if prey else ('spider_jump.xml' if jump else 'spider.xml')
+    (out / name).write_text(xml)
+    return out / name
 
 
 def stand(path, seconds=0.5):
