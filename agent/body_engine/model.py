@@ -147,6 +147,25 @@ def combine(fly, spider, offset=(8.0, 0.0, 0.0), name='world'):
     return str(out)
 
 
+def airborne(mjcf, spring=(2.0, 0.3, -0.04, 0.04)):
+    """The flight MJCF as the tendon gate meets it (stage `actuated` needs the pyramidal cone and explicit pairs only): pyramidal
+    cone, every geom contype/conaffinity 0 (no contacts, the model flies), and every fixed tendon given a spring, damper and
+    spring length range (spring, damper, lower, upper; the shipped tendons have none, so their passive port would go
+    untested). Written next to mjcf as airborne.xml; returns the path."""
+    import xml.etree.ElementTree as ET
+    tree = ET.parse(mjcf)
+    root = tree.getroot()
+    opt = root.find('option') if root.find('option') is not None else ET.SubElement(root, 'option')
+    opt.set('cone', 'pyramidal')
+    for g in root.iter('geom'):
+        g.set('contype', '0'); g.set('conaffinity', '0')
+    for t in root.iter('fixed'):
+        t.set('stiffness', str(spring[0])); t.set('damping', str(spring[1])); t.set('springlength', f'{spring[2]} {spring[3]}')
+    out = Path(mjcf).with_name('airborne.xml')
+    tree.write(out)
+    return str(out)
+
+
 def onfaces(q, v, side):
     """Standing states moved onto the cube's 6 faces in turn (state n on face n % 6): the whole fly rotated so the
     floor's up becomes the face's inward normal and placed at the face; free-joint linear velocity rotated with it,

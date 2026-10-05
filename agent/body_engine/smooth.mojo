@@ -559,6 +559,33 @@ def fluid(mi: TI, mf: TF, res: TO, f: Int):
         res[(OPAS + v) * F + f] += (get6(res, f, OCD + 6 * v) * get6(res, f, OFLW + 6 * Int(mi[DBODY + v]))).reduce_add()
 
 
+@always_inline
+def tendon(mi: TI, mf: TF, qpos: TQ, qvel: TV, f: Int, t: Int) -> Tuple[Float32, Float32]:
+    """MuJoCo mj_tendon for a fixed tendon (engine_core_smooth.c): length = sum coef qpos, velocity = sum coef qvel."""
+    var length: Float32 = 0
+    var vel: Float32 = 0
+    var a = Int(mi[TNI + t])
+    for w in range(a, a + Int(mi[TNI + NTEN + t])):
+        var c = mf[TNF + w]
+        length += c * qpos[Int(mi[TNI + 2 * NTEN + NWRAP + w]) * F + f]
+        vel += c * qvel[Int(mi[TNI + 2 * NTEN + w]) * F + f]
+    return (length, vel)
+
+
+def tendon_passive(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int):
+    """MuJoCo mj_springdamper tendon part (engine_passive.c:775): spring about [lower, upper] of lengthspring, linear
+    damper, along the constant tendon Jacobian (the wrap coefs) into qfrc_passive."""
+    for t in range(NTEN):
+        var lv = tendon(mi, mf, qpos, qvel, f, t)
+        var lo = mf[TNF + NWRAP + 2 * NTEN + 2 * t]
+        var hi = mf[TNF + NWRAP + 2 * NTEN + 2 * t + 1]
+        var x = lv[0] - hi if lv[0] > hi else (lv[0] - lo if lv[0] < lo else Float32(0))
+        var frc = -x * mf[TNF + NWRAP + t] - lv[1] * mf[TNF + NWRAP + NTEN + t]
+        var a = Int(mi[TNI + t])
+        for w in range(a, a + Int(mi[TNI + NTEN + t])):
+            res[(OPAS + Int(mi[TNI + 2 * NTEN + w])) * F + f] += mf[TNF + w] * frc
+
+
 def velocity(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int):
     """MuJoCo mj_comVel, mj_passive (joint springs, dof dampers), mj_rne(flg_acc = 0) into qfrc_bias."""
     # mj_comVel: cvel = cvel_parent + cdof qvel, cdof_dot = cvel x cdof with the velocity before the joint
@@ -608,6 +635,8 @@ def velocity(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int):
                 res[(OPAS + da + c) * F + f] += -k * axis[c] * speed
         else:  # slide, hinge
             res[(OPAS + da) * F + f] += -k * (qpos[a * F + f] - mf[QSPRING + a])
+    comptime if NTEN > 0:
+        tendon_passive(mi, mf, qpos, qvel, res, f)
     comptime if NFLUID:
         fluid(mi, mf, res, f)
     # mj_rne: cacc = cacc_parent + cdof_dot qvel (world: -gravity), cfrc = cinert cacc + cvel x* (cinert cvel)
@@ -839,6 +868,16 @@ def actuation(mi: TI, mf: TF, qpos: TQ, qvel: TV, ctrl: TU, res: TO, f: Int):
                 force = min(max(force, mf[af + 6]), mf[af + 7])
             res[(OAF + u) * F + f] = force
             res[(OQACT + dof) * F + f] += gear * force
+        elif mi[a] == 3:  # fixed tendon: moment = gear x the wrap coefs, length and velocity = gear x the tendon's
+            var t = Int(mi[a + 1])
+            var lv = tendon(mi, mf, qpos, qvel, f, t)
+            var force = mf[af] * c + mf[af + 1] + mf[af + 2] * (lv[0] * gear) + mf[af + 3] * (lv[1] * gear)
+            if mi[a + 3] != 0:
+                force = min(max(force, mf[af + 6]), mf[af + 7])
+            res[(OAF + u) * F + f] = force
+            var w0 = Int(mi[TNI + t])
+            for w in range(w0, w0 + Int(mi[TNI + NTEN + t])):
+                res[(OQACT + Int(mi[TNI + 2 * NTEN + w])) * F + f] += gear * mf[TNF + w] * force
         else:  # body: adhesion over the body's contacts
             var body = Int(mi[a + 1])
             var counter = 0

@@ -152,6 +152,19 @@ if [ "$stage" = integrator ]; then  # implicitfast (mj_implicitSkip) vs MuJoCo w
   [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
   echo "PASS all integrator checks (implicitfast)"; exit 0
 fi
+if [ "$stage" = tendon ]; then  # Flybody flight model, airborne (no contacts) with a spring and damper on its two fixed tendons: full step, actuators incl. trntype 3
+  R=~/Projects/science/fly-connectome; FL=${FLIGHT:-$R/.work/flight-body}
+  [ -f $FL/flight.xml ] || $R/.work/neural-flies/flight-venv/bin/python agent/body_engine/models/flight_export.py $FL
+  A=$($M -c "from agent.body_engine.model import airborne; print(airborne('$FL/flight.xml'))")
+  $M -m agent.body_engine.model check $A $X/airborne actuated 64 || { echo "FAIL flight tendon"; fail=$((fail+1)); }
+  # each mutant must fail: tendon length sign, passive coef sign, actuator moment sign, spring dead zone dropped
+  for mut in 's/        length += c \* qpos/        length -= c * qpos/' 's/\] += mf\[TNF + w\] \* frc/] -= mf[TNF + w] * frc/' \
+             's/+= gear \* mf\[TNF + w\] \* force/-= gear * mf[TNF + w] * force/' 's/var x = lv\[0\] - hi if lv\[0\] > hi else (lv\[0\] - lo if lv\[0\] < lo else Float32(0))/var x = lv[0] - hi/'; do
+    ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo "$mut" -- $M -m agent.body_engine.model check $A $X/mutant actuated 64 || fail=$((fail+1))
+  done
+  [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
+  echo "PASS all tendon checks"; exit 0
+fi
 B=${BODY:-.work/agent/gpu-body-port/body-v2/body.xml}  # BODY=path checks another MJCF (e.g. the spider from models/spider.py)
 $M -m agent.body_engine.model check $B $X/body-$(basename $B .xml) "$stage" 64 || { echo "FAIL $(basename $B .xml) $stage"; fail=$((fail+1)); }
 if [ "$stage" = contact ] || [ "$stage" = actuated ]; then  # plane-mesh foot pairs; the spider test body has none
