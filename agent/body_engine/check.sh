@@ -104,6 +104,23 @@ if [ "$stage" = mocap ]; then  # two mocap bodies (random mocap_pos/quat per sta
   [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
   echo "PASS all mocap checks"; exit 0
 fi
+if [ "$stage" = gravcomp ]; then  # body gravcomp (mj_gravcomp) on the fly and the spider test body (body_gravcomp 1, .5, 0, .8 in turn)
+  # and on models/gravcomp_act.xml, where joints with actgravcomp take the actuator route (engine_forward.c:770; needs nu > 0)
+  S=agent/body_engine/smooth.mojo; G=agent/body_engine/models/gravcomp_act.xml; mkdir -p $X/gc
+  FG=$($M -c "from agent.body_engine.model import with_gravcomp; print(with_gravcomp('${BODY:-.work/agent/gpu-body-port/body-v2/body.xml}', '$X/gc/fly.xml'))")
+  SG=$($M -c "from agent.body_engine.model import with_gravcomp; print(with_gravcomp('agent/body_engine/models/spider_test.xml', '$X/gc/spider.xml'))")
+  for B in $FG $SG $G; do for st in rne step; do
+    $M -m agent.body_engine.model check $B $X/gc/$(basename $B .xml)-$st $st 64 || { echo "FAIL gravcomp $(basename $B .xml) $st"; fail=$((fail+1)); }
+  done; done
+  $M -m agent.body_engine.model check $G $X/gc/act actuated 64 || { echo "FAIL gravcomp actuator route"; fail=$((fail+1)); }
+  # the gate must fail with gravcomp skipped, with its sign flipped, with the actuator route dropped and with actgravcomp ignored
+  ~/iTools/bin/mutant-check $S 's/^        gravcomp(mi, mf, res, f)$/        pass/' -- $M -m agent.body_engine.model check $FG $X/mutant rne 64 || fail=$((fail+1))
+  ~/iTools/bin/mutant-check $S 's/-(mf\[MASS + i\] \* gc)/(mf[MASS + i] * gc)/' -- $M -m agent.body_engine.model check $FG $X/mutant rne 64 || fail=$((fail+1))
+  ~/iTools/bin/mutant-check $S 's/res\[(OQACT + d) \* F + f\] += get(res, f, OGC + d)/res[(OQACT + d) * F + f] += 0 * get(res, f, OGC + d)/' -- $M -m agent.body_engine.model check $G $X/mutant actuated 64 || fail=$((fail+1))
+  ~/iTools/bin/mutant-check $S '0,/if mi\[CGC + j\] != 0:/s//if mi[CGC + j] != 9:/' -- $M -m agent.body_engine.model check $G $X/mutant rne 64 || fail=$((fail+1))
+  [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
+  echo "PASS all gravcomp checks"; exit 0
+fi
 if [ "$stage" = loop ]; then  # K steps per launch, state kept on the card. K=1 vs mj_step (one step: the accuracy
   # gate); one K=10 launch must equal ten K=1 launches byte for byte (the loop). K=10 vs ten chained mj_step is not a
   # gate: the engine's ~5e-6 per-step float32 error grows ~12x in 10 steps on contact-rich states (diag/k_floor.py)
