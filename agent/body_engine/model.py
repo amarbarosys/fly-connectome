@@ -147,7 +147,7 @@ def combine(fly, spider, offset=(8.0, 0.0, 0.0), name='world'):
     return str(out)
 
 
-def airborne(mjcf, spring=(2.0, 0.3, -0.04, 0.04)):
+def airborne_mjcf(mjcf, spring=(2.0, 0.3, -0.04, 0.04)):
     """The flight MJCF as the tendon gate meets it (stage `actuated` needs the pyramidal cone and explicit pairs only): pyramidal
     cone, every geom contype/conaffinity 0 (no contacts, the model flies), and every fixed tendon given a spring, damper and
     spring length range (spring, damper, lower, upper; the shipped tendons have none, so their passive port would go
