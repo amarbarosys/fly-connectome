@@ -220,6 +220,7 @@ def onfaces(q, v, side):
 
 
 INTEGRATORS = (mujoco.mjtIntegrator.mjINT_EULER, mujoco.mjtIntegrator.mjINT_RK4, mujoco.mjtIntegrator.mjINT_IMPLICIT, mujoco.mjtIntegrator.mjINT_IMPLICITFAST)
+SOLVERS = (mujoco.mjtSolver.mjSOL_PGS, mujoco.mjtSolver.mjSOL_CG, mujoco.mjtSolver.mjSOL_NEWTON)  # all three ported
 STALE_RK4 = ('qH', 'qHDiagInv')  # mj_RungeKutta and mj_implicit (LU in qLU) never factor qH: MuJoCo's d->qH after such a step is stale, not compared
 
 
@@ -231,6 +232,10 @@ def override(m):
         key, val = kv.split('=')
         if key == 'integrator':
             m.opt.integrator = int(val)
+        elif key == 'solver':
+            m.opt.solver = int(val)
+        elif key == 'noslip':  # noslip_iterations: 0 isolates the solver (noslip runs once over all contacts in the engine, per island in MuJoCo)
+            m.opt.noslip_iterations = int(val)
         elif key == 'kv':
             joint = (m.actuator_trntype == mujoco.mjtTrn.mjTRN_JOINT) & (m.actuator_biastype == mujoco.mjtBias.mjBIAS_AFFINE)
             m.actuator_biasprm[joint, 2] = -float(val)
@@ -305,7 +310,7 @@ def load(mjcf):
         b = m.dof_bodyid[d]
         if not (m.jnt_type[m.dof_jntid[d]] == mujoco.mjtJoint.mjJNT_FREE and m.tree_dofnum[m.dof_treeid[d]] == 6 and m.body_subtreemass[b] == m.body_mass[b]):
             raise SystemExit('FAIL export: simple dofs other than a standalone free body are not ported')
-    if (m.nflex or m.opt.integrator not in INTEGRATORS or m.actuator_damping.any()
+    if (m.nflex or m.opt.integrator not in INTEGRATORS or m.opt.solver not in SOLVERS or m.actuator_damping.any()
             or m.dof_dampingpoly.any() or m.jnt_stiffnesspoly.any() or m.opt.disableflags):
         raise SystemExit('FAIL export: only Euler/implicitfast, linear joint springs and dof dampers are ported (no flex, '
                          'actuator damping, polynomial springs or dampers, disable flags)')
@@ -454,6 +459,8 @@ def feet(m, regex, couple=(), hrows=None, convex=False, hfexact=False):
            geom2 and geom1 (14); then hull vertices in the geom frame; then opt.impratio, opt.tolerance, opt.ls_tolerance, opt.noslip_tolerance, stat.meaninertia
     """
     elliptic = m.opt.cone == mujoco.mjtCone.mjCONE_ELLIPTIC
+    if m.opt.solver != mujoco.mjtSolver.mjSOL_NEWTON and (elliptic or convex or hfexact):  # CG and PGS: pyramidal rows of plane-mesh and sphere pairs (check.sh solver)
+        raise SystemExit('FAIL export: CG and PGS are gated with the pyramidal cone and plane-mesh / sphere pairs only (check.sh solver)')
     if elliptic and (convex or hfexact):
         raise SystemExit('FAIL export: the elliptic cone is gated on plane-mesh pairs only (check.sh cone), not convex or exact-heightfield pairs')
     if (m.geom_contype & m.geom_conaffinity).any():
@@ -750,6 +757,8 @@ def export(mjcf, out, regex=None, act=False, convex=False, hfexact=False):
     sizes = {'NBODY': m.nbody, 'NJNT': m.njnt, 'NQ': m.nq, 'NGEOM': m.ngeom, 'NV': m.nv, 'NC': m.nC, 'NU': m.nu}
     if m.opt.integrator:  # absent = Euler: those binaries are unchanged
         sizes['INTEGRATOR'] = int(m.opt.integrator)
+    if m.opt.solver != mujoco.mjtSolver.mjSOL_NEWTON:  # absent = Newton
+        sizes['SOLVER'] = int(m.opt.solver)
     eq, hr = eq_rows(m), []
     if regex or eq:  # equality rows ride the solver block: no pairs (regex '^$') still needs it
         ci, cf, cs = feet(m, regex or '^$', [e['union'] for e in eq], hr, convex, hfexact)
@@ -910,6 +919,24 @@ def tendon_dense(s, want, q, v, count, show=True):
     print('wrapped paths: ' + ', '.join(f"{mujoco.mj_id2name(s, mujoco.mjtObj.mjOBJ_TENDON, i)} bent in {b}/{count} states" for i, b in bent.items()))
 
 
+def reference_fresh(m, fn, fields, qpos, qvel=None, ctrl=None):
+    """mj_oracle.reference with a fresh MjData per state. One shared MjData carries qacc_warmstart from the previous state's step:
+    harmless when the solver converges (Newton), but PGS stops unconverged at 100 sweeps, so its result depends on the warmstart
+    and the engine's K=0 launch (warmstart 0) must be compared with a state that has none."""
+    out = {f: [] for f in fields}
+    calls = [getattr(mujoco, name) for name in fn.split(',')]
+    for n, row in enumerate(qpos):
+        d = mujoco.MjData(m)
+        d.qpos[:] = row
+        d.qvel[:] = 0 if qvel is None else qvel[n]
+        d.ctrl[:] = 0 if ctrl is None else ctrl[n]
+        for call in calls:
+            call(m, d)
+        for f in fields:
+            out[f].append(np.array(getattr(d, f)))
+    return {f: np.array(v) for f, v in out.items()}
+
+
 def check(mjcf, out, stage, count=64, k=0, oracle=None):
     """oracle: MuJoCo runs this MJCF instead of mjcf (same bodies and pair order), e.g. terrain_plane.xml for the
     engine's heightfield terrain.xml; standing states come from it too."""
@@ -919,6 +946,7 @@ def check(mjcf, out, stage, count=64, k=0, oracle=None):
     fx = FLOOR_X_CONE if load(mjcf).opt.cone == mujoco.mjtCone.mjCONE_ELLIPTIC else FLOOR_X
     m, out = export(mjcf, out, FEET if feet else None, stage in ('actuated', 'sptendon_act'), convex, hfexact), Path(out)
     number, fn, fields = STAGES[stage]
+    ref = reference if m.opt.solver == mujoco.mjtSolver.mjSOL_NEWTON else reference_fresh  # see reference_fresh
     near = stage in ('equality', 'mocap') and os.environ.get('EQSPREAD') != 'far'
     far = not near
     q, v = nearby(m, count) if near else standing(load(oracle) if oracle else m, count) if feet else (states(m, count), velocities(m, count, scale=VSCALE))
@@ -955,7 +983,7 @@ def check(mjcf, out, stage, count=64, k=0, oracle=None):
         for i in range(s.npair):
             if i not in on:
                 s.pair_margin[i] = -1e10
-        want = reference(s, fn, tuple(f for f in fields if f not in ('qacc_euler', 'qpos_next')) + ('qpos', 'qvel'), q, v, u)
+        want = ref(s, fn, tuple(f for f in fields if f not in ('qacc_euler', 'qpos_next')) + ('qpos', 'qvel'), q, v, u)
         want['qacc_euler'] = (want.pop('qvel') - v) / m.opt.timestep
         want['qpos_next'] = want.pop('qpos')
         tendon_dense(s, want, q, v, count)
@@ -983,7 +1011,7 @@ def check(mjcf, out, stage, count=64, k=0, oracle=None):
         # A contact force at solref 2e-4 moves 2.4e-5 of its scale from input rounding alone, so a field's bar is
         # max(REL, FLOOR_X x its floor); every field still has to beat 1e-5 unless float32 inputs cannot.
         r32 = lambda x: x.astype(np.float32).astype(np.float64)
-        alt = reference(s, fn, tuple(f for f in fields if f not in ('qacc_euler', 'qpos_next', 'ncon')) + ('qpos', 'qvel'), r32(q), r32(v), r32(u))
+        alt = ref(s, fn, tuple(f for f in fields if f not in ('qacc_euler', 'qpos_next', 'ncon')) + ('qpos', 'qvel'), r32(q), r32(v), r32(u))
         alt['qacc_euler'] = (alt.pop('qvel') - r32(v)) / m.opt.timestep  # same derivation as the reference's
         alt['qpos_next'] = alt.pop('qpos')
         tendon_dense(s, alt, r32(q), r32(v), count, show=False)
@@ -993,8 +1021,8 @@ def check(mjcf, out, stage, count=64, k=0, oracle=None):
             print(f"equality + contacts: contact rows active in {int((want['ncon'] > 0).sum())}/{count} states")
         if k:  # K-step loop: the state after k chained mj_step calls, ctrl held; its own float32 floor
             chain = ','.join(['mj_step'] * k)
-            want = reference(s, chain, ('qpos', 'qvel'), q, v, u)
-            alt = reference(s, chain, ('qpos', 'qvel'), r32(q), r32(v), r32(u))
+            want = ref(s, chain, ('qpos', 'qvel'), q, v, u)
+            alt = ref(s, chain, ('qpos', 'qvel'), r32(q), r32(v), r32(u))
             floor = {f: float(np.abs(alt[f] - want[f]).max() / np.abs(want[f]).max()) for f in alt}
             fields = ('qpos', 'qvel')
         print('float32 input floor: ' + ', '.join(f'{f} {e:.2e}' for f, e in floor.items()))
@@ -1028,12 +1056,12 @@ def check(mjcf, out, stage, count=64, k=0, oracle=None):
     elif stage in ('step', 'sptendon'):
         s = load(mjcf)
         s.opt.disableflags |= mujoco.mjtDisableBit.mjDSBL_CONTACT | mujoco.mjtDisableBit.mjDSBL_CONSTRAINT | mujoco.mjtDisableBit.mjDSBL_ACTUATION
-        want = reference(s, fn, tuple(f for f in fields if f not in ('qacc_euler', 'qpos_next')) + ('qpos', 'qvel'), q, v)
+        want = ref(s, fn, tuple(f for f in fields if f not in ('qacc_euler', 'qpos_next')) + ('qpos', 'qvel'), q, v)
         want['qacc_euler'] = (want.pop('qvel') - v) / m.opt.timestep
         want['qpos_next'] = want.pop('qpos')
         tendon_dense(s, want, q, v, count)
     else:
-        want = reference(m, fn, fields, q, v)
+        want = ref(m, fn, fields, q, v)
     if oracle and 'geom_xpos' in want:  # world geoms are constants: take the engine model's (the heightfield sits elsewhere than its twin plane)
         w = np.flatnonzero(m.geom_bodyid == 0)
         want['geom_xpos'].reshape(count, -1, 3)[:, w] = m.geom_pos[w]
