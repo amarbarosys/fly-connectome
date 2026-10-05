@@ -195,18 +195,24 @@ def parity():
     return ok
 
 
-def train(arm, iters, rec, seed=2):
-    """arm: learn, shuffle (random-sign teacher), frozen (no teaching), flip (mutant: teacher sign reversed)."""
+def train(arm, iters, rec, seed=2, stop_above=None):
+    """arm: learn, shuffle (random-sign teacher), frozen (no teaching), flip (mutant: teacher sign reversed).
+    frozen never changes a weight, so it is not trained (its after = its before, exactly). stop_above: a control arm ends
+    once its held-out error has been >= stop_above at 4 successive test points from batch 100 on (decided, not run out)."""
     idx, w, fb, ch = init(seed)
     net, rng, sign = GPUPathway(idx, w, fb, ch, seed=7), np.random.default_rng(seed + 1), np.random.default_rng(seed + 11)
     test = lambda s: float(np.median(np.concatenate([run(net, rec, P.speeds(np.random.default_rng(s + q), 6, 9, B), np.random.default_rng(s + q)) for q in range(4)])))
     before, curve, t0 = test(9), [], time.perf_counter()
-    for it in range(iters):
+    n = 0
+    for it in range(0 if arm == 'frozen' else iters):
+        n = it + 1
         run(net, rec, P.speeds(rng, 2, 5, B), rng, learn=arm != 'frozen', shuffle=sign if arm == 'shuffle' else None, flip=arm == 'flip')
         if it % 25 == 24:
             curve.append(round(test(11), 2)); print(arm, it + 1, curve[-1], f'{(time.perf_counter() - t0) / (it + 1):.2f} s/batch', flush=True)
+            if stop_above and it >= 99 and len(curve) >= 4 and min(curve[-4:]) >= stop_above:
+                break
     silenced = float(np.median(np.concatenate([run(net, rec, P.speeds(np.random.default_rng(9 + q), 6, 9, B), np.random.default_rng(9 + q), silence=True) for q in range(4)])))
-    out = {'before': before, 'after': test(9), 'silenced': silenced, 'curve': curve, 's_per_batch': (time.perf_counter() - t0) / iters}
+    out = {'before': before, 'after': test(9), 'silenced': silenced, 'curve': curve, 's_per_batch': (time.perf_counter() - t0) / max(n, 1), 'batches': n}
     net.close()
     return out
 
@@ -218,7 +224,8 @@ def main(cmd='check', iters='300'):
     e_hand = float(np.median(P.run(hand, rec, P.speeds(np.random.default_rng(9), 6, 9, 128), np.random.default_rng(9))))
     res, bad = {'hand': e_hand}, int(not ok)
     for seed in (2, 3, 4):  # paired arms: same init, task tape and noise per seed
-        r = {arm: train(arm, int(iters), rec, seed) for arm in ('learn', 'shuffle', 'frozen', 'flip')}
+        r = {'learn': train('learn', int(iters), rec, seed)}
+        r |= {arm: train(arm, int(iters), rec, seed, stop_above=3 * r['learn']['after']) for arm in ('shuffle', 'frozen', 'flip')}
         res[seed] = r
         L = r['learn']['after']
         checks = {'P1 learned < 1.5 hand': L < 1.5 * e_hand, 'P2 random-sign >= 2 learned': r['shuffle']['after'] >= 2 * L,
