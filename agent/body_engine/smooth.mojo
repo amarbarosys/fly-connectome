@@ -243,8 +243,8 @@ comptime ORKQ = NROW0  # RK4 scratch (INTEGRATOR 1 only): X0 qpos, then per stag
 comptime ORKV = ORKQ + NQ
 comptime ORKF = ORKV + 4 * NV
 comptime ORKW = ORKF + 4 * NV
-comptime NROW1 = ORKW + NV if INTEGRATOR == 1 else NROW0
-comptime OGAME = NROW1  # GAME: four float32 rows per animal, energy health stamina dead; all zero = not started
+comptime NROW2 = ORKW + NV if INTEGRATOR == 1 else NROW0
+comptime OGAME = NROW2  # GAME: four float32 rows per animal, energy health stamina dead; all zero = not started
 comptime NROW = OGAME + (4 if GAME else 0)
 comptime LI = row_major[NI]()
 comptime LF = row_major[NFL]()
