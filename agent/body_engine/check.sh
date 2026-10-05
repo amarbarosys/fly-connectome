@@ -48,6 +48,27 @@ if [ "$stage" = arena ]; then  # the original arena (box walls, stripes, beacons
   [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
   echo "PASS all arena checks"; exit 0
 fi
+if [ "$stage" = convexstep ]; then  # box and ellipsoid stones in a CHAINED engine run vs MuJoCo mj_step: fly (arena walls and stones) and spider (stones under its feet, model.stones)
+  # per body: (1) 20 steps in one launch, qpos and qvel vs 20 chained mj_step, states whose own MuJoCo trajectory moves under a 1e-6 perturbation dropped (model.check,
+  # at most half, listed); (2) the full one-step fields (ncon, qacc, qfrc_constraint, ...) on the states the engine reached after 3 steps (spider: 1), so forces are gated
+  # on engine-evolved contacts too. Bars are measured stated bars: trajectories REL 1e-3, forces REL 1e-4 (measured fly qfrc_constraint 1.1e-5, qacc_euler 2.9e-5 on engine-evolved states; arena's 3e-3 is its deep 0.03 mm contacts).
+  FLY=.work/agent/gpu-body-port/body-v2/body.xml
+  SP=$($M -c "from agent.body_engine.model import stones; print(stones('.work/agent/body_engine/spider-body/spider.xml', 'spider_stones.xml'))")
+  N=${CVS_COUNT:-64}  # states per body (CVS_COUNT=8: a short probe before the full run)
+  for B in $FLY $SP; do
+    n=$(basename $B .xml); S=; M_MIN=; EK=3; [ $B = $SP ] && { S=STONES=1; EK=1; M_MIN=CONVEX_MIN=$((N / 16)); }  # the spider's feet hover at the 1 mm margin: its stone contacts toggle within 3 steps, so its evolved states are 1 step on and keep few of them (stone contacts there are gated by the K=20 trajectory; the force check needs 1/16 of the states to hold one)
+    env CONVEX=1 REL=1e-3 $S $M -m agent.body_engine.model check $B $X/cvs-$n-20 actuated $N 20 || { echo "FAIL convexstep $n K=20"; fail=$((fail+1)); }
+    env CONVEX=1 REL=1e-3 $S SAVE_STATES=$X/cvs-$n.npz $M -m agent.body_engine.model check $B $X/cvs-$n-3 actuated $N $EK || { echo "FAIL convexstep $n K=$EK"; fail=$((fail+1)); }
+    env CONVEX=1 REL=${CVS_FREL:-1e-4} $S $M_MIN STATES=$X/cvs-$n.npz $M -m agent.body_engine.model check $B $X/cvs-$n-f actuated $N || { echo "FAIL convexstep $n forces on engine states"; fail=$((fail+1)); }
+  done
+  # the gate must fail with the EPA contact normal flipped, on the fly and on the spider (32 states each: a flipped normal moves every kept state)
+  ~/iTools/bin/mutant-check agent/body_engine/convex.mojo 's/return normalize3(st.x1 - st.x2)/return normalize3(st.x2 - st.x1)/' -- \
+    env CONVEX=1 REL=1e-3 $M -m agent.body_engine.model check $FLY $X/mutant actuated ${CVS_MUTANT_COUNT:-32} 20 || fail=$((fail+1))
+  ~/iTools/bin/mutant-check agent/body_engine/convex.mojo 's/return normalize3(st.x1 - st.x2)/return normalize3(st.x2 - st.x1)/' -- \
+    env CONVEX=1 REL=1e-3 STONES=1 $M -m agent.body_engine.model check $SP $X/mutant actuated ${CVS_MUTANT_COUNT:-32} 20 || fail=$((fail+1))
+  [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
+  echo "PASS all convexstep checks"; exit 0
+fi
 if [ "$stage" = cube ]; then  # closed 40 mm cube of planes (floor, 4 walls, ceiling; 330 pairs), states on every face
   C=$($M -c "from agent.body_engine.model import cube; print(cube('${BODY:-.work/agent/gpu-body-port/body-v2/body.xml}'))")
   $M -m agent.body_engine.model check $C $X/cube-$(basename ${BODY:-body.xml} .xml) actuated 64 || { echo "FAIL cube"; fail=$((fail+1)); }
