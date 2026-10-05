@@ -5,6 +5,18 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 stage=${1:-kinematics}; M=.venv/bin/python; X=.work/agent/body_engine; fail=0
+if [ "$stage" = convex ]; then  # GJK + EPA narrowphase (convex.mojo, CPU build) vs MuJoCo mj_collision, per pair kind: float64 exact, float32 bars
+  KINDS=${KINDS:-ellipsoid}
+  for kind in $KINDS; do
+    $M -m agent.body_engine.convex_check $kind 6000 f64 1e-9 1 || { echo "FAIL convex $kind f64"; fail=$((fail+1)); }
+    $M -m agent.body_engine.convex_check $kind 6000 f32 1e-4 1 || { echo "FAIL convex $kind f32"; fail=$((fail+1)); }
+  done
+  # the gate must fail with the EPA contact normal flipped
+  ~/iTools/bin/mutant-check agent/body_engine/convex.mojo 's/return normalize3(st.x1 - st.x2)/return normalize3(st.x2 - st.x1)/' -- \
+    $M -m agent.body_engine.convex_check ${KINDS%% *} 600 f64 1e-9 3 || fail=$((fail+1))
+  [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
+  echo "PASS all convex checks"; exit 0
+fi
 if [ "$stage" = cube ]; then  # closed 40 mm cube of planes (floor, 4 walls, ceiling; 330 pairs), states on every face
   C=$($M -c "from agent.body_engine.model import cube; print(cube('${BODY:-.work/agent/gpu-body-port/body-v2/body.xml}'))")
   $M -m agent.body_engine.model check $C $X/cube-$(basename ${BODY:-body.xml} .xml) actuated 64 || { echo "FAIL cube"; fail=$((fail+1)); }
