@@ -21,7 +21,7 @@ anatomy, cell types and web physics. Two datasets already carry passing checks
 | 27 KB | `rem2022/REMSleep.rmd`, `REM_retinaAnalysis.m` | same | analysis code; needs datasets S2/S3 |
 | 413 MB | `rem2022/supp/` | same, Europe PMC supplementaryFiles | 9 movies (sm01-09.mp4) + SI appendix PDF + fig 1; NO datasets S2/S3 (retinal-movement CSVs not in this bundle, PNAS hosts them separately); movies can feed the DLC project |
 
-## Papers (full text, `PMC*.txt` plain body, `PMC*.xml` JATS)
+## Papers (full text; `PMC*.txt` plain body, JATS, or BioC XML)
 
 | PMCID | Paper | Topic |
 |:------|:------|:------|
@@ -37,7 +37,19 @@ anatomy, cell types and web physics. Two datasets already carry passing checks
 | PMC3181266 | Girard 2011 PLoS One | peacock spider vibrational courtship |
 | book ch. | Winsor, Morehouse & Jakob 2023, Distributed Vision ch. 10 (doi 10.1007/978-3-031-23216-9_10) | spider vision review: eye roles, retina numbers, secondary->MB and principal->arcuate pathways; local PDF `~/Downloads/Distributed_Vision_Spiders.pdf`, text `winsor2023.txt`, notes `winsor2023-vision-spec.md` |
 
-Not open / not found: Homann 1928 (eye-patch roles; behaviour now covered by Land 1971 / Zurek & Nelson 2012 via Winsor 2023), Cross 2016 Portia detours (PMC4751061, no text),
+The first checked spider evidence packet is built by `tools/spider_corpus.py` into
+`.work/papers/spider/`. It imports these local texts without modifying the
+structural-plasticity corpus, records input and cleaned-text SHA-256 digests,
+deduplicates DOI/PMCID, keeps section-based passage locators, and excludes JATS
+reference lists. Portia detour planning (Cross & Jackson 2016, DOI
+10.1002/jeab.189, PMCID PMC4751061) is now locally available as an NCBI BioC
+full-text export. The index's prior “no text” note below is superseded for this
+paper. The checked count is 10 primary sources plus 2 reviews; Steck 2024
+(PMC11756594) remains unavailable and is not counted. See
+[`docs/plans/SPIDER_EVIDENCE.md`](plans/SPIDER_EVIDENCE.md) for packet scope and
+the reproducible gate.
+
+Not open / not found: Homann 1928 (eye-patch roles; behaviour now covered by Land 1971 / Zurek & Nelson 2012 via Winsor 2023),
 Steck 2024 (PMC11756594, no text), 2013 reversal learning, 2021 silk toughness.
 
 ## Notes and search logs
