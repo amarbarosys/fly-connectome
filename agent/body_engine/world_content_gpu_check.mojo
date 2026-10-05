@@ -1,4 +1,4 @@
-"""GPU plume sampler gate; formula source is agent/maps.py:104-120."""
+"""GPU plume sampler gate for the seed-0 scenario descriptor; formula source is agent/maps.py:104-120."""
 from std.gpu import global_idx
 from max.gpu.host import DeviceContext
 from layout import TileTensor, row_major, TensorLayout
@@ -45,8 +45,8 @@ def main() raises:
     var k = ctx.compile_function[sample_kernel[type_of(row_major[N]()), type_of(row_major[2 * N]())]]()
     ctx.enqueue_function(k, TileTensor(xs_d, row_major[N]()), TileTensor(ys_d, row_major[N]()),
                          TileTensor(out_d, row_major[2 * N]()), Int32(N),
-                         Float32(320), Float32(340), Int32(1), Float32(50),
-                         Float32(280), Float32(-360), Int32(1), Float32(50),
+                         Float32(305.47847), Float32(340.79147), Int32(1), Float32(50),
+                         Float32(281.63895), Float32(-369.33890), Int32(1), Float32(50),
                          grid_dim=1, block_dim=B)
     ctx.enqueue_copy(dst_buf=out_h, src_buf=out_d)
     ctx.synchronize()
