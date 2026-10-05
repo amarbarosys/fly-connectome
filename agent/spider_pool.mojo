@@ -10,7 +10,8 @@ per group, post-major: slot base + (j - post0) * row fan + k; a row is its incom
 k // segment fan), each with its own contiguous pre pool for regrowth.
 Per substep, launches in order: retina (Poisson at the motion rate of the receptor's patch and direction), then each
 layer (gather drive over its fan-in from this substep's spikes, Poisson noise kick, LIF, spike, trace). Random numbers:
-uniform(seed + stream, substep counter, column * NT + neuron), shiu_worker's counter hash.
+uniform(seed + stream, substep counter, column * NT + neuron), shiu_worker's counter hash. State arrays are
+neuron-major (address neuron * B + column) so the B columns of one neuron are contiguous for the spike gather.
 stdin commands (int32 code, then payload; replies on stdout):
   1 STEP  m (B x 12 float32 motion)  -> act of the motor neurons (B x NM uint16)
   2 TEACH err (B x 2 float32)          weights += ETA / B x sum_b (err_b . fb_j) [act_bj > 0, hidden layers only] ps_b[pre],
@@ -93,17 +94,17 @@ def retina(m: TM, ch: TC, spk: TNb, tr: TNf, ps: TNf, seed: UInt32, t: UInt32, d
     var i = Int(block_idx.x * block_dim.x + thread_idx.x)
     if i >= B * NR:
         return
-    var b = i // NR
-    var k = i % NR
+    var b = i % B  # neuron-major state [neuron][column]: a wave holds the B columns of one neuron
+    var k = i // B
+    var e = k * B + b
     var c = Int(ch[k])
     if c < 0:
-        spk[b * NT + k] = 0
-        trace(tr, ps, b * NT + k, 0, dk)
+        spk[e] = 0
+        trace(tr, ps, e, 0, dk)
         return
     var v = m[b * 12 + c // 2]
     var rate = GAIN * SUB * (max(v, Float32(0)) if c % 2 == 0 else max(-v, Float32(0)))
-    var e = b * NT + k
-    var s = UInt8(1) if uniform(seed, t, UInt32(e)) < rate else UInt8(0)
+    var s = UInt8(1) if uniform(seed, t, UInt32(b * NT + k)) < rate else UInt8(0)  # hash entry: column * NT + neuron
     spk[e] = s
     trace(tr, ps, e, s, dk)
 
@@ -114,14 +115,14 @@ def layer(idx: TSi, w: TSf, u: TNf, refr: TNb, spk: TNb, act: TNa, tr: TNf, ps: 
     var i = Int(block_idx.x * block_dim.x + thread_idx.x)
     if i >= B * npost:
         return
-    var b = i // npost
-    var j = i % npost
-    var e = b * NT + post0 + j
+    var b = i % B
+    var j = i // B
+    var e = (post0 + j) * B + b
     var drive = Float32(0)
     var s0 = sbase + j * fan
     for k in range(fan):
-        drive += w[s0 + k] * Float32(spk[b * NT + Int(idx[s0 + k])])
-    var noise = KICK if uniform(seed + 1, t, UInt32(e)) < P_NOISE else Float32(0)
+        drive += w[s0 + k] * Float32(spk[Int(idx[s0 + k]) * B + b])  # w, idx uniform across the wave; spk contiguous
+    var noise = KICK if uniform(seed + 1, t, UInt32(b * NT + post0 + j)) < P_NOISE else Float32(0)
     var s = UInt8(0)
     if refr[e] > 0:
         refr[e] = refr[e] - 1
@@ -148,8 +149,8 @@ def teach(idx: TSi, w: TSf, act: TNa, ps: TNf, fb: TF, err: TE, post0_: Int32, n
     var pre = Int(idx[sbase + i])
     var acc = Float32(0)
     for b in range(B):
-        if gate == 0 or act[b * NT + g] > 0:  # motor layer ungated (as the pool test's w_out): a silent motor can recover
-            acc += (err[2 * b] * fb[2 * g] + err[2 * b + 1] * fb[2 * g + 1]) * ps[b * NT + pre]
+        if gate == 0 or act[g * B + b] > 0:  # motor layer ungated (as the pool test's w_out): a silent motor can recover
+            acc += (err[2 * b] * fb[2 * g] + err[2 * b + 1] * fb[2 * g + 1]) * ps[pre * B + b]
     w[sbase + i] = min(max(w[sbase + i] + ETA * Float32(FREF) / Float32(fan) * acc / Float32(B), -WMAX), WMAX)  # bounded every step, as the CPU slice
 
 
@@ -298,7 +299,7 @@ def main() raises:
             var op = out_h.unsafe_ptr()
             for b in range(B):
                 for j in range(NM):
-                    op[b * NM + j] = ap[b * NT + OUT0 + j]
+                    op[b * NM + j] = ap[(OUT0 + j) * B + b]
             if not io(1, out_h.unsafe_ptr().unsafe_bitcast[UInt8](), B * NM * 2, True):
                 return
         elif code.unsafe_ptr()[] == 2:

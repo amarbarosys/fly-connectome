@@ -43,7 +43,7 @@ else:
 OUT0 = NT - NM  # the eye motors are the last NM neurons (slice layer 3; scaffold AMm, both sides)
 S, REFR, SUB, V_TH, KICK, GAIN, P_NOISE, ETA = 20, 5, 5e-4, 7.0, np.float32(0.275 * 250), 400.0, np.float32(30 * 5e-4), 0.01
 THETA, WMAX, FRAC = 0.02, 0.3, 0.3
-DIR = ROOT / '.work/agent/spider/pool-gpu'
+DIR = ROOT / f'.work/agent/spider/pool-gpu/{os.getpid()}'  # per process: concurrent runs (slice vs scaffold) must not share idx.bin
 MOJO = Path.home() / 'iTools/bin/mojo-cached'
 
 
@@ -139,9 +139,12 @@ def build():
     src = ROOT / 'agent/spider_pool.mojo'
     tag = hashlib.sha1(src.read_bytes() + ' '.join(flags).encode()).hexdigest()[:10]  # a later edit builds a new file
     binary = ROOT / f'.work/agent/spider/build/spider_pool_{tag}'
+    if binary.is_file():
+        return binary
     binary.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run([str(MOJO), 'build', *flags, str(src), '-o', str(binary) + '.tmp'], check=True, capture_output=True)
-    os.replace(str(binary) + '.tmp', binary)
+    tmp = f'{binary}.{os.getpid()}.tmp'  # concurrent runs build the same tag: each its own temp, last rename wins
+    subprocess.run([str(MOJO), 'build', *flags, str(src), '-o', tmp], check=True, capture_output=True)
+    os.replace(tmp, binary)
     return binary
 
 
