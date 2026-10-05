@@ -5,6 +5,46 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 stage=${1:-kinematics}; M=.venv/bin/python; X=.work/agent/body_engine; fail=0
+if [ "$stage" = convex ]; then  # GJK + EPA narrowphase (convex.mojo, CPU build) vs MuJoCo mj_collision, per pair kind: float64 exact, float32 bars
+  KINDS=${KINDS:-ellipsoid box}
+  for kind in $KINDS; do
+    $M -m agent.body_engine.convex_check $kind 6000 f64 1e-9 1 || { echo "FAIL convex $kind f64"; fail=$((fail+1)); }
+    $M -m agent.body_engine.convex_check $kind 6000 f32 1e-4 1 || { echo "FAIL convex $kind f32"; fail=$((fail+1)); }
+  done
+  # the gate must fail with the EPA contact normal flipped
+  ~/iTools/bin/mutant-check agent/body_engine/convex.mojo 's/return normalize3(st.x1 - st.x2)/return normalize3(st.x2 - st.x1)/' -- \
+    $M -m agent.body_engine.convex_check ellipsoid 600 f64 1e-9 3 || fail=$((fail+1))
+  # box-mesh only: the gate must fail with the perturbation search's negative tilt dropped (contact count)
+  case " $KINDS " in *" box "*) ~/iTools/bin/mutant-check agent/body_engine/convex.mojo 's/var sgn = S(-1) if angle_id == 0 else S(1)/var sgn = S(1)/' -- \
+    $M -m agent.body_engine.convex_check box 600 f64 1e-9 3 || fail=$((fail+1));; esac
+  [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
+  echo "PASS all convex checks"; exit 0
+fi
+if [ "$stage" = hfield ]; then  # exact heightfield contact (mjc_ConvexHField: GJK + EPA per cell prism, convex.mojo, CPU build) on a bumpy seeded terrain vs MuJoCo's own hfield geom
+  $M -m agent.body_engine.hfield_check 6000 f64 1 || { echo "FAIL hfield f64"; fail=$((fail+1)); }
+  $M -m agent.body_engine.hfield_check 6000 f32 1 || { echo "FAIL hfield f32"; fail=$((fail+1)); }
+  # the gate must fail with the contact normal flipped, and with the prism height test inverted (cells under the mesh skipped)
+  ~/iTools/bin/mutant-check agent/body_engine/convex.mojo 's/return normalize3(st.x1 - st.x2)/return normalize3(st.x2 - st.x1)/' -- \
+    $M -m agent.body_engine.hfield_check 600 f64 3 || fail=$((fail+1))
+  ~/iTools/bin/mutant-check agent/body_engine/convex.mojo 's/if o1.prism\[3\]\[2\] < zmin and/if o1.prism[3][2] > zmin and/' -- \
+    $M -m agent.body_engine.hfield_check 600 f64 3 || fail=$((fail+1))
+  [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
+  echo "PASS all hfield checks"; exit 0
+fi
+if [ "$stage" = arena ]; then  # the original arena (box walls, stripes, beacons; ellipsoid stones): every pair incl. box-mesh and ellipsoid-mesh (GJK + EPA), states moved into walls and stones
+  B=.work/agent/gpu-body-port/body-v2/body.xml
+  # bar REL=3e-3 (default 1e-5), measured: qacc 7.1e-4, qacc_euler 2.0e-3 (3 x the float32 input floor is 3.5e-4 / 1.5e-3). `row_diag.py` on the same
+  # states: convex contacts' aref within 6e-5 of the state's largest row, plane contacts 1.3e-4, ncon equal in all 64 states: the rest is the
+  # engine's float32 solver on states with a 0.03 mm deep wall or stone contact, not the convex pairs. The gate must fail with the convex normal flipped.
+  for st in contact actuated; do
+    CONVEX=1 REL=3e-3 $M -m agent.body_engine.model check $B $X/arena-$st $st 64 || { echo "FAIL arena $st"; fail=$((fail+1)); }
+  done
+  # the gate must fail with the convex contact normal flipped
+  ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo 's/var normal = cs.normal\[count\].cast\[DType.float32\]()/var normal = -cs.normal[count].cast[DType.float32]()/' -- \
+    env CONVEX=1 REL=3e-3 $M -m agent.body_engine.model check $B $X/mutant contact 64 || fail=$((fail+1))
+  [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
+  echo "PASS all arena checks"; exit 0
+fi
 if [ "$stage" = cube ]; then  # closed 40 mm cube of planes (floor, 4 walls, ceiling; 330 pairs), states on every face
   C=$($M -c "from agent.body_engine.model import cube; print(cube('${BODY:-.work/agent/gpu-body-port/body-v2/body.xml}'))")
   $M -m agent.body_engine.model check $C $X/cube-$(basename ${BODY:-body.xml} .xml) actuated 64 || { echo "FAIL cube"; fail=$((fail+1)); }
@@ -13,6 +53,21 @@ if [ "$stage" = cube ]; then  # closed 40 mm cube of planes (floor, 4 walls, cei
     $M -m agent.body_engine.model check $C $X/mutant actuated 64 || fail=$((fail+1))
   [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
   echo "PASS all cube checks"; exit 0
+fi
+if [ "$stage" = terrain_exact ]; then  # exact heightfield contact in the step (GJK + EPA per cell prism on the terrain function) on bumpy seeded terrain vs MuJoCo's OWN hfield geom (not the plane twin), fly and spider
+  # bar REL=4e-4 (default 1e-5): the engine takes node heights from the float32 terrain function, MuJoCo from its float32 table
+  # (hfield_check ... func: 1e-7 mm apart, 1e-4 of a contact depth); measured fly qacc 2.1e-4, others <= 3.4e-5. The gate must fail with the contact normal flipped
+  for B in ${BODY:-.work/agent/gpu-body-port/body-v2/body.xml .work/agent/body_engine/spider-body/spider.xml}; do
+    N=$($M -c "from agent.body_engine.model import terrain; print(terrain('$B', (0, 0, 0.3, 8.0, 4, 1, 2.0, 0.5))[0])")
+    for st in contact actuated; do
+      HFEXACT=1 REL=4e-4 $M -m agent.body_engine.model check $N $X/terrain-exact-$(basename $B .xml)-$st $st 64 || { echo "FAIL terrain_exact $(basename $B .xml) $st"; fail=$((fail+1)); }
+    done
+  done
+  N=$($M -c "from agent.body_engine.model import terrain; print(terrain('.work/agent/gpu-body-port/body-v2/body.xml', (0, 0, 0.3, 8.0, 4, 1, 2.0, 0.5))[0])")
+  ~/iTools/bin/mutant-check agent/body_engine/convex.mojo 's/return normalize3(st.x1 - st.x2)/return normalize3(st.x2 - st.x1)/' -- \
+    env HFEXACT=1 REL=4e-4 $M -m agent.body_engine.model check $N $X/mutant contact 64 || fail=$((fail+1))
+  [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
+  echo "PASS all terrain_exact checks"; exit 0
 fi
 if [ "$stage" = terrain ]; then  # heightfield ground (tangent plane) on a tilted ramp vs MuJoCo on the same tilted plane
   for B in ${BODY:-.work/agent/gpu-body-port/body-v2/body.xml .work/agent/body_engine/spider-body/spider.xml}; do

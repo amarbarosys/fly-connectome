@@ -6,16 +6,15 @@
 # Correctness is check.sh step's job; run it first (a speed number from an unchecked build is not reported).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-mode=$1; mjcf=$2; stage=${3:-5}; X=.work/agent/body_engine/bench/$(basename "$mjcf" .xml)-$stage; fail=0
-for n in 1024 16384 65536; do
+mode=$1; mjcf=$2; stage=${3:-5}; X=.work/agent/body_engine/bench/$(basename "$mjcf" .xml)-$stage${CONVEX:+-convex}; fail=0
+for n in ${NS:-1024 16384 65536}; do
   d=$X/$n; mkdir -p "$d"
   if [ "$mode" = build ]; then
     .venv/bin/python -c "
-import sys, numpy as np
+import os, sys, numpy as np
 from agent.body_engine.model import export, standing, FEET, VSCALE
 from mj_oracle import states, velocities
-m = export('$mjcf', '$d', FEET if $stage >= 6 else None, $stage >= 7)
-import os
+m = export('$mjcf', '$d', FEET if $stage >= 6 else None, $stage >= 7, bool(os.environ.get('CONVEX')))
 if not os.path.exists('$d/ctrl.bin'):  # states are seeded: reuse them, the export is always fresh
     q, v = standing(m, $n) if $stage >= 6 else (states(m, $n), velocities(m, $n, scale=VSCALE))
     q.astype(np.float32).T.copy().tofile('$d/qpos.bin')
