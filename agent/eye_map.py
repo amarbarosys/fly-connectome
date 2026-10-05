@@ -9,6 +9,9 @@ anterior, 4.6 deg per column, each eye centred 55 deg lateral (azimuth + = left)
 non-columnar visual neuron's receptive-field centre is the synapse-weighted mean direction of its
 column-assigned inputs (one hop). Output .work/agent/shiu/eye-map-mcns.npz: az, el (deg, NaN unknown).
 """
+import os
+import sys
+
 import numpy as np
 import pandas as pd
 
@@ -65,6 +68,8 @@ def build():
 
 def main():
     a, az, el, column, pr = build()
+    if os.environ.get('MUTANT') == 'mirror':
+        az = -az
     t = a['type'].fillna('').to_numpy()
     soma = a['somaSide'].fillna('').str[:1].str.upper().to_numpy()
     print(f"photoreceptors with a column {int((pr & column).sum())}/{int(pr.sum())}")
@@ -72,12 +77,22 @@ def main():
         m = pr & column & (np.sign(az) == (1 if s == 'L' else -1))
         print(f"  eye {s}: azimuth {np.nanmin(az[m]):.0f}..{np.nanmax(az[m]):.0f}, elevation {np.nanmin(el[m]):.0f}..{np.nanmax(el[m]):.0f} deg, "
               f"{int(m.sum())} photoreceptors")
+    side = {}
     for kind in ('LC4', 'LPLC2', 'LC9', 'LC31a'):
         m = t == kind
         ok = m & ~np.isnan(az)
         agree = np.mean(np.sign(az[ok]) == np.where(soma[ok] == 'L', 1, -1)) if ok.any() else float('nan')
+        side[kind] = agree
         print(f"  {kind:6s} {int(ok.sum())}/{int(m.sum())} with a field; azimuth sign matches soma side {agree:.2f}; "
               f"az {np.nanmin(az[ok]):.0f}..{np.nanmax(az[ok]):.0f}")
+    ok = [('photoreceptors placed >= 3000', int((pr & column).sum()) >= 3000),
+          ('LC4 field on soma side >= 0.95', side['LC4'] >= 0.95),
+          ('LPLC2 field on soma side >= 0.90', side['LPLC2'] >= 0.90)]
+    for k, v in ok:
+        print(('PASS ' if v else 'FAIL ') + k)
+    if not all(v for _, v in ok):
+        sys.exit('FAIL eye map')
+    print('PASS eye map')
 
 
 if __name__ == '__main__':
