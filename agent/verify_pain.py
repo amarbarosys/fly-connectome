@@ -11,6 +11,7 @@ three times B's, and the reward plane is untouched (every reward factor still 1.
 (avoid within 20% of twins) was the first instrument and failed at 24%: avoid MBONs lose input from the
 depressed approach side through the circuit, so spikes cannot isolate the plane; factors can.
 """
+import os
 import json
 import sys
 
@@ -73,7 +74,7 @@ def main():
 
     learners = np.arange(flies) < flies // 2
     sniff(only[0])
-    live.reward(np.zeros(flies, np.float32), np.where(learners, 1, 0).astype(np.float32))
+    live.reward(np.zeros(flies, np.float32), np.where(learners, 0 if os.environ.get("MUTANT") else 1, 0).astype(np.float32))  # MUTANT: no punishment
     after_a, after_b = sniff(only[0]), sniff(only[1])
     k = len(kc)
     f = live.factors()

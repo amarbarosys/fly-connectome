@@ -9,6 +9,7 @@ noise. (b) Learners (dopamine 1) and twins (0) sniff A, get rewarded, then sniff
 spikes do fall too (KCs shared with A lose their factor), which is generalisation, not an error.
 (c) Valence at 30, 50, 100 and 200 ms, to choose the loop window.
 """
+import os
 import json
 import sys
 
@@ -60,7 +61,7 @@ def main():
 
     learners = np.arange(flies) < flies // 2
     before = sniff(only[0])
-    live.reward(np.where(learners, 1, 0).astype(np.float32))
+    live.reward(np.where(learners, 0 if os.environ.get("MUTANT") else 1, 0).astype(np.float32))  # MUTANT: no reward
     after_a, after_b = sniff(only[0]), sniff(only[1])
     live.close()
     valence = lambda ap, av: (ap - av) / np.maximum(ap + av, 1)
