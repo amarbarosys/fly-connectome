@@ -1,0 +1,18 @@
+# Explicit game-layer constants. Resource events use this scenario's source ID;
+# they do not imply physical mouth contact or ingestion.
+[game]
+passive_death = true
+energy_initial = 1.0
+health_initial = 1.0
+stamina_initial = 1.0
+basal_drain = 0.001
+work_drain = 0.01
+tagged_hazard_damage = 0.25
+health_regen = 0.0
+rest_recovery = 0.02
+resource_energy = 0.2
+
+[[resource]]
+id = "survival-cache"
+remaining = 3
+trigger = "game_event"
