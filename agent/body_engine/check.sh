@@ -98,6 +98,19 @@ if [ "$stage" = spiderlink ]; then  # brain<->body link on the spider (docs/plan
   [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
   echo "PASS all spiderlink checks"; exit 0
 fi
+if [ "$stage" = fluid ]; then  # Flybody flight model: mj_fluid (ellipsoid wings + inertia boxes) inside qfrc_passive, wing velocities up to flapping rate
+  R=~/Projects/science/fly-connectome; FL=${FLIGHT:-$R/.work/flight-body}
+  [ -f $FL/flight.xml ] || $R/.work/neural-flies/flight-venv/bin/python agent/body_engine/models/flight_export.py $FL
+  VSCALE=${VSCALE:-100} $M -m agent.body_engine.model check $FL/flight.xml $X/flight rne 64 || { echo "FAIL flight fluid"; fail=$((fail+1)); }
+  # each mutant must fail: Kutta lift sign, Magnus sign, added-mass sign, inertia-box drag sign
+  for mut in 's/    fo += cross(circ, v)/    fo -= cross(circ, v)/' 's/    fo += cross(w, v) \* (magnus/    fo -= cross(w, v) * (magnus/' \
+             's/    var fo = cross(lin_mom, w)/    var fo = -cross(lin_mom, w)/' 's/        fr\[3\] -= 0.5 \* rho/        fr[3] += 0.5 * rho/'; do
+    ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo "$mut" -- \
+      env VSCALE=${VSCALE:-100} $M -m agent.body_engine.model check $FL/flight.xml $X/mutant rne 64 || fail=$((fail+1))
+  done
+  [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
+  echo "PASS all fluid checks"; exit 0
+fi
 B=${BODY:-.work/agent/gpu-body-port/body-v2/body.xml}  # BODY=path checks another MJCF (e.g. the spider from models/spider.py)
 $M -m agent.body_engine.model check $B $X/body-$(basename $B .xml) "$stage" 64 || { echo "FAIL $(basename $B .xml) $stage"; fail=$((fail+1)); }
 if [ "$stage" = contact ] || [ "$stage" = actuated ]; then  # plane-mesh foot pairs; the spider test body has none

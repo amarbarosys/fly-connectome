@@ -82,7 +82,16 @@ comptime MTOH = HADR + 2 * NV + NH
 comptime CITER = MTOH + NC
 comptime NU = get_defined_int["NU", 0]()
 comptime CACT = CITER + 3  # STAGE 7 (model.py actuators): per actuator trntype, dof or body, ctrllimited, forcelimited, qpos address
-comptime NI = CACT + 5 * NU if STAGE >= 7 else (CITER + 3 if STAGE >= 6 else NI0)
+comptime NI1 = CACT + 5 * NU if STAGE >= 7 else (CITER + 3 if STAGE >= 6 else NI0)
+# model.py fluid() then tendons(), appended last: fluid ints per ellipsoid row (body, geom) then the inertia-box bodies
+comptime NFLROW = get_defined_int["NFLROW", -1]()  # -1: no fluid block (walking models: the code below folds out)
+comptime NFLBOX = get_defined_int["NFLBOX", 0]()
+comptime NFLUID = NFLROW >= 0
+comptime FLI = NI1
+comptime NTEN = get_defined_int["NTEN", 0]()  # fixed tendons; tendon ints: wrap start and count per tendon, then each wrap's dof, then its qpos address
+comptime NWRAP = get_defined_int["NWRAP", 0]()
+comptime TNI = FLI + (2 * NFLROW + NFLBOX if NFLUID else 0)
+comptime NI = TNI + 2 * NTEN + 2 * NWRAP
 # mf.bin: body_pos, body_quat, jnt_pos, jnt_axis, qpos0, body_ipos, body_iquat, geom_pos, geom_quat
 comptime BPOS = 0
 comptime BQUAT = 3 * NB
@@ -110,7 +119,10 @@ comptime COPT = CVERT + 3 * NHV
 comptime HFG = get_defined_int["HFGEOM", -1]()  # heightfield ground geom (model.py feet), else none
 comptime HFO = COPT + 5  # world.mojo params (NP)
 comptime CACF = HFO + (NP if HFG >= 0 else 0)  # STAGE 7: per actuator gain, bias 0-2, ctrlrange 2, forcerange 2, gear
-comptime NFL = CACF + 9 * NU if STAGE >= 7 else (CACF if STAGE >= 6 else NFL0)
+comptime NFL1 = CACF + 9 * NU if STAGE >= 7 else (CACF if STAGE >= 6 else NFL0)
+comptime FLF = NFL1  # fluid floats: density, viscosity, wind 3, then per ellipsoid row semi-axes 3 and the 12 geom_fluid coefs
+comptime TNF = FLF + (5 + 15 * NFLROW if NFLUID else 0)  # tendon floats: wrap coefs, then stiffness, damping, lengthspring 2 per tendon
+comptime NFL = TNF + NWRAP + 4 * NTEN
 # smooth.bin rows (per animal): xpos, xquat, xipos of bodies 1.., geom_xpos, xanchor, xaxis
 comptime OXQ = 3 * (NB - 1)
 comptime OXI = 7 * (NB - 1)
@@ -143,7 +155,8 @@ comptime OCFRC = OCACC + 6 * NB
 comptime NSLOT = get_defined_int["NSLOT", 0]()  # contact slots: 3 per plane-mesh pair (MuJoCo maxplanemesh), 1 per sphere pair
 comptime NJE = get_defined_int["NJE", 0]()  # Jacobian entries: 4 rows x slots x chain length, summed over pairs
 comptime NEFC = 4 * NSLOT  # pyramidal condim 3: 4 rows per contact
-comptime OVALID = OCFRC + 6 * NB  # STAGE 6 scratch: slot valid, per row D aref jar jv state, J rows, solver vectors, H
+comptime OFLW = OCFRC + 6 * NB  # NFLUID scratch: fluid wrench per body about its root's subtree_com
+comptime OVALID = OFLW + (6 * NB if NFLUID else 0)  # STAGE 6 scratch: slot valid, per row D aref jar jv state, J rows, solver vectors, H
 comptime OD = OVALID + NSLOT
 comptime OAREF = OD + NEFC
 comptime OJAR = OAREF + NEFC
@@ -167,7 +180,7 @@ comptime OAC = OWC + NJE
 comptime OACT = OAC + 10 * NSLOT  # valid slots: count, then their ids ascending (row loops skip the ~95 % empty)
 comptime OPART = OACT + 1 + NSLOT  # WAVE: per-lane partial sums, 3 x LN
 comptime OWARM = OPART + 3 * LN  # K > 0: last step's qacc (MuJoCo qacc_warmstart), persists across launches
-comptime NROW = OWARM + NV if STAGE >= 6 else (OCFRC + 6 * NB if STAGE >= 4 else NOUT)
+comptime NROW = OWARM + NV if STAGE >= 6 else (OVALID if STAGE >= 4 else NOUT)
 comptime LI = row_major[NI]()
 comptime LF = row_major[NFL]()
 comptime LQ = row_major[NQ * F]()
@@ -401,6 +414,150 @@ def mulM(mi: TI, res: TO, f: Int, Y: Int, X: Int):
         res[(Y + i) * F + f] += acc
 
 
+@always_inline
+def pow2(a: Float32) -> Float32:
+    return a * a
+
+
+@always_inline
+def pow4(a: Float32) -> Float32:
+    return (a * a) * (a * a)
+
+
+@always_inline
+def local_wrench(mi: TI, mf: TF, res: TO, f: Int, b: Int, p: V3, q: Q4) -> S6:
+    """MuJoCo mj_objectVelocity(flg_local = 1) of the frame (p, q) fixed to body b, minus wind: mju_transformSpatial of cvel
+    from the root's subtree_com to p, rotated into the frame (engine_support.c, engine_util_spatial.c:478)."""
+    var cv = get6(res, f, OCV + 6 * (b - 1))
+    var r = Int(mi[ROOT + b])
+    var dif = p - V3(get(res, f, OSC + 3 * r), get(res, f, OSC + 3 * r + 1), get(res, f, OSC + 3 * r + 2), 0)
+    var w = V3(cv[0], cv[1], cv[2], 0)
+    var v = V3(cv[3], cv[4], cv[5], 0) - cross(dif, w) - m3(mf, FLF + 2)
+    var qi = Q4(q[0], -q[1], -q[2], -q[3])
+    var lw = rot(qi, w)
+    var lv = rot(qi, v)
+    return S6(lw[0], lw[1], lw[2], lv[0], lv[1], lv[2], 0, 0)
+
+
+@always_inline
+def add_wrench(mi: TI, res: TO, f: Int, b: Int, p: V3, q: Q4, lfrc: S6):
+    """Fold mj_applyFT: the local frame wrench rotated to world, taken to the root's subtree_com, added to the weld body's
+    row. qfrc[v] = cdof[v] . W is the J'F + J'T chain walk, because cdof is a motion vector about that same com."""
+    var bw = b
+    while bw > 0 and mi[JNTNUM + bw] == 0:
+        bw = Int(mi[PARENT + bw])
+    if bw == 0:
+        return
+    var r = Int(mi[ROOT + b])
+    var tq = rot(q, V3(lfrc[0], lfrc[1], lfrc[2], 0))
+    var fo = rot(q, V3(lfrc[3], lfrc[4], lfrc[5], 0))
+    tq += cross(p - V3(get(res, f, OSC + 3 * r), get(res, f, OSC + 3 * r + 1), get(res, f, OSC + 3 * r + 2), 0), fo)
+    put6(res, f, OFLW + 6 * bw, get6(res, f, OFLW + 6 * bw) + S6(tq[0], tq[1], tq[2], fo[0], fo[1], fo[2], 0, 0))
+
+
+def inertia_box(mi: TI, mf: TF, res: TO, f: Int, b: Int):
+    """MuJoCo mj_inertiaBoxFluidModel (engine_passive.c:1054): box from the principal inertia, viscous sphere drag plus
+    quadratic drag, about the body's centre of mass in the body frame."""
+    var rho = mf[FLF]
+    var mu = mf[FLF + 1]
+    var m = mf[MASS + b]
+    var I = m3(mf, INERTIA + 3 * b)
+    var bx = V3(sqrt(max(Float32(1e-15), I[1] + I[2] - I[0]) / m * 6), sqrt(max(Float32(1e-15), I[0] + I[2] - I[1]) / m * 6),
+                sqrt(max(Float32(1e-15), I[0] + I[1] - I[2]) / m * 6), 0)
+    var bd = body(res, f, b)
+    var p = V3(get(res, f, OXI + 3 * (b - 1)), get(res, f, OXI + 3 * (b - 1) + 1), get(res, f, OXI + 3 * (b - 1) + 2), 0)
+    var q = mul(bd[1], m4(mf, IQUAT + 4 * b))  # ximat is the inertial frame's rotation (mj_objectVelocity, engine_core_util.c:827)
+    var lv = local_wrench(mi, mf, res, f, b, p, q)
+    var fr = S6(0)
+    if mu > 0:
+        var diam = (bx[0] + bx[1] + bx[2]) / 3
+        for k in range(3):
+            fr[k] = -3.14159265358979 * diam * diam * diam * mu * lv[k]
+            fr[3 + k] = -3 * 3.14159265358979 * diam * mu * lv[3 + k]
+    if rho > 0:
+        fr[3] -= 0.5 * rho * bx[1] * bx[2] * abs(lv[3]) * lv[3]
+        fr[4] -= 0.5 * rho * bx[0] * bx[2] * abs(lv[4]) * lv[4]
+        fr[5] -= 0.5 * rho * bx[0] * bx[1] * abs(lv[5]) * lv[5]
+        fr[0] -= rho * bx[0] * (pow4(bx[1]) + pow4(bx[2])) * abs(lv[0]) * lv[0] / 64
+        fr[1] -= rho * bx[1] * (pow4(bx[0]) + pow4(bx[2])) * abs(lv[1]) * lv[1] / 64
+        fr[2] -= rho * bx[2] * (pow4(bx[0]) + pow4(bx[1])) * abs(lv[2]) * lv[2] / 64
+    add_wrench(mi, res, f, b, p, q, fr)
+
+
+def ellipsoid(mi: TI, mf: TF, res: TO, f: Int, row: Int):
+    """MuJoCo mj_ellipsoidFluidModel for one geom (engine_passive.c:1114) with mj_addedMassForces (:1176) and
+    mj_viscousForces (:1230): added mass, Magnus and Kutta lift, blunt/slender drag, viscous resistance."""
+    var rho = mf[FLF]
+    var mu = mf[FLF + 1]
+    var c = FLF + 5 + 15 * row
+    var s = m3(mf, c)
+    var coef = mf[c + 3]
+    var blunt = mf[c + 4]
+    var slender = mf[c + 5]
+    var angd = mf[c + 6]
+    var kutta = mf[c + 7]
+    var magnus = mf[c + 8]
+    var vm = m3(mf, c + 9)
+    var vi = m3(mf, c + 12)
+    var b = Int(mi[FLI + 2 * row])
+    var g = Int(mi[FLI + 2 * row + 1])
+    var bd = body(res, f, b)
+    var q = mul(bd[1], m4(mf, GQUAT + 4 * g))
+    var p = V3(get(res, f, OG + 3 * g), get(res, f, OG + 3 * g + 1), get(res, f, OG + 3 * g + 2), 0)
+    var lv = local_wrench(mi, mf, res, f, b, p, q)
+    var w = V3(lv[0], lv[1], lv[2], 0)
+    var v = V3(lv[3], lv[4], lv[5], 0)
+    # mj_addedMassForces
+    var lin_mom = rho * vm * v
+    var ang_mom = rho * vi * w
+    var tq = cross(lin_mom, v) + cross(ang_mom, w)
+    var fo = cross(lin_mom, w)
+    # mj_viscousForces
+    var volume = 4.0 / 3.0 * 3.14159265358979 * s[0] * s[1] * s[2]
+    var dmax = max(max(s[0], s[1]), s[2])
+    var dmin = min(min(s[0], s[1]), s[2])
+    var dmid = s[0] + s[1] + s[2] - dmax - dmin
+    var amax = 3.14159265358979 * dmax * dmid
+    fo += cross(w, v) * (magnus * rho * volume)
+    var pden = pow4(s[1] * s[2]) * pow2(v[0]) + pow4(s[2] * s[0]) * pow2(v[1]) + pow4(s[0] * s[1]) * pow2(v[2])
+    var pnum = pow2(s[1] * s[2] * v[0]) + pow2(s[2] * s[0] * v[1]) + pow2(s[0] * s[1] * v[2])
+    var aproj = 3.14159265358979 * sqrt(pden / max(Float32(1e-15), pnum))
+    var nrm = V3(pow2(s[1] * s[2]) * v[0], pow2(s[2] * s[0]) * v[1], pow2(s[0] * s[1]) * v[2], 0)
+    var vn = sqrt((v * v).reduce_add())
+    var cosa = pnum / max(Float32(1e-15), vn * pden)
+    var circ = cross(nrm, v) * (kutta * rho * cosa * aproj)
+    fo += cross(circ, v)
+    var dsph = 2.0 / 3.0 * (s[0] + s[1] + s[2])
+    var imax = 8.0 / 15.0 * 3.14159265358979 * dmid * pow4(dmax)
+    var mom = V3(0)
+    for k in range(3):
+        var ii = 8.0 / 15.0 * 3.14159265358979 * s[k] * pow4(max(s[(k + 1) % 3], s[(k + 2) % 3]))
+        mom[k] = w[k] * (angd * ii + slender * (imax - ii))
+    var drag_lin = mu * 3 * 3.14159265358979 * dsph + rho * vn * (aproj * blunt + slender * (amax - aproj))
+    var drag_ang = mu * 3.14159265358979 * dsph * dsph * dsph + rho * sqrt((mom * mom).reduce_add())
+    tq -= drag_ang * w
+    fo -= drag_lin * v
+    add_wrench(mi, res, f, b, p, q, S6(tq[0], tq[1], tq[2], fo[0], fo[1], fo[2], 0, 0) * coef)
+
+
+def fluid(mi: TI, mf: TF, res: TO, f: Int):
+    """MuJoCo mj_fluid (engine_passive.c:842) into qfrc_passive: every body with mass takes the ellipsoid model if any of its
+    geoms has one (the exported rows), else the inertia box. Wrenches go to one row per weld body, are summed leaf to root
+    like mj_rne's cfrc, and qfrc_fluid[v] = cdof[v] . W[body of v]."""
+    for b in range(NB):
+        put6(res, f, OFLW + 6 * b, S6(0))
+    for r in range(NFLROW):
+        ellipsoid(mi, mf, res, f, r)
+    for k in range(NFLBOX):
+        inertia_box(mi, mf, res, f, Int(mi[FLI + 2 * NFLROW + k]))
+    for i in range(NB - 1, 0, -1):
+        var p = Int(mi[PARENT + i])
+        if p > 0:
+            put6(res, f, OFLW + 6 * p, get6(res, f, OFLW + 6 * p) + get6(res, f, OFLW + 6 * i))
+    for v in range(NV):
+        res[(OPAS + v) * F + f] += (get6(res, f, OCD + 6 * v) * get6(res, f, OFLW + 6 * Int(mi[DBODY + v]))).reduce_add()
+
+
 def velocity(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int):
     """MuJoCo mj_comVel, mj_passive (joint springs, dof dampers), mj_rne(flg_acc = 0) into qfrc_bias."""
     # mj_comVel: cvel = cvel_parent + cdof qvel, cdof_dot = cvel x cdof with the velocity before the joint
@@ -450,6 +607,8 @@ def velocity(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int):
                 res[(OPAS + da + c) * F + f] += -k * axis[c] * speed
         else:  # slide, hinge
             res[(OPAS + da) * F + f] += -k * (qpos[a * F + f] - mf[QSPRING + a])
+    comptime if NFLUID:
+        fluid(mi, mf, res, f)
     # mj_rne: cacc = cacc_parent + cdof_dot qvel (world: -gravity), cfrc = cinert cacc + cvel x* (cinert cvel)
     put6(res, f, OCACC, S6(0, 0, 0, -mf[GRAV], -mf[GRAV + 1], -mf[GRAV + 2], 0, 0))
     for i in range(1, NB):
