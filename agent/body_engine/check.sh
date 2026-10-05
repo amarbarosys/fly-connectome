@@ -211,6 +211,35 @@ if [ "$stage" = tendon ]; then  # Flybody flight model, airborne (no contacts) w
   [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
   echo "PASS all tendon checks"; exit 0
 fi
+if [ "$stage" = rk4 ]; then  # RK4 (mj_RungeKutta) vs MuJoCo with opt.integrator=RK4: fly, spider, fly + spider world
+  F=.work/agent/gpu-body-port/body-v2/body.xml; SP=agent/body_engine/models/spider_test.xml
+  SB=.work/agent/body_engine/spider-body/spider.xml; I=$X/rk4
+  echo "COVERAGE integrator=RK4 (1): fly step (contact-free, dt 1e-6: h B / M 0.059, a wrong weight still moves qacc_euler by far more than 1e-5; dt 1e-5 leaves cdof_dot at 1.4e-5 float32 noise), spider_test step; fly actuated on standing states (contacts + servos + adhesion, dt 1e-7); world fly+spider at 8 and 200 mm (dt 1e-7)"
+  echo "COVERAGE not covered: contact and servo parity at dt >= 1e-6 (stiff contacts: MuJoCo's own ncon flips between its 4 forward passes and float32 follows chaotically: dt 1e-6 qfrc_constraint 4.9e-5 vs 3.9e-5 bar, dt 1e-5 ncon off), RK4 on the shipped dt 1e-4 (explicit dof damping is unstable in MuJoCo itself: h B / M 5.9), actuator velocity terms, qH (stale in MuJoCo after RK4, not compared)"
+  ENGINE_OPT=integrator=1,dt=1e-6 $M -m agent.body_engine.model check $F $I/fly-step step 64 || { echo "FAIL fly step rk4"; fail=$((fail+1)); }
+  ENGINE_OPT=integrator=1,dt=1e-6 $M -m agent.body_engine.model check $SP $I/spider step 64 || { echo "FAIL spider step rk4"; fail=$((fail+1)); }
+  # the gate must fail with the RK4 weights wrong (F1 weight 2 -> 1)
+  ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo 's/(get(res, f, ORKF + v) + 2 \* get(res, f, ORKF + NV + v)/(get(res, f, ORKF + v) + 1 * get(res, f, ORKF + NV + v)/' -- \
+    env ENGINE_OPT=integrator=1,dt=1e-6 $M -m agent.body_engine.model check $F $I/mutant step 64 || fail=$((fail+1))
+  export ENGINE_OPT=integrator=1,dt=1e-7
+  A=$(env -u ENGINE_OPT $M -m agent.body_engine.model airborne $F $I/fly 0 | tail -1)  # standing states from an Euler rollout (RK4 cannot roll out the shipped model)
+  STATES=$A $M -m agent.body_engine.model check $F $I/fly actuated 64 || { echo "FAIL fly actuated rk4"; fail=$((fail+1)); }
+  # the gate must fail with the stage-1 velocity step dropped (X_1 qvel = v0 + h A F0 -> v0)
+  ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo 's/qvel\[v \* F + f\] = get(res, f, ORKV + v) + h \* c \* get(res, f, ORKF + s \* NV + v)/qvel[v * F + f] = get(res, f, ORKV + v)/' -- \
+    env ENGINE_OPT=integrator=1,dt=1e-6 $M -m agent.body_engine.model check $F $I/mutant step 64 || fail=$((fail+1))
+  # islands: two animals in one model, at 200 mm (two islands) and 8 mm; the gate must fail when the spider uses the fly's origin
+  for off in 200 8; do
+    W=$($M -c "from agent.body_engine.model import combine; print(combine('$F', '$SB', ($off, 0, 0), 'rworld$off'))")
+    AW=$(env -u ENGINE_OPT $M -m agent.body_engine.model airborne $W $I/world$off 0 | tail -1)
+    STATES=$AW $M -m agent.body_engine.model check $W $I/world$off actuated 64 || { echo "FAIL rk4 world at $off mm"; fail=$((fail+1)); }
+    if [ $off = 200 ]; then
+      ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo 's/    var r = Int(mi\[ROOT + b\])/    var r = Int(mi[ROOT + 1])/' -- \
+        env STATES=$AW $M -m agent.body_engine.model check $W $I/mutant actuated 64 || fail=$((fail+1))
+    fi
+  done
+  [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
+  echo "PASS all rk4 checks"; exit 0
+fi
 B=${BODY:-.work/agent/gpu-body-port/body-v2/body.xml}  # BODY=path checks another MJCF (e.g. the spider from models/spider.py)
 $M -m agent.body_engine.model check $B $X/body-$(basename $B .xml) "$stage" 64 || { echo "FAIL $(basename $B .xml) $stage"; fail=$((fail+1)); }
 if [ "$stage" = contact ] || [ "$stage" = actuated ]; then  # plane-mesh foot pairs; the spider test body has none

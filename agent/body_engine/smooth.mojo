@@ -45,7 +45,7 @@ comptime LN = 32 if WAVE else 1  # alike; loops written range(lane(), n, LN) spl
 comptime BLOCK = 32 if WAVE else 64
 comptime GRID = F if WAVE else (F + 63) // 64
 comptime STOP = get_defined_int["STOP", 99]()
-comptime INTEGRATOR = get_defined_int["INTEGRATOR", 0]()  # opt.integrator: 0 Euler, 3 implicitfast (model.py export; absent = Euler)
+comptime INTEGRATOR = get_defined_int["INTEGRATOR", 0]()  # opt.integrator: 0 Euler, 1 RK4, 3 implicitfast (model.py export; absent = Euler)
 comptime K = get_defined_int["K", 0]()  # K > 0 (STAGE >= 5): K steps per launch, qpos/qvel written back in place
 comptime STEPTOL = Float32(get_defined_int["STEPTOL_E7", 10]()) * 1e-7  # Newton stops when a step moves qacc less than this
 comptime LSFLOOR = Float32(get_defined_int["LSFLOOR_E7", 10]()) * 1e-7  # line-search slope floor, relative to alpha = 0  # phase timing (phases.sh): return after phase STOP
@@ -210,7 +210,12 @@ comptime OEQJAR = OEQA + NEQR
 comptime OEQJV = OEQJAR + NEQR
 comptime OEQJ = OEQJV + NEQR
 comptime OGC = OEQJ + NEQJ  # qfrc_gravcomp (GRAVCOMP)
-comptime NROW = OGC + (NV if GRAVCOMP else 0)
+comptime NROW0 = OGC + (NV if GRAVCOMP else 0)
+comptime ORKQ = NROW0  # RK4 scratch (INTEGRATOR 1 only): X0 qpos, then per stage velocity v_s and acceleration F_s, then one scaled velocity
+comptime ORKV = ORKQ + NQ
+comptime ORKF = ORKV + 4 * NV
+comptime ORKW = ORKF + 4 * NV
+comptime NROW = ORKW + NV if INTEGRATOR == 1 else NROW0
 comptime LI = row_major[NI]()
 comptime LF = row_major[NFL]()
 comptime LQ = row_major[NQ * F]()
@@ -1655,6 +1660,79 @@ def euler(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int):
             res[(OQPOS + a) * F + f] += h * (qvel[da * F + f] + h * get(res, f, OQACC + da))
 
 
+def rkintegrate(mi: TI, res: TO, f: Int, h: Float32):
+    """MuJoCo mj_integratePos (engine_support.c) of X0 = ORKQ along the velocity in ORKW over h, into OQPOS: free and ball joints by
+    mju_quatIntegrate (unit(q) * quat(axis, h |w|), w in the body frame), slide and hinge by q += h v."""
+    for a in range(NQ):
+        res[(OQPOS + a) * F + f] = get(res, f, ORKQ + a)
+    for j in range(NJ):
+        var a = Int(mi[QADR + j])
+        var da = Int(mi[DOFADR + j])
+        var t = Int(mi[JTYPE + j])
+        if t == 0:
+            for c in range(3):
+                res[(OQPOS + a + c) * F + f] += h * get(res, f, ORKW + da + c)
+            a += 3
+            da += 3
+        if t <= 1:
+            var w = V3(get(res, f, ORKW + da), get(res, f, ORKW + da + 1), get(res, f, ORKW + da + 2), 0)
+            var n = sqrt((w * w).reduce_add())
+            var axis = w / n if n >= 1e-15 else basis(0)
+            var half = 0.5 * h * n
+            var s = sin(half)
+            var q = unit(Q4(get(res, f, OQPOS + a), get(res, f, OQPOS + a + 1), get(res, f, OQPOS + a + 2), get(res, f, OQPOS + a + 3)))
+            put(res, f, OQPOS + a, mul(q, Q4(cos(half), axis[0] * s, axis[1] * s, axis[2] * s)), 4)
+        else:
+            res[(OQPOS + a) * F + f] += h * get(res, f, ORKW + da)
+
+
+def rkstage(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int, s: Int):
+    """MuJoCo mj_RungeKutta N=4 (engine_forward.c:1290), one stage per call: the forward pass just ran at X_s (held in the
+    qpos/qvel tensors), so F_s = its constrained qacc. Stages 0..2 write X_{s+1} = X0 '+' (A v_s, h) into the tensors
+    (A = 1/2, 1/2, 1: qvel_{s+1} = v0 + h A F_s, qpos_{s+1} = integratePos(q0, A v_s, h)); stage 3 forms the B = 1/6, 1/3, 1/3, 1/6
+    sums, puts them in OQACC (dX acc: qvel_next = v0 + h OQACC) and OQPOS (integratePos(q0, dX vel, h)) and restores X0 in
+    the tensors, so smooth()'s write-back and K=0 re-launches see the original state."""
+    var h = mf[TSTEP]
+    sync()  # every lane is past its reads of qpos/qvel from the forward pass before they are overwritten
+    comptime if STAGE >= 6:
+        for v in range(NV):
+            res[(ORKF + s * NV + v) * F + f] = get(res, f, OCQACC + v)
+    else:  # contact-free: qacc_smooth = M^-1 (qfrc_passive - qfrc_bias)
+        for v in range(NV):
+            res[(OQACC + v) * F + f] = get(res, f, OPAS + v) - get(res, f, OBIAS + v)
+        solveLD(mi, res, f, OQACC, OLD, OLDI)
+        for v in range(NV):
+            res[(ORKF + s * NV + v) * F + f] = get(res, f, OQACC + v)
+    for v in range(NV):
+        res[(ORKV + s * NV + v) * F + f] = qvel[v * F + f]
+    if s == 0:
+        for a in range(NQ):
+            res[(ORKQ + a) * F + f] = qpos[a * F + f]
+    if s < 3:
+        var c: Float32 = 0.5 if s < 2 else 1.0
+        for v in range(NV):
+            res[(ORKW + v) * F + f] = c * get(res, f, ORKV + s * NV + v)
+        rkintegrate(mi, res, f, h)
+        for v in range(NV):
+            qvel[v * F + f] = get(res, f, ORKV + v) + h * c * get(res, f, ORKF + s * NV + v)
+        for a in range(NQ):
+            qpos[a * F + f] = get(res, f, OQPOS + a)
+    else:
+        absolute(mi, qpos, res, f)  # the rows hold the last forward pass (MuJoCo's d after mj_step): world positions of X_3, whose origin is in the tensors now
+        for v in range(NV):
+            res[(OQACC + v) * F + f] = (get(res, f, ORKF + v) + 2 * get(res, f, ORKF + NV + v) + 2 * get(res, f, ORKF + 2 * NV + v) + get(res, f, ORKF + 3 * NV + v)) / 6
+            res[(ORKW + v) * F + f] = (get(res, f, ORKV + v) + 2 * get(res, f, ORKV + NV + v) + 2 * get(res, f, ORKV + 2 * NV + v) + get(res, f, ORKV + 3 * NV + v)) / 6
+        rkintegrate(mi, res, f, h)
+        for v in range(NV):
+            qvel[v * F + f] = get(res, f, ORKV + v)
+        for a in range(NQ):
+            qpos[a * F + f] = get(res, f, ORKQ + a)
+        comptime if K > 0 and STAGE >= 6:  # mj_advance: qacc_warmstart = d->qacc, the last forward pass's
+            for v in range(NV):
+                res[(OWARM + v) * F + f] = get(res, f, OCQACC + v)
+    sync()
+
+
 def origin(mi: TI, qpos: TQ, f: Int, b: Int) -> V3:
     """Floating origin of body b's tree: the position of its root's free joint (each animal its own), else 0 (the
     world and trees fixed to it). The step computes every position relative to it, so differences of nearby points
@@ -1693,8 +1771,12 @@ def smooth(mi: TI, mf: TF, qpos: TQ, qvel: TV, ctrl: TU, res: TO):
     if f >= F:
         return
     for _ in range(max(K, 1)):
-        step(mi, mf, qpos, qvel, ctrl, res, f)
-        absolute(mi, qpos, res, f)
+        comptime if INTEGRATOR == 1:  # RK4: four forward passes, X_1..3 held in qpos/qvel, X0 back after the last
+            for rks in range(4):
+                step(mi, mf, qpos, qvel, ctrl, res, f, rks)
+        else:
+            step(mi, mf, qpos, qvel, ctrl, res, f)
+            absolute(mi, qpos, res, f)
         comptime if K > 0:  # mj_Euler's write-back: qvel += h qacc, qpos = integrated qpos
             for v in range(NV):
                 qvel[v * F + f] += mf[TSTEP] * get(res, f, OQACC + v)
@@ -1702,7 +1784,7 @@ def smooth(mi: TI, mf: TF, qpos: TQ, qvel: TV, ctrl: TU, res: TO):
                 qpos[a * F + f] = get(res, f, OQPOS + a)
 
 
-def step(mi: TI, mf: TF, qpos: TQ, qvel: TV, ctrl: TU, res: TO, f: Int):
+def step(mi: TI, mf: TF, qpos: TQ, qvel: TV, ctrl: TU, res: TO, f: Int, rks: Int = 0):
 
     for i in range(1, NB):
         var ja = Int(mi[JNTADR + i])
@@ -1889,13 +1971,16 @@ def step(mi: TI, mf: TF, qpos: TQ, qvel: TV, ctrl: TU, res: TO, f: Int):
         comptime if STOP == 8 or STOP == 9:
             return
         noslip(mi, mf, res, f)
-        comptime if K > 0:
+        comptime if K > 0 and INTEGRATOR != 1:  # RK4 saves it after its last forward pass (rkstage)
             for v in range(NV):
                 res[(OWARM + v) * F + f] = get(res, f, OCQACC + v)
         comptime if STOP == 6:
             return
     comptime if STAGE >= 5:
-        euler(mi, mf, qpos, qvel, res, f)
+        comptime if INTEGRATOR == 1:
+            rkstage(mi, mf, qpos, qvel, res, f, rks)
+        else:
+            euler(mi, mf, qpos, qvel, res, f)
 
 def load(path: String, size: Int) raises -> List[UInt8]:
     var raw = open(path, "r").read_bytes()
