@@ -5,6 +5,13 @@ layout render.mojo already reads), and one write(2) puts the RGBA frame on stdou
 
 build: mojo build $(cat DIR/sizes.txt) $(cat DIR/rsizes.txt) -DFLIES=1 -DSTAGE=7 -DK=k -DW=w -DH=h
        -DPROWS=7*(NBODY-1) live.mojo
+brain link (-DBRAIN=1 or 2, docs/plans/SPIDER_BRAIN.md unit 1; BRAIN=0 compiles none of it): each frame becomes one control
+       step. BRAIN=1: the ctrl for the step arrives on stdin (NU x F float32, [servo][animal]) and goes to the engine's
+       ctrl buffer; BRAIN=2: spider_brain.mojo's gait kernel writes it on the card (drives from DIR/drive.bin, 2 x F float32:
+       speed, turn). After the launch a sensor packet goes to stdout every PACKET-th step (arg 11, 0 = never, and at the last step):
+       ctrl, qpos, qvel, valid contact slots (OVALID.., NSLOT rows), each float32 [row][animal]. Frames (arg 10 = every n-th
+       step, 0 = never) go to fd 4 instead of stdout. No target state anywhere in the packet.
+
 usage: live DIR/ FRAMES ex ey ez tx ty tz fovy_deg [OUT]
        DIR holds the engine files (mi.bin, mf.bin, qpos.bin, qvel.bin, ctrl.bin) and the mesh tables (rmi.bin ...);
        FRAMES 0 = until the reader closes the pipe; OUT = a .rgba file gets frame FRAMES-1 instead of the stream
@@ -17,10 +24,38 @@ import smooth as eng
 import render as ren
 from std.ffi import external_call
 from std.math import tan
-from std.sys import argv, stderr
+from std.sys import argv, get_defined_int, stderr
 from std.time import perf_counter_ns
 from max.gpu.host import DeviceContext
 from layout import TileTensor
+import spider_brain as brain
+
+comptime BRAIN = get_defined_int["BRAIN", 0]()
+comptime NVALID = eng.NSLOT
+
+
+def write_all(fd: Int, p: Pointer[UInt8, MutUntrackedOrigin], n: Int) -> Bool:
+    var left = n
+    var q = p
+    while left > 0:
+        var w = external_call["write", Int](fd, q.unsafe_bitcast[NoneType](), left)
+        if w <= 0:
+            return False
+        q = q.unsafe_offset(w)
+        left -= w
+    return True
+
+
+def read_all(fd: Int, p: Pointer[UInt8, MutUntrackedOrigin], n: Int) -> Bool:
+    var left = n
+    var q = p
+    while left > 0:
+        var r = external_call["read", Int](fd, q.unsafe_bitcast[NoneType](), left)
+        if r <= 0:
+            return False
+        q = q.unsafe_offset(r)
+        left -= r
+    return True
 
 
 def main() raises:
@@ -91,28 +126,60 @@ def main() raises:
     var trp = TileTensor(rp_b, ren.LRP)
     var tpose = TileTensor(o_b, ren.LPOSE)  # the engine's own rows; PROWS covers xpos + xquat only
     var tcam = TileTensor(cam_b, ren.LCAM)
-    var to_file = len(a) > 10
+    var to_file = len(a) > 10 and BRAIN == 0
+    var render_every = Int(String(a[10])) if BRAIN > 0 else 1
+    var packet_every = Int(String(a[11])) if BRAIN > 0 else 0
+    var ctrl_h = ctx.enqueue_create_host_buffer[DType.float32](max(eng.NU, 1) * eng.F)
+    var pkt_u = ctx.enqueue_create_host_buffer[DType.float32](max(eng.NU, 1) * eng.F)
+    var pkt_q = ctx.enqueue_create_host_buffer[DType.float32](eng.NQ * eng.F)
+    var pkt_v = ctx.enqueue_create_host_buffer[DType.float32](eng.NV * eng.F)
+    var pkt_s = ctx.enqueue_create_host_buffer[DType.float32](max(NVALID, 1) * eng.F)
+    var kb = ctx.compile_function[brain.gait]()  # launched only when BRAIN == 2
+    var drive_b = ctx.enqueue_create_buffer[DType.float32](2 * eng.F)
+    comptime if BRAIN == 2:
+        var dr = eng.load(dir + "drive.bin", 2 * eng.F)
+        ctx.enqueue_copy(drive_b, dr.unsafe_ptr().unsafe_bitcast[Float32]())
     var t0 = perf_counter_ns()
     var fr = 0
     while frames == 0 or fr < frames:
+        comptime if BRAIN == 1:
+            if not read_all(0, ctrl_h.unsafe_ptr().unsafe_bitcast[UInt8](), max(eng.NU, 1) * eng.F * 4):
+                return  # brain gone
+            ctx.enqueue_copy(u_b, ctrl_h)
+        elif BRAIN == 2:
+            ctx.enqueue_function(kb, TileTensor(u_b, eng.LU), TileTensor(drive_b, brain.LD), Float32(fr * max(eng.K, 1)) * Float32(1e-4),
+                grid_dim=(eng.NU * eng.F + 63) // 64, block_dim=64)
         ctx.enqueue_function(step, TileTensor(mi_b, eng.LI), TileTensor(mf_b, eng.LF), TileTensor(q_b, eng.LQ), TileTensor(v_b, eng.LV),
             TileTensor(u_b, eng.LU), TileTensor(o_b, eng.LO), grid_dim=eng.GRID, block_dim=eng.BLOCK)
-        ctx.enqueue_function(kc, vis, grid_dim=(ren.W * ren.H + 255) // 256, block_dim=256)
-        ctx.enqueue_function(kr, vis, tpi, tpf, trv, trt, trp, tpose, tcam, grid_dim=(ren.F * ren.NTRI + 255) // 256, block_dim=256)
-        ctx.enqueue_function(ks, vis, img, tpi, tpf, trv, trt, trp, tpose, tcam, grid_dim=(ren.W * ren.H + 255) // 256, block_dim=256)
-        ctx.enqueue_copy(out_h, img_b)
+        var draw = render_every > 0 and fr % render_every == 0 if BRAIN > 0 else True
+        if draw:
+            ctx.enqueue_function(kc, vis, grid_dim=(ren.W * ren.H + 255) // 256, block_dim=256)
+            ctx.enqueue_function(kr, vis, tpi, tpf, trv, trt, trp, tpose, tcam, grid_dim=(ren.F * ren.NTRI + 255) // 256, block_dim=256)
+            ctx.enqueue_function(ks, vis, img, tpi, tpf, trv, trt, trp, tpose, tcam, grid_dim=(ren.W * ren.H + 255) // 256, block_dim=256)
+            ctx.enqueue_copy(out_h, img_b)
+        var send = False
+        comptime if BRAIN > 0:
+            send = packet_every > 0 and fr % packet_every == 0 or fr + 1 == frames
+            if send:
+                ctx.enqueue_copy(pkt_u, u_b)
+                ctx.enqueue_copy(pkt_q, q_b)
+                ctx.enqueue_copy(pkt_v, v_b)
+                comptime if NVALID > 0:
+                    ctx.enqueue_copy(pkt_s, o_b.create_sub_buffer[DType.float32](eng.OVALID * eng.F, NVALID * eng.F))
         ctx.synchronize()
         fr += 1
         if to_file:
             continue
-        var left = ren.W * ren.H * 4
-        var p = out_h.unsafe_ptr().unsafe_bitcast[UInt8]()
-        while left > 0:
-            var n = external_call["write", Int](Int(1), p.bitcast[NoneType](), left)
-            if n <= 0:
+        comptime if BRAIN > 0:
+            if send:
+                if not write_all(1, pkt_u.unsafe_ptr().unsafe_bitcast[UInt8](), max(eng.NU, 1) * eng.F * 4) \
+                    or not write_all(1, pkt_q.unsafe_ptr().unsafe_bitcast[UInt8](), eng.NQ * eng.F * 4) \
+                    or not write_all(1, pkt_v.unsafe_ptr().unsafe_bitcast[UInt8](), eng.NV * eng.F * 4) \
+                    or not write_all(1, pkt_s.unsafe_ptr().unsafe_bitcast[UInt8](), NVALID * eng.F * 4):
+                    return
+        if draw:
+            if not write_all(4 if BRAIN > 0 else 1, out_h.unsafe_ptr().unsafe_bitcast[UInt8](), ren.W * ren.H * 4):
                 return  # reader gone
-            p = p.unsafe_offset(n)
-            left -= n
         if fr % 100 == 0:
             var ms = Float64(perf_counter_ns() - t0) / Float64(fr) / 1e6
             print(fr, "frames,", ms, "ms per frame,", Float64(fr * max(eng.K, 1)) * 0.1, "ms simulated", file=stderr)
