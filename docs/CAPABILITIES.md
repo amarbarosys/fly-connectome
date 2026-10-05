@@ -26,7 +26,7 @@ Status describes the cited implementation and gate only. It does not imply biolo
 |---|---|---:|---|---|
 | Optic-column to arbor geometry correspondence | PASS | 4,530 neurons; r=0.914 left, 0.905 right; shuffled means 0.007 and 0.003 | `.work/agent/column-geometry/verification.json`; `docs/plans/SPATIAL_VISION.md` | `./.venv/bin/python -m agent.verify_column_geometry` |
 | Retinal angular calibration | PASS (camera projection); biological registration UNVERIFIED | 778 published directions (reiserlab eyemap_T4 99d2a43, hashes pinned), 751 right-eye in view, 27 outside; per-neuron angular error needs the paper Mi1 index to FlyWire root crosswalk, which is missing (re-run 2026-10-05, `.work/agent/retinal-calibration/verify-20261005.json`) | `docs/plans/RETINAL_CALIBRATION.md` | `./.venv/bin/python -m agent.verify_retinal_geometry` (reference input required) |
-| Dim-stripe visual response | broken | Maximum 0.139, below spike threshold 1 | `docs/plans/SENSORY_VALIDITY_GATES.md` | `./.venv/bin/python -m agent.verify_sensory_recurrence --output <receipt>` |
+| Dim-stripe visual response | broken (legacy pooled-eye interface); Shiu photoreceptor path PASS | Legacy: maximum 0.139, below spike threshold 1. Shiu FlyWire, left R1-6 (4,044) at Poisson rates, left L1-L3 (2,405) spikes in 200 ms: 2/5 Hz 0, 10 Hz 2.0, 20 Hz 57.5, 40 Hz 522, 150 Hz 4,924; R1-6 edges cut: 0 at every rate (`tools/shiu_dim_test.py`, 2026-10-05). Threshold lies between 5 and 10 Hz; 10 Hz is marginal | `docs/plans/SENSORY_VALIDITY_GATES.md` | `./.venv/bin/python -m agent.verify_sensory_recurrence --output <receipt>` |
 
 ## BRAIN
 
