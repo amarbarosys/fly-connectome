@@ -45,13 +45,31 @@ SOURCES = [
          doi=None, pmcid='PMC8046691', filename='PMC8046691.txt', kind='review'),
     dict(id='winsor2023', title='Distributed Vision in Spiders, chapter 10', species=['Salticidae', 'spider'],
          doi='10.1007/978-3-031-23216-9_10', pmcid=None, filename='winsor2023.txt', kind='review'),
-    dict(id='cross2016', title='Portia detour planning', species=['Portia'],
-         doi='10.1002/jeab.189', pmcid='PMC4751061', filename=None, xml_file='PMC4751061.xml', kind='primary'),
+    dict(id='cross2016', title='The execution of planned detours by spider-eating predators', species=['Portia'],
+         doi='10.1002/jeab.189', pmcid='PMC4751061', filename=None, kind='primary',
+         availability='unavailable', availability_note='Retained as unavailable per source-packet review; no text imported.'),
+    dict(id='crossjackson2017', title='Representation of different exact numbers of prey by a spider-eating predator', species=['Portia africana'],
+         doi='10.1098/rsfs.2016.0035', pmcid='PMC5413887', filename='PMC5413887.txt', kind='primary'),
+    dict(id='tarsitanojackson1992', title='Influence of prey movement on performance of simple detours by jumping spiders', species=['Portia'],
+         doi='10.1163/156853992X00147', pmcid=None, filename=None, kind='primary', availability='unavailable',
+         availability_note='Citation metadata found; local crawl4ai returned HTTP 502 for publisher full-text routes.'),
+    dict(id='tarsitanojackson1994', title='Jumping spiders make predatory detours requiring movement away from prey', species=['Portia'],
+         doi='10.1163/156853994X00217', pmcid=None, filename=None, kind='primary', availability='unavailable',
+         availability_note='Citation metadata found; local crawl4ai returned HTTP 502 for publisher full-text routes.'),
+    dict(id='tarsitanojackson1997', title='Araneophagic jumping spiders discriminate between detour routes that do and do not lead to prey', species=['Portia'],
+         doi='10.1006/anbe.1996.0372', pmcid=None, filename=None, kind='primary', availability='unavailable',
+         availability_note='Citation metadata found; full text was not available through the local crawl4ai route.'),
+    dict(id='harlandjackson2000', title='Cues by which Portia fimbriata distinguishes jumping-spider prey from other prey', species=['Portia fimbriata'],
+         doi='10.1242/jeb.203.22.3485', pmcid=None, filename=None, kind='primary', availability='unavailable',
+         availability_note='PubMed abstract found; publisher full text blocked by security verification in crawl4ai.'),
+    dict(id='harlandjackson2002', title='Influence of cues from the anterior medial eyes of virtual prey on Portia fimbriata', species=['Portia fimbriata'],
+         doi='10.1242/jeb.205.13.1861', pmcid=None, filename=None, kind='primary', availability='unavailable',
+         availability_note='PubMed abstract found; publisher full text blocked by security verification in crawl4ai.'),
     dict(id='steck2024', title='Secondary-eye colour vision', species=['Salticidae'],
          doi=None, pmcid='PMC11756594', filename=None, kind='primary'),
 ]
 
-REF_HEAD = re.compile(r'(?im)^\s*(references|bibliography|literature cited)\s*$')
+REF_HEAD = re.compile(r'(?im)^\s*#{0,6}\s*(references|bibliography|literature cited)\s*$')
 HEADING = re.compile(r'(?m)^\s*(?:[A-Z][A-Za-z0-9 ,:;()/-]{2,90}|\d+(?:\.\d+)*\s+.{2,80})\s*$')
 
 
@@ -173,7 +191,7 @@ def build(docs: Path, out: Path) -> dict:
         xml_path = docs / source['xml_file'] if source.get('xml_file') else (
             docs / source['filename'].replace('.txt', '.xml') if source.get('filename') else None)
         input_path = src if src is not None and src.is_file() else xml_path
-        if input_path is None or not input_path.is_file():
+        if source.get('availability') == 'unavailable' or input_path is None or not input_path.is_file():
             row.update(status='unavailable', source_sha256=None, cleaned=False, passage_count=0)
         else:
             raw = input_path.read_bytes()
@@ -199,6 +217,8 @@ def fetch_sources(docs: Path) -> dict:
     docs.mkdir(parents=True, exist_ok=True)
     fetched, present, unavailable = [], [], []
     for source in SOURCES:
+        if source.get('availability') == 'unavailable':
+            continue
         if not source.get('pmcid'):
             continue
         filename = source.get('filename')

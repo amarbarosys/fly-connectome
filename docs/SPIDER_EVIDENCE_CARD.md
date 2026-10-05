@@ -45,17 +45,25 @@ interpretations that remain hypotheses. [Winsor, Morehouse & Jakob 2023,
 Distributed Vision in Spiders](https://doi.org/10.1007/978-3-031-23216-9_10),
 Chapter 10, Fig. 10.2 and Sect. 10.3.6.
 
-## Portia detours: behavior observed, planning mechanism unresolved
+## Portia prey number: a detour based expectancy test
 
-Cross and Jackson tested 15 spider-eating Spartaeinae species, including six
-*Portia* taxa, using a tower and two circuitous walkways. The prey could not be
-seen after the spider left the tower; all 15 species chose the correct walkway
-significantly more often than the incorrect one. This is evidence about route
-choice under that apparatus. The authors propose a representation-based
-cognitive interpretation, but the behavior alone does not identify a neural
-planning algorithm. [Cross & Jackson 2016, “The execution of planned detours by
-spider-eating predators”](https://pmc.ncbi.nlm.nih.gov/articles/PMC4751061/),
-Abstract, Methods, Table 1.
+Cross and Jackson tested *Portia africana* with an expectancy violation task
+that used detours to change the spider's view of prey groups. The abstract
+reports behavioral differences for 1 versus 2, 3, or 4 prey and for 2 versus
+3, 4, or 6 prey, but not for 3 versus 4 or 6 prey. The authors interpret this
+pattern as discrimination of one, two, and a larger-number category. This
+supports task-specific prey-number discrimination under the tested conditions;
+it does not establish a general planning mechanism or neural circuit.
+[Cross & Jackson 2017, “Representation of different exact numbers of prey by a
+spider-eating predator”](https://pmc.ncbi.nlm.nih.gov/articles/PMC5413887/),
+Abstract, Methods and Results.
+
+Cross and Jackson 2016 (PMC4751061) remains unavailable in this packet as
+directed by source review, despite a separate cached text artifact. The
+requested Tarsitano & Jackson detour papers (1992, 1994, 1997) were found as
+citations, but full text could not be retrieved through local crawl4ai.
+Harland & Jackson 2000 and 2002 abstracts were found in PubMed; publisher full
+text crawls were blocked. These records remain unavailable in the corpus.
 
 Aguilar-Arguello et al.'s two Salticoida species were *Marpissa marina* and
 *Trite planiceps*, not *Portia*. The source index now labels it accordingly.
@@ -95,7 +103,8 @@ the checker.
 - Retrieve and independently inspect Nabawy's task-level Supplementary Dataset S3.
 - Obtain the unavailable Steck 2024 secondary-eye color paper (PMC11756594) or
   keep claims that depend on it out of implementation thresholds.
-- Seek primary eye-role and Portia behavior sources beyond reviews; the corpus
-  is a checked starter packet, not an exhaustive bibliography.
+- Seek full text for the unavailable Tarsitano & Jackson and Harland & Jackson
+  works listed in [`SPIDER_ASSET_INDEX.md`](SPIDER_ASSET_INDEX.md); the corpus is
+  a checked starter packet, not an exhaustive bibliography.
 - No Portia neural anatomy, spider connectome, or validated mapping from these
   taxa to the engine spider has been established here.

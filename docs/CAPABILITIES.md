@@ -90,7 +90,7 @@ Correction 2026-10-02: p-values recomputed with seed clusters (mirrored layouts 
 | L2 skeleton linkage to FlyWire roster | PASS | 268,281,651 source rows; 139,255/139,255 roster neurons linked | `.work/agent/skeleton-link/link.json`; `.work/agent/skeleton-link/independent-verification.json` | `./.venv/bin/python -m agent.verify_skeleton_link` |
 | Lesion and sweep condition-set generation | PASS | 24 lesion conditions; 33 sweep conditions | commit `e3afe06`; `fly-screen-rs/README.md` | `FLY_CONDITION_SET=lesion|sweep fly-screen-rs/target/release/fly-screen` |
 | Lesion inference about anatomical necessity | UNVERIFIED | Condition sets are defined; no necessity claim | `docs/plans/SCREENING_REBUILD_PLAN.md` | No validated inference entrypoint |
-| Spider source packet ingestion | PASS | 10 primary sources and 2 reviews checked; 1 unavailable primary source retained in manifest | `docs/plans/SPIDER_EVIDENCE.md`; `docs/SPIDER_ASSET_INDEX.md`; commit `c52594e` | `python tools/spider_corpus.py build && python tools/spider_corpus_check.py` |
+| Spider source packet ingestion | PASS | 10 primary sources and 2 reviews checked; 7 unavailable primary records retained in manifest, including Cross & Jackson 2016 | `docs/plans/SPIDER_EVIDENCE.md`; `docs/SPIDER_ASSET_INDEX.md` | `python tools/spider_corpus.py build && python tools/spider_corpus_check.py` |
 | Spider evidence retrieval and numeric audit | PASS | 5/5 locatable queries; 10/10 numeric passages; wrong-species and swapped-unit controls rejected | `docs/plans/SPIDER_EVIDENCE.md`; `docs/SPIDER_EVIDENCE_CARD.md`; commit `dafdcff` | `python tools/spider_corpus_check.py` (embedding server at `127.0.0.1:8098`) |
 
 ## COMPUTE
