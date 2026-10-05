@@ -46,6 +46,7 @@ comptime FOLLOW = get_defined_int["FOLLOW", 0]()
 comptime HUD = get_defined_int["HUD", 0]()
 comptime PROFILE = get_defined_int["PROFILE", 0]()
 comptime WORLD = get_defined_int["WORLD", 0]()
+comptime GAZE = get_defined_int["GAZE", 0]() == 1  # BRAIN = 1 and EYES: F gaze yaws (deg, AM eyes) follow the ctrl on stdin
 comptime EYES = get_defined_int["EYES", 0]() == 1  # BRAIN > 0: eyes.mojo retinas in the packet, prey moved by DIR/env.bin
 comptime NRET = eyes.F * eyes.NE * eyes.W * eyes.H if EYES else 1
 
@@ -161,6 +162,9 @@ def main() raises:
     var evis_b = ctx.enqueue_create_buffer[DType.uint64](eyes.F * eyes.W * eyes.H if EYES else 1)
     var eyet_b = ctx.enqueue_create_buffer[DType.float32](eyes.NE * 8)
     var env_b = ctx.enqueue_create_buffer[DType.float32](6 * eng.F)
+    var gaze_b = ctx.enqueue_create_buffer[DType.float32](eng.F)
+    gaze_b.enqueue_fill(0)
+    var gaze_h = ctx.enqueue_create_host_buffer[DType.float32](eng.F)
     var ret_b = ctx.enqueue_create_buffer[DType.uint8](NRET)
     var pkt_r = ctx.enqueue_create_host_buffer[DType.uint8](NRET)
     comptime if EYES:
@@ -223,6 +227,10 @@ def main() raises:
             if not read_all(0, ctrl_h.unsafe_ptr().unsafe_bitcast[UInt8](), max(eng.NU, 1) * eng.F * 4):
                 return  # brain gone
             ctx.enqueue_copy(u_b, ctrl_h)
+            comptime if GAZE:
+                if not read_all(0, gaze_h.unsafe_ptr().unsafe_bitcast[UInt8](), eng.F * 4):
+                    return
+                ctx.enqueue_copy(gaze_b, gaze_h)
         elif BRAIN == 2:
             ctx.enqueue_function(kb, TileTensor(u_b, eng.LU), TileTensor(drive_b, brain.LD), Float32(fr * max(eng.K, 1)) * Float32(1e-4),
                 grid_dim=(eng.NU * eng.F + 63) // 64, block_dim=64)
@@ -241,7 +249,7 @@ def main() raises:
             var tevis = TileTensor(evis_b, eyes.LEVIS)
             var tret = TileTensor(ret_b, eyes.LRET)
             for e in range(eyes.NE):
-                ctx.enqueue_function(k_ec, tecam, tpose, TileTensor(eyet_b, eyes.LEYE), Int32(e), grid_dim=(eng.F + 63) // 64, block_dim=64)
+                ctx.enqueue_function(k_ec, tecam, tpose, TileTensor(eyet_b, eyes.LEYE), TileTensor(gaze_b, eyes.LGAZE), Int32(e), grid_dim=(eng.F + 63) // 64, block_dim=64)
                 ctx.enqueue_function(k_ecl, tevis, grid_dim=(eyes.F * eyes.W * eyes.H + 255) // 256, block_dim=256)
                 ctx.enqueue_function(k_er, tevis, tecam, tpi, tpf, trv, trt, trp, tpose, tcam, grid_dim=(eyes.F * ren.NTRI + 255) // 256, block_dim=256)
                 ctx.enqueue_function(k_es, tevis, tret, Int32(e), tpi, tpf, trv, trt, trp, tpose, tcam, grid_dim=(eyes.F * eyes.W * eyes.H + 255) // 256, block_dim=256)

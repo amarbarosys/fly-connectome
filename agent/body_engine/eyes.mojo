@@ -11,7 +11,7 @@ prey_set is the ENVIRONMENT, not the controller: it writes the prey body's free 
 """
 from std.gpu import block_idx, block_dim, thread_idx
 from std.atomic import Atomic, Ordering
-from std.math import sqrt
+from std.math import sqrt, cos, sin
 from layout import TileTensor, row_major
 import smooth as eng
 import render as ren
@@ -26,16 +26,19 @@ comptime LEVIS = row_major[F * W * H]()
 comptime LEYE = row_major[NE * 8]()
 comptime LRET = row_major[F * NE * W * H]()
 comptime LENV = row_major[6 * F]()
+comptime LGAZE = row_major[F]()
 comptime TECAM = TileTensor[DType.float32, type_of(LECAM), MutAnyOrigin]
 comptime TEVIS = TileTensor[DType.uint64, type_of(LEVIS), MutAnyOrigin]
 comptime TEYE = TileTensor[DType.float32, type_of(LEYE), MutAnyOrigin]
 comptime TRET = TileTensor[DType.uint8, type_of(LRET), MutAnyOrigin]
 comptime TENV = TileTensor[DType.float32, type_of(LENV), MutAnyOrigin]
+comptime TGAZE = TileTensor[DType.float32, type_of(LGAZE), MutAnyOrigin]
 comptime NEAR = Float32(1e-3)
 
 
-def eye_cam(ecam: TECAM, pose: ren.TPOSE, eyes: TEYE, eye_id: Int32):
-    """cam[f] = eye, target, fovy, focal px for eye e of animal f (render.mojo's layout, spacing 0)."""
+def eye_cam(ecam: TECAM, pose: ren.TPOSE, eyes: TEYE, gaze: TGAZE, eye_id: Int32):
+    """cam[f] = eye, target, fovy, focal px for eye e of animal f (render.mojo's layout, spacing 0). The two principal (AM)
+    eyes turn by gaze[f] degrees about the head's z axis (+ = left): the retina's own muscles (live.mojo -DGAZE=1)."""
     var e = Int(eye_id)
     var f = Int(block_idx.x * block_dim.x + thread_idx.x)
     if f >= F:
@@ -44,6 +47,9 @@ def eye_cam(ecam: TECAM, pose: ren.TPOSE, eyes: TEYE, eye_id: Int32):
     var bp = V3(pose[f], pose[F + f], pose[2 * F + f], 0)
     var lp = V3(eyes[8 * e], eyes[8 * e + 1], eyes[8 * e + 2], 0)
     var ax = V3(eyes[8 * e + 3], eyes[8 * e + 4], eyes[8 * e + 5], 0)
+    if e < 2:
+        var g = gaze[f] * Float32(0.017453292519943295)
+        ax = V3(ax[0] * cos(g) - ax[1] * sin(g), ax[0] * sin(g) + ax[1] * cos(g), ax[2], 0)
     var eye = bp + rot(bq, lp)
     var tgt = eye + rot(bq, ax)
     var o = f * ren.NCAM

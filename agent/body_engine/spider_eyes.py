@@ -31,20 +31,20 @@ INTENDED = {'AM_L': ((1.25, 0.25, 0.35), 0.0, 14.0), 'AM_R': ((1.25, -0.25, 0.35
 NE = len(EYES)
 
 
-def eye_table():
+def eye_table(npix=NPIX):
     """(NE, 8) float32: local position 3, local axis 3, fov rad, focal length px. Axis in the head frame: (cos yaw, sin yaw, 0)."""
     t = np.zeros((NE, 8), np.float32)
     for i, (_, pos, yaw, fov) in enumerate(EYES):
         t[i, :3] = pos
         t[i, 3:6] = (np.cos(np.radians(yaw)), np.sin(np.radians(yaw)), 0)
         t[i, 6] = np.radians(fov)
-        t[i, 7] = NPIX / 2 / np.tan(np.radians(fov) / 2)
+        t[i, 7] = npix / 2 / np.tan(np.radians(fov) / 2)
     return t
 
 
-def write_tables(d, env):
+def write_tables(d, env, npix=NPIX):
     """eyes.bin and env.bin in d. env: (F, 6) rows x0 y0 z0 vx vy t_on (mm, mm/s, s), written [field][animal]."""
-    eye_table().tofile(Path(d) / 'eyes.bin')
+    eye_table(npix).tofile(Path(d) / 'eyes.bin')
     np.ascontiguousarray(np.asarray(env, np.float32).T).tofile(Path(d) / 'env.bin')
 
 

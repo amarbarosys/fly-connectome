@@ -65,6 +65,7 @@ def ellipsoid(path, ax, ay, az, n=10):
 def build(out=OUT, prey=False, jump=False):
     """prey=True adds a free prey body (dark ellipsoid, free joint, no contacts, no servos; slide joints would be 'simple dofs', which the export refuses) and writes spider_prey.xml:
     its qpos is set each control step by the environment (eyes.mojo prey kernel), never by the brain.
+    The prey body is gravity-compensated: prey_set places it before each control step and the K physics steps after must not drop it (0.49 mm per 10 ms frame, 0.15 deg at 191 mm, out of the AM row).
     jump=True writes spider_jump.xml: the first four servos of every leg (coxa yaw and pitch, femur, patella) get JUMP_S x the gain and
     force limit and the joint damping 3 + 0.3 JUMP_S (an explicit servo stays stable only for damping >= kp dt): the model's stand-in for
     the hydraulic leg extension real salticids jump with (they have no extensor muscles at two leg joints). Walking uses spider.xml."""
@@ -109,9 +110,9 @@ def build(out=OUT, prey=False, jump=False):
     PREYBODY = ''
     if prey:
         assets.append('<mesh name="prey" file="prey.stl"/>')
-        PREYBODY = ('<body name="prey" pos="0 0 0">\n<freejoint name="prey"/>\n'
+        PREYBODY = ('<body name="prey" pos="0 0 0" gravcomp="1">\n<freejoint name="prey"/>\n'
                     '<geom name="prey" type="mesh" mesh="prey" rgba="0.02 0.02 0.02 1"/>\n'
-                    '<body name="prey_tip" pos="0 0 0"><geom type="sphere" size="1e-3" mass="1e-9"/></body>\n</body>\n')  # a child: a leaf free body is a "simple dof"
+                    '<body name="prey_tip" pos="0 0 0" gravcomp="1"><geom type="sphere" size="1e-3" mass="1e-9"/></body>\n</body>\n')  # a child: a leaf free body is a "simple dof"
 
     xml = f'''<mujoco model="spider">
 <compiler angle="degree" meshdir="."/>

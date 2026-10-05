@@ -233,7 +233,7 @@ def parity():
     return ok
 
 
-def train(arm, iters, rec, seed=2, stop_above=None):
+def train(arm, iters, rec, seed=2, stop_above=None, keep=False):
     """arm: learn, shuffle (random-sign teacher), frozen (no teaching), flip (mutant: teacher sign reversed).
     frozen never changes a weight, so it is not trained (its after = its before, exactly). stop_above: a control arm ends
     once its held-out error has been >= stop_above at 4 successive test points from batch 100 on (decided, not run out)."""
@@ -251,6 +251,8 @@ def train(arm, iters, rec, seed=2, stop_above=None):
                 break
     silenced = float(np.median(np.concatenate([run(net, rec, P.speeds(np.random.default_rng(9 + q), 6, 9, B), np.random.default_rng(9 + q), silence=True) for q in range(4)])))
     out = {'before': before, 'after': test(9), 'silenced': silenced, 'curve': curve, 's_per_batch': (time.perf_counter() - t0) / max(n, 1), 'batches': n}
+    if keep:  # the trained pathway stays open for another task (agent/spider_eye_loop.py: the rendered eyes)
+        return out, net
     net.close()
     return out
 
