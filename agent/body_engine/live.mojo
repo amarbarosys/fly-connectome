@@ -43,6 +43,7 @@ comptime NVALID = eng.NSLOT
 comptime FOLLOW = get_defined_int["FOLLOW", 0]()
 comptime HUD = get_defined_int["HUD", 0]()
 comptime PROFILE = get_defined_int["PROFILE", 0]()
+comptime WORLD = get_defined_int["WORLD", 0]()
 
 
 def write_all(fd: Int, p: Pointer[UInt8, MutUntrackedOrigin], n: Int) -> Bool:
@@ -152,6 +153,23 @@ def main() raises:
         ctx.enqueue_copy(drive_b, dr.unsafe_ptr().unsafe_bitcast[Float32]())
     var kf = ctx.compile_function[spec.follow]()  # launched only when FOLLOW
     var kh = ctx.compile_function[spec.hud]()  # launched only when HUD
+    var ksn = ctx.compile_function[spec.sense]()  # launched only when WORLD
+    var kht = ctx.compile_function[spec.hud_text]()
+    var kmm = ctx.compile_function[spec.minimap]()
+    var src_b = ctx.enqueue_create_buffer[DType.float32](5 * spec.NSRC)
+    var site_b = ctx.enqueue_create_buffer[DType.float32](4 * spec.NSITE)
+    var plume_b = ctx.enqueue_create_buffer[DType.float32](2 * spec.NSITE)
+    var plume_h = ctx.enqueue_create_host_buffer[DType.float32](2 * spec.NSITE)
+    var ptrace = List[Float32]()
+    comptime if WORLD > 0:
+        var sr = eng.load(dir + "src.bin", 5 * spec.NSRC)
+        ctx.enqueue_copy(src_b, sr.unsafe_ptr().unsafe_bitcast[Float32]())
+        var st = eng.load(dir + "sites.bin", 4 * spec.NSITE)
+        ctx.enqueue_copy(site_b, st.unsafe_ptr().unsafe_bitcast[Float32]())
+        plume_b.enqueue_fill(0)
+    var tsrc = TileTensor(src_b, spec.LSRC)
+    var tsite = TileTensor(site_b, spec.LSITE)
+    var tplume = TileTensor(plume_b, spec.LPLUME)
     var root_b = ctx.enqueue_create_buffer[DType.float32](2 * spec.NROOT)
     var gs_b = ctx.enqueue_create_buffer[DType.float32](4 * eng.F)
     var rs_h = List[Float32]()
@@ -196,6 +214,8 @@ def main() raises:
             ms[1] += Float64(perf_counter_ns() - tp)
             tp = perf_counter_ns()
         var draw = render_every > 0 and fr % render_every == 0 if BRAIN > 0 else True
+        comptime if WORLD > 0:  # the plume at the odor sites of this step's pose: the HUD text, the trace and a brain's sense packet read it
+            ctx.enqueue_function(ksn, tplume, tpose, tsite, tsrc, grid_dim=1, block_dim=64)
         if draw:
             comptime if FOLLOW > 0:
                 ctx.enqueue_function(kf, tcam, tpose, troot, grid_dim=1, block_dim=1)
@@ -204,6 +224,9 @@ def main() raises:
             ctx.enqueue_function(ks, vis, img, tpi, tpf, trv, trt, trp, tpose, tcam, grid_dim=(ren.W * ren.H + 255) // 256, block_dim=256)
             comptime if HUD > 0:
                 ctx.enqueue_function(kh, img, tgs, grid_dim=(spec.PANEL_W * spec.PANEL_H + 63) // 64, block_dim=64)
+                comptime if WORLD > 0:
+                    ctx.enqueue_function(kht, img, tplume, grid_dim=(spec.PANEL_W * spec.TXT_H + 63) // 64, block_dim=64)
+                    ctx.enqueue_function(kmm, img, tpose, troot, tsrc, grid_dim=(spec.MAP * spec.MAP + 63) // 64, block_dim=64)
             comptime if PROFILE > 0:
                 ctx.synchronize()
                 ms[2] += Float64(perf_counter_ns() - tp)
@@ -229,6 +252,12 @@ def main() raises:
                     var b = Int(rs_h[2 * r]) - 1
                     for c in range(3):
                         trace.append(pose_h[(3 * b + c) * ren.F])
+                comptime if WORLD > 0:
+                    if len(a) > 14:  # concentration food, decoy per site after this frame's steps
+                        ctx.enqueue_copy(plume_h, plume_b)
+                        ctx.synchronize()
+                        for k in range(2 * spec.NSITE):
+                            ptrace.append(plume_h[k])
                 comptime if eng.GAME:
                     if len(a) > 13:  # energy, health, stamina, dead, sum |qfrc_actuator|, sum |actuator_force| of animal 0 after this frame's steps
                         ctx.enqueue_copy(game_h, gs_src)
@@ -273,6 +302,10 @@ def main() raises:
             if len(a) > 13:
                 with open(String(a[13]), "w") as file:
                     file.write_bytes(Span(unsafe_ptr=gtrace.unsafe_ptr().unsafe_bitcast[UInt8](), length=len(gtrace) * 4))
+        comptime if WORLD > 0:
+            if len(a) > 14:
+                with open(String(a[14]), "w") as file:
+                    file.write_bytes(Span(unsafe_ptr=ptrace.unsafe_ptr().unsafe_bitcast[UInt8](), length=len(ptrace) * 4))
     if to_file:
         with open(String(a[10]), "w") as file:
             file.write_bytes(Span(unsafe_ptr=out_h.unsafe_ptr().unsafe_bitcast[UInt8](), length=ren.W * ren.H * 4))

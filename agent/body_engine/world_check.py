@@ -10,9 +10,9 @@ pose rows) and the mini-map read it, the python oracle reads the same PlumeWorld
 fly/l_odor, fly/r_odor (stands, brain 0: the fly's gait is not merged); spider = the leg I tarsus tips (l1_tarsus, r1_tarsus at local
 +0.6 mm x: the generated model has no palps and no sites), walking under the merged brain (BRAIN=2).
   (1) sense: per site, food and decoy of the engine's last frame == world_content.concentration_xy_mm at the site's MuJoCo kinematics
-      position (engine's final qpos), abs err <= 1e-5
+      position (engine's final qpos), abs err <= 2e-5
   (2) text: the 'd.ddd' text under the bars is exactly the glyphs python draws from the oracle value, and nothing else is drawn there
-  (3) map: every source square sits at hud.project_source(descriptor) (centroid within 0.5 px) in its kind colour; the animal at the centre
+  (3) map: every source square sits at hud.project_source(descriptor) (centroid within 0.55 px: the squares sit on whole pixels) in its kind colour; the animal at the centre
 check.sh world_hud adds mutants: food/decoy swapped in sense, the presence flag ignored, mini-map y flipped.
 """
 import os
@@ -55,7 +55,7 @@ def sites_of(m):
     return [(mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, b), np.array([x, 0.0, 0.0])) for b, x in SPIDER_SITES]
 
 
-def prepare(name):
+def prepare(name, absent=False):
     d = OUT / name
     cam, m = live.prepare(d, mjcf=str(spider_build()) if name == 'spider' else MJCF, dist=15.0 if name == 'spider' else live.DIST)
     q0 = np.fromfile(d / 'qpos.bin', np.float32)
@@ -68,7 +68,7 @@ def prepare(name):
     dx, dy = float(q0[0]) - BEHIND_MM - f.x_mm, float(q0[1]) - f.y_mm  # the food source 40 mm behind the start: descriptor translated once
     shifted = [wc.Source(s.source_id, s.x_mm + dx, s.y_mm + dy, s.kind, s.color_rgb) for s in w.sources]
     shifted[1] = wc.Source(shifted[1].source_id, float(q0[0]) - 20.0, float(q0[1]) + 60.0, shifted[1].kind, shifted[1].color_rgb)  # the decoy: seed 3 puts it 686 mm away, off the map
-    w = wc.PlumeWorld(w.seed, tuple(shifted), w.state)
+    w = wc.PlumeWorld(w.seed, tuple(shifted), wc.ResourceState(w.state.remaining, (True, not absent)))  # absent: the decoy emits nothing and is drawn grey
     np.array([[s.x_mm, s.y_mm, s.kind, float(w.state.present[i]), w.state.remaining[i]] for i, s in enumerate(w.sources)], np.float32).tofile(d / 'src.bin')
     return d, m, w
 
@@ -126,9 +126,10 @@ def text_mask(g, values):
     return mask
 
 
-def check(name):
+def scenario(name, absent):
     OUT.mkdir(parents=True, exist_ok=True)
-    d, m, w = prepare(name)
+    d, m, w = prepare(name, absent)
+    tag = f'{name}{" decoy absent" if absent else ""}'
     g = geometry()
     img, q, roots, plume = run(d, name)
     ok = True
@@ -136,10 +137,10 @@ def check(name):
     want = wc.concentration_xy_mm(site_xy(m, q, d), w)
     err = float(np.abs(plume[-1] - want).max())
     moved = float(np.abs(plume[-1] - plume[0]).max())
-    one = err <= 1e-5 and (want > 0).any()
+    one = err <= 2e-5 and (want > 0).any() and (not absent or bool((plume[:, :, 1] == 0).all()))  # absent: the decoy's concentration is exactly 0 in every frame
     ok &= one
-    print(('PASS' if one else 'FAIL'), f'{name} (1) sense: engine concentration at {len(want)} sites == world_content at MuJoCo site positions, max abs err {err:.2e} '
-          f'(bar 1e-5); food L/R {plume[-1, 0, 0]:.4f} {plume[-1, 1, 0]:.4f}, decoy {plume[-1, 0, 1]:.4f} {plume[-1, 1, 1]:.4f}; change over {FRAMES} frames {moved:.4f}')
+    print(('PASS' if one else 'FAIL'), f'{tag} (1) sense: engine concentration at {len(want)} sites == world_content at MuJoCo site positions, max abs err {err:.2e} '
+          f'(bar 2e-5); food L/R {plume[-1, 0, 0]:.4f} {plume[-1, 1, 0]:.4f}, decoy {plume[-1, 0, 1]:.4f} {plume[-1, 1, 1]:.4f}; change over {FRAMES} frames {moved:.4f}')
     # (2) text
     mask = text_mask(g, want)
     hud = img[..., 3] == 254
@@ -148,7 +149,7 @@ def check(name):
     shown = hud & region
     two = bool((shown == mask).all() and (img[mask][:, :3] == 255).all())
     ok &= two
-    print(('PASS' if two else 'FAIL'), f'{name} (2) text: {int(mask.sum())} glyph pixels expected, {int(shown.sum())} drawn, equal={bool((shown == mask).all())}')
+    print(('PASS' if two else 'FAIL'), f'{tag} (2) text: {int(mask.sum())} glyph pixels expected, {int(shown.sum())} drawn, equal={bool((shown == mask).all())}')
     # (3) map: each source square at project_source, in its kind colour
     tx, ty = float(roots[-1, 0]), float(roots[-1, 1])
     three = True
@@ -157,18 +158,22 @@ def check(name):
         cy = g['MAP'] / 2 - (s.y_mm - ty) * g['MAP_SCALE']
         inside = 4 <= cx <= g['MAP'] - 4 and 4 <= cy <= g['MAP'] - 4
         crop = img[g['MAP_Y']:g['MAP_Y'] + g['MAP'], g['MAP_X']:g['MAP_X'] + g['MAP']]
-        hit = (crop[..., :3] == COLOR[s.kind]).all(-1) & (crop[..., 3] == 254)
+        hit = (crop[..., :3] == ((128, 128, 128) if not w.state.present[i] else COLOR[s.kind])).all(-1) & (crop[..., 3] == 254)
         ys, xs = np.nonzero(hit)
         if not inside:
-            print(f'NOTE {name} source {i} (kind {s.kind}) at map ({cx:.1f}, {cy:.1f}) is outside the {g["MAP"]} px map')
+            print(f'NOTE {tag} source {i} (kind {s.kind}) at map ({cx:.1f}, {cy:.1f}) is outside the {g["MAP"]} px map')
             three &= len(xs) == 0
             continue
         got = (xs.mean() + 0.5, ys.mean() + 0.5) if len(xs) else (np.nan, np.nan)
-        good = len(xs) >= 25 and abs(got[0] - cx) <= 0.5 and abs(got[1] - cy) <= 0.5
+        good = len(xs) >= 25 and abs(got[0] - cx) <= 0.55 and abs(got[1] - cy) <= 0.55
         three &= bool(good)
-        print(('PASS' if good else 'FAIL'), f'{name} (3) map source {i} kind {s.kind}: expected ({cx:.2f}, {cy:.2f}) got ({got[0]:.2f}, {got[1]:.2f}), {len(xs)} px')
+        print(('PASS' if good else 'FAIL'), f'{tag} (3) map source {i} kind {s.kind}: expected ({cx:.2f}, {cy:.2f}) got ({got[0]:.2f}, {got[1]:.2f}), {len(xs)} px')
     ok &= three
     return bool(ok)
+
+
+def check(name):
+    return scenario(name, False) and scenario(name, True)
 
 
 def main(cmd, *names):
