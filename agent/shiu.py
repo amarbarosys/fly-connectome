@@ -341,7 +341,9 @@ class ShiuLive(ShiuGPU):
     """Resident ShiuGPU: graph uploaded once; each sniff(p) resets the brain, runs to the last
     window with Poisson probabilities p (per stimulate() entry, in insertion order) and returns
     counts (windows, len(readout)) for the readout entries only. Sniff k uses seed + k. record=path writes
-    every neuron's counts at every window there; read it back with recording()."""
+    every neuron's counts at every window there; read it back with recording(). advance(steps) instead
+    preserves all device state and the absolute tick across windows; snapshot() is the verification-only
+    full-state host copy."""
     def start(self, windows, readout, record=None):
         self.work = ROOT / f'.work/agent/shiu/live-{id(self)}'
         self.work.mkdir(parents=True, exist_ok=True)

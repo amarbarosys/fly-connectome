@@ -57,13 +57,26 @@ def gpu_gate(mutant_child: bool):
             raise AssertionError("resident split readouts differ")
         for name in whole_state:
             if not np.array_equal(whole_state[name], split_state[name]):
-                raise AssertionError(f"GPU split state mismatch: {name}")
+                diff = np.flatnonzero(whole_state[name] != split_state[name])
+                first = int(diff[0]) if len(diff) else -1
+                raise AssertionError(f"GPU split state mismatch: {name}, differing={len(diff)}, first={first}, "
+                                     f"whole={whole_state[name][first] if first >= 0 else 'n/a'}, "
+                                     f"split={split_state[name][first] if first >= 0 else 'n/a'}")
         if int(whole_state["t"][0]) != TOTAL:
             raise AssertionError("continuous tick did not cross 32,000")
     finally:
         whole.close()
         split.close()
     print(f"PASS GPU continuous advance: {TOTAL} ticks, split {SPLIT}+{TAIL}, full state and spikes exact")
+
+    sniff = configure(ShiuLive(PRE, POST, SYN, N, seed=3)).start([TOTAL], READOUT)
+    try:
+        sniff_counts = sniff.sniff(np.array([1.0], np.float32))[0]
+    finally:
+        sniff.close()
+    if not np.array_equal(whole_counts, sniff_counts):
+        raise AssertionError("legacy resident sniff mode changed during continuous-state work")
+    print(f"PASS resident sniff regression: {TOTAL} ticks, one-shot counts exact")
 
 
 def main():
