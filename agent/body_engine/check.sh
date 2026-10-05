@@ -237,6 +237,16 @@ if [ "$stage" = spectate ]; then  # spectator hooks in live.mojo (docs/plans/REN
   [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
   echo "PASS all spectate checks"; exit 0
 fi
+if [ "$stage" = game ]; then  # game layer per step (-DGAME=1, docs/plans/GAME_LAYER.md) on fly and spider: engine energy/stamina rows == game_events.replay on
+  # MuJoCo's per-step work, death at the oracle's step, servos and adhesion exactly 0 after it, HUD bars show the engine rows.
+  # Mutants: the work term skipped; the dead gate removed
+  G="$M -m agent.body_engine.game_check check"
+  $G || { echo "FAIL game"; fail=$((fail+1)); }
+  ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo 's|work += abs(get(res, f, OQACT + v) \* qvel\[v \* F + f\]) \* mf\[TSTEP\]|work += 0|' -- $G fly || fail=$((fail+1))
+  ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo 's|if get(res, f, OGAME + 3) != 0:|if get(res, f, OGAME + 3) > 5:|' -- $G fly || fail=$((fail+1))
+  [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
+  echo "PASS all game checks"; exit 0
+fi
 if [ "$stage" = fluid ]; then  # Flybody flight model: mj_fluid (ellipsoid wings + inertia boxes) inside qfrc_passive, wing velocities up to flapping rate
   R=~/Projects/science/fly-connectome; FL=${FLIGHT:-$R/.work/flight-body}
   [ -f $FL/flight.xml ] || $R/.work/neural-flies/flight-venv/bin/python agent/body_engine/models/flight_export.py $FL

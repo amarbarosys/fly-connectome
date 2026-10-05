@@ -14,8 +14,9 @@ brain link (-DBRAIN=1 or 2, docs/plans/SPIDER_BRAIN.md unit 1; BRAIN=0 compiles 
 
 spectator (docs/plans/RENDERER.md; each flag compiles none of its block when 0): -DFOLLOW=1 follows the root bodies of DIR/roots.bin
        (body, radius per root; spectate.follow, on the card, same formula as follow_camera.fit_camera) instead of the fixed camera;
-       -DHUD=1 draws the energy/health/stamina bars of animal 0 from DIR/game.bin (4 x F float32, [row][animal]); -DPROFILE=1 syncs
-       between phases and, with arg 12 = FILE, writes the root trace FILE (float32 frame, root, xyz) and prints one COST line
+       -DHUD=1 draws the energy/health/stamina bars of animal 0 from DIR/game.bin (4 x F float32, [row][animal]), or from the engine's own rows
+       under -DGAME=1 (smooth.mojo: work drain, stamina, death gates the servos; rules at the end of mf.bin); -DPROFILE=1 syncs
+       between phases and, with arg 12 = FILE, writes the root trace FILE (float32 frame, root, xyz; arg 13 = game rows + effort sums per frame under GAME) and prints one COST line
        (ms per frame: physics, neural_control, render, copy, display; the syncs cost, the run is for the split, not for fps).
 
 usage: live DIR/ FRAMES ex ey ez tx ty tz fovy_deg [OUT]
@@ -159,11 +160,17 @@ def main() raises:
         ctx.enqueue_copy(root_b, rs.unsafe_ptr().unsafe_bitcast[Float32]())
         for k in range(2 * spec.NROOT):
             rs_h.append(rs.unsafe_ptr().unsafe_bitcast[Float32]()[k])
-    comptime if HUD > 0:
+    comptime if HUD > 0 and not eng.GAME:
         var gs = eng.load(dir + "game.bin", 4 * eng.F)
         ctx.enqueue_copy(gs_b, gs.unsafe_ptr().unsafe_bitcast[Float32]())
     var troot = TileTensor(root_b, spec.LROOT)
-    var tgs = TileTensor(gs_b, spec.LGS)
+    var gs_src = gs_b  # the HUD reads the engine's own game rows under GAME, else DIR/game.bin
+    comptime if eng.GAME:
+        gs_src = o_b.create_sub_buffer[DType.float32](eng.OGAME * eng.F, 4 * eng.F)
+    var tgs = TileTensor(gs_src, spec.LGS)
+    var game_h = ctx.enqueue_create_host_buffer[DType.float32](4 * eng.F)  # PROFILE + GAME trace: game rows, then the effort rows
+    var act_h = ctx.enqueue_create_host_buffer[DType.float32]((eng.NU + eng.NV) * eng.F)
+    var gtrace = List[Float32]()
     var pose_h = ctx.enqueue_create_host_buffer[DType.float32](ren.PROWS * ren.F)  # PROFILE: the root trace reads xpos from here
     var trace = List[Float32]()
     var ms = InlineArray[Float64, 5](fill=0)  # PROFILE: neural_control, physics, render, copy, display
@@ -222,6 +229,21 @@ def main() raises:
                     var b = Int(rs_h[2 * r]) - 1
                     for c in range(3):
                         trace.append(pose_h[(3 * b + c) * ren.F])
+                comptime if eng.GAME:
+                    if len(a) > 13:  # energy, health, stamina, dead, sum |qfrc_actuator|, sum |actuator_force| of animal 0 after this frame's steps
+                        ctx.enqueue_copy(game_h, gs_src)
+                        ctx.enqueue_copy(act_h, o_b.create_sub_buffer[DType.float32](eng.OAF * eng.F, (eng.NU + eng.NV) * eng.F))
+                        ctx.synchronize()
+                        var qf = Float32(0)
+                        var af = Float32(0)
+                        for k in range(eng.NV):
+                            qf += abs(act_h[(eng.NU + k) * eng.F])
+                        for k in range(eng.NU):
+                            af += abs(act_h[k * eng.F])
+                        for k in range(4):
+                            gtrace.append(game_h[k * eng.F])
+                        gtrace.append(qf)
+                        gtrace.append(af)
                 tp = perf_counter_ns()
         fr += 1
         if to_file:
@@ -247,6 +269,10 @@ def main() raises:
         if len(a) > 12:
             with open(String(a[12]), "w") as file:
                 file.write_bytes(Span(unsafe_ptr=trace.unsafe_ptr().unsafe_bitcast[UInt8](), length=len(trace) * 4))
+        comptime if eng.GAME:
+            if len(a) > 13:
+                with open(String(a[13]), "w") as file:
+                    file.write_bytes(Span(unsafe_ptr=gtrace.unsafe_ptr().unsafe_bitcast[UInt8](), length=len(gtrace) * 4))
     if to_file:
         with open(String(a[10]), "w") as file:
             file.write_bytes(Span(unsafe_ptr=out_h.unsafe_ptr().unsafe_bitcast[UInt8](), length=ren.W * ren.H * 4))

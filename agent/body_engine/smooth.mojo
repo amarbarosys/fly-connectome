@@ -32,6 +32,7 @@ from max.gpu.host import DeviceContext
 from layout import TileTensor, row_major
 from world import NP, PW, height_grad
 from convex import Sp, collide, collide_hfield, Height, ELLIPSOID, MESH, BOX, T as CT, S as CS, V as CVEC  # convex.mojo's scalar type (float64 with -DCCD64=1, which the export sets)
+import game_state as game
 
 comptime NB = get_defined_int["NBODY"]()
 comptime NJ = get_defined_int["NJNT"]()
@@ -154,7 +155,9 @@ comptime NFL2 = CSPF + (11 * NWRAP if SPATIAL else 0)
 comptime CCV = NFL2  # NCV: opt.ccd_tolerance, heightfield size 0-3 and origin z (HFEXACT), then per pair geom1's size (3)
 comptime CEQF = NFL2 + (6 + 3 * NCP if NCV > 0 else 0)  # per equality: anchors 0 and 1, quaternions 0 and 1, torquescale, solref, solimp, invweight 2, joint data 5, qpos0 2
 comptime CGF = CEQF + EQF * NEQ
-comptime NFL = CGF + (NB if GRAVCOMP else 0)
+comptime GAME = get_defined_int["GAME", 0]() == 1 and STAGE >= 7  # game layer per step (docs/plans/GAME_LAYER.md): energy, health, stamina, dead
+comptime GAMEF = CGF + (NB if GRAVCOMP else 0)  # GAME: rules appended to mf.bin: basal drain, work rate, health regen
+comptime NFL = GAMEF + (3 if GAME else 0)
 comptime HFNR = get_defined_int["HFNR", 2]()  # HFEXACT: grid rows and columns of the MuJoCo hfield (the engine's grid is virtual and endless, same step)
 comptime HFNC = get_defined_int["HFNC", 2]()
 # smooth.bin rows (per animal): xpos, xquat, xipos of bodies 1.., geom_xpos, xanchor, xaxis
@@ -240,7 +243,9 @@ comptime ORKQ = NROW0  # RK4 scratch (INTEGRATOR 1 only): X0 qpos, then per stag
 comptime ORKV = ORKQ + NQ
 comptime ORKF = ORKV + 4 * NV
 comptime ORKW = ORKF + 4 * NV
-comptime NROW = ORKW + NV if INTEGRATOR == 1 else NROW0
+comptime NROW1 = ORKW + NV if INTEGRATOR == 1 else NROW0
+comptime OGAME = NROW1  # GAME: four float32 rows per animal, energy health stamina dead; all zero = not started
+comptime NROW = OGAME + (4 if GAME else 0)
 comptime LI = row_major[NI]()
 comptime LF = row_major[NFL]()
 comptime LQ = row_major[NQ * F]()
@@ -1505,6 +1510,11 @@ def actuation(mi: TI, mf: TF, qpos: TQ, qvel: TV, ctrl: TU, res: TO, f: Int):
     (ctrl clamped to ctrlrange) + bias0 + bias1 length + bias2 velocity, clamped to forcerange; qfrc = moment' force."""
     for v in range(NV):
         res[(OQACT + v) * F + f] = 0
+    comptime if GAME:  # a dead animal has no servo or adhesion effort (game.actuator_scale)
+        if get(res, f, OGAME + 3) != 0:
+            for u in range(NU):
+                res[(OAF + u) * F + f] = 0
+            return
     for u in range(NU):
         var a = CACT + 5 * u
         var af = CACF + 9 * u
@@ -2840,7 +2850,21 @@ def step(mi: TI, mf: TF, qpos: TQ, qvel: TV, ctrl: TU, res: TO, f: Int, rks: Int
         comptime if NEQ > 0:
             equality(mi, mf, qpos, qvel, res, f)
         comptime if STAGE >= 7:
+            comptime if GAME:  # not started: every row zero (a dead animal has dead = 1, so it is never re-initialised)
+                if get(res, f, OGAME) == 0 and get(res, f, OGAME + 1) == 0 and get(res, f, OGAME + 2) == 0 and get(res, f, OGAME + 3) == 0:
+                    for r in range(3):
+                        res[(OGAME + r) * F + f] = 1
             actuation(mi, mf, qpos, qvel, ctrl, res, f)
+            comptime if GAME:  # physical work of this step: sum |qfrc_actuator x qvel| x dt (qvel before the step's update)
+                var work: Float32 = 0
+                for v in range(NV):
+                    work += abs(get(res, f, OQACT + v) * qvel[v * F + f]) * mf[TSTEP]
+                var next = game.advance_state(game.GameState(get(res, f, OGAME), get(res, f, OGAME + 1), get(res, f, OGAME + 2), get(res, f, OGAME + 3)),
+                                              work, False, False, False, mf[GAMEF], mf[GAMEF + 1], 0, mf[GAMEF + 2], 0, 0)
+                res[OGAME * F + f] = next.energy
+                res[(OGAME + 1) * F + f] = next.health
+                res[(OGAME + 2) * F + f] = next.stamina
+                res[(OGAME + 3) * F + f] = next.dead
         comptime if STOP == 5:
             return
         newton(mi, mf, res, f)
