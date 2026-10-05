@@ -333,11 +333,12 @@ class ShiuGPU(ShiuBrain):
 
 
 def worker_binary(n, edges, flies, source=ROOT / 'agent/shiu_worker.mojo'):
-    """shiu_worker built for this graph size and column count; rebuilt when the source is newer.
+    """shiu_worker built for this graph size, column count and source CONTENT (sha in the name: an mtime check let a binary
+    compiled from another version pass as fresh, and a 3-column MCNS worker gave 0 spikes, 2026-10-06).
     Another source (a checkpoint's own kernel) builds beside itself."""
     out = ROOT / '.work/agent/shiu/build' if source == ROOT / 'agent/shiu_worker.mojo' else source.parent / 'build'
-    binary = out / f'shiu_worker_{n}_{edges}_c{flies}'
-    if not binary.is_file() or binary.stat().st_mtime < source.stat().st_mtime:
+    binary = out / f'shiu_worker_{n}_{edges}_c{flies}_{hashlib.sha256(source.read_bytes()).hexdigest()[:12]}'
+    if not binary.is_file():
         binary.parent.mkdir(parents=True, exist_ok=True)
         subprocess.run([str(Path.home() / 'iTools/bin/mojo-cached'), 'build', f'-DSHIU_N={n}', f'-DSHIU_E={edges}',
                         f'-DSHIU_C={flies}', str(source), '-o', str(binary)], check=True, cwd=ROOT)

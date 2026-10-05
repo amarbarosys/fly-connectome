@@ -14,6 +14,7 @@ usage: gpu-wait run --shared --vram 3 --priority 60 --timeout 900 --env PYTHONPA
 """
 import json
 import sys
+from pathlib import Path
 
 import numpy as np
 
@@ -21,6 +22,7 @@ from agent import mcns, shiu_g1
 from agent.mcns_mapping import descending_name_sets, leg_motor_groups
 from agent.shiu import ShiuGPU
 
+READOUT = Path('.work/agent/mcns/mn_readout.npz')
 FWD, TURN = (50, 80, 110, 140, 170, 200), (None, 'left', 'right')
 DT = (50, 100)  # turn sizes: that side's forward DNs + DT Hz
 COND = [(f, None, 0) for f in FWD] + [(f, t, d) for f in FWD for t in TURN[1:] for d in DT]  # 30 conditions
@@ -86,6 +88,14 @@ out = {'mn_spikes_LR': side, 'active_mn': int((allmn.sum((0, 1)) > 0).sum()), 'm
        'asym_r2': r2(p), 'turn_sign': signs, 'mutant_permuted_teacher_asym_r2': r2(q), 'unlearned_side_sum_corr': corr_sum,
        'teacher_asym_range': [float((drive[..., 0] - drive[..., 1]).min()), float((drive[..., 0] - drive[..., 1]).max())]}
 print(json.dumps(out))
+# the readout the closed loop uses (agent/body_engine/mcns_link.py): ridge per side on ALL conditions, z-scored inputs
+fit = {}
+for k, X in enumerate((mnL, mnR)):
+    A = X.reshape(-1, X.shape[-1]).astype(float); y = drive[..., k].ravel(); mu, sd = A.mean(0), A.std(0) + 1e-9
+    Z = (A - mu) / sd
+    fit.update({f'mu{k}': mu, f'sd{k}': sd, f'y{k}': y.mean(), f'w{k}': np.linalg.solve(Z.T @ Z + 10.0 * np.eye(Z.shape[1]), Z.T @ (y - y.mean()))})
+READOUT.parent.mkdir(parents=True, exist_ok=True)
+np.savez(READOUT, mnL=mn['L'], mnR=mn['R'], **fit)
 ok = [('G1 held-out asymmetry R^2 >= 0.7', out['asym_r2'] >= 0.7), ('G2 turn sign in every turning condition', all(signs.values())),
       ('M1 permuted-teacher fit asymmetry R^2 < 0.3', out['mutant_permuted_teacher_asym_r2'] < 0.3)]
 for k, v in ok:

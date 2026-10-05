@@ -4,8 +4,12 @@
 # usage: gpu-wait run --timeout 1200 -- [env BODY=path.xml] agent/body_engine/check.sh [STAGE]
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-mkdir -p .work; exec 9>.work/check.lock  # one stage per worktree: mutant-check edits sources in place (SHARED rule 13)
-flock -n 9 || { echo "FAIL check.sh: another stage is running in $(pwd); run stages one at a time"; exit 1; }
+if [ -z "${CHECK_LOCK_HELD:-}" ]; then  # a stage that calls another (solver -> loopk) passes the lock down
+  mkdir -p .work; exec 9>>.work/check.lock  # one stage per worktree: mutant-check edits sources in place (SHARED rule 13)
+  flock -n 9 || { echo "FAIL check.sh: another stage is running in $(pwd) ($(tail -n 1 .work/check.lock)); run stages one at a time"; exit 1; }
+  echo "pid $$ stage ${1:-kinematics} since $(date +%T)" > .work/check.lock
+  export CHECK_LOCK_HELD=1
+fi
 stage=${1:-kinematics}; M=.venv/bin/python; X=.work/agent/body_engine; fail=0
 [ "${QUICK:-0}" = 1 ] && { echo "QUICK=1: no mutants (all states kept, same bars): an iteration run, NOT a gate (verify_commit runs the full stage)"; export QUICK; trap 'echo "QUICK=1 run finished: rerun without QUICK before READY"' EXIT; }
 if [ "$stage" = convex ]; then  # GJK + EPA narrowphase (convex.mojo, CPU build) vs MuJoCo mj_collision, per pair kind: float64 exact, float32 bars
@@ -483,6 +487,38 @@ if [ "$stage" = jump ]; then  # spider jump (docs/plans/SPIDER_BRAIN.md unit 3):
   ~/iTools/bin/mutant-check agent/body_engine/live.mojo 's/ctx.enqueue_copy(u_b, ctrl_h)/pass/' -- $L || fail=$((fail+1))
   [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
   echo "PASS all jump checks"; exit 0
+fi
+if [ "$stage" = solver ]; then  # CG and PGS (mj_solCG, mj_solPGS) vs MuJoCo with opt.solver set, next to Newton (the default)
+  F=.work/agent/gpu-body-port/body-v2/body.xml; SB=.work/agent/body_engine/spider-body/spider.xml; I=$X/solver
+  echo "COVERAGE solver=CG (1) and PGS (0), integrator Euler, pyramidal cone, noslip 5 as shipped: fly actuated on standing states (feet, grooming pairs, servos, adhesion), fly + spider world at 200 and 8 mm, two-fly world at 200 mm (two kinematic trees = two MuJoCo islands: PGS per island with its own shuffle)"
+  echo "COVERAGE not covered: equality and friction-loss rows (PGS/CG export refuses them), elliptic cones, solver x non-Euler integrator, contact-free step (the solver is not in it), CG at float32 stop tests (CG runs its iteration cap: MuJoCo's tests fire early in float32, see smooth.mojo), K>0 chains vs MuJoCo (loopk below is engine vs engine)"
+  A=$(env -u ENGINE_OPT $M -m agent.body_engine.model airborne $F $I/fly 0 | tail -1)  # standing states from the shipped Euler/Newton rollout
+  for SV in 1 0; do
+    export ENGINE_OPT=solver=$SV
+    STATES=$A $M -m agent.body_engine.model check $F $I/fly$SV actuated 64 || { echo "FAIL fly actuated solver=$SV"; fail=$((fail+1)); }
+    for off in 200 8; do
+      W=$($M -c "from agent.body_engine.model import combine; print(combine('$F', '$SB', ($off, 0, 0), 'sworld$off'))")
+      AW=$(env -u ENGINE_OPT $M -m agent.body_engine.model airborne $W $I/world$off 0 | tail -1)
+      STATES=$AW $M -m agent.body_engine.model check $W $I/world$SV$off actuated 64 || { echo "FAIL solver=$SV world at $off mm"; fail=$((fail+1)); }
+    done
+  done
+  # islands: two flies 200 mm apart = two kinematic trees = two MuJoCo islands (own shuffle, own stop). The merged two-fly world differs from its engine
+  # twin by 7e-5 in MuJoCo itself (Newton too: WORLD.md, open), so this test alone runs at REL=2e-4; PGS over both flies' rows as one block (the island loop run over all rows for every root) must fail here
+  FW=$($M -c "from agent.body_engine.model import combine; print(combine('$F', '$F', (200, 0, 0), 'ffworld'))")
+  AF=$(env -u ENGINE_OPT $M -m agent.body_engine.model airborne $FW $I/ffworld 0 | tail -1)
+  for SV in 1 0; do
+    REL=2e-4 ENGINE_OPT=solver=$SV STATES=$AF $M -m agent.body_engine.model check $FW $I/ff$SV actuated 64 || { echo "FAIL solver=$SV two-fly world"; fail=$((fail+1)); }
+  done
+  ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo 's/            if Int(mi\[ROOT + Int(mi\[CPH + 11 \* rp + 2\])\]) == troot:/            if True:/' -- \
+    env REL=2e-4 ENGINE_OPT=solver=0 STATES=$AF $M -m agent.body_engine.model check $FW $I/mutant actuated 64 || fail=$((fail+1))
+  # mutants: PGS projection (force clamped at 0 -> min), CG Polak-Ribiere beta sign
+  ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo 's/var new = max(old - rs \* get(res, f, OGA + r), Float32(0))/var new = min(old - rs * get(res, f, OGA + r), Float32(0))/' -- \
+    env ENGINE_OPT=solver=0 STATES=$A $M -m agent.body_engine.model check $F $I/mutant actuated 64 || fail=$((fail+1))
+  ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo 's/var beta = max(num \/ max(den, Float32(1e-15)), Float32(0))/var beta = max(-num \/ max(den, Float32(1e-15)), Float32(0))/' -- \
+    env ENGINE_OPT=solver=1 STATES=$A $M -m agent.body_engine.model check $F $I/mutant actuated 64 || fail=$((fail+1))
+  for SV in 1 0; do ENGINE_OPT=solver=$SV $0 loopk || fail=$((fail+1)); done  # K=10 vs 10 x K=1, engine vs engine, per solver
+  [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
+  echo "PASS all solver checks (CG, PGS)"; exit 0
 fi
 B=${BODY:-.work/agent/gpu-body-port/body-v2/body.xml}  # BODY=path checks another MJCF (e.g. the spider from models/spider.py)
 $M -m agent.body_engine.model check $B $X/body-$(basename $B .xml) "$stage" 64 || { echo "FAIL $(basename $B .xml) $stage"; fail=$((fail+1)); }
