@@ -54,13 +54,14 @@ def set_state(d, energy, health, stamina, dead):
 
 
 def build(d, tag, flags, k=K, src=None, brain=2):
-    """Content-addressed build (mutant-check restores old mtimes): live.mojo `src` (default the current one) + the modules it imports."""
+    """Content-addressed build (mutant-check restores old mtimes): live.mojo `src` (default the current one), every engine
+    module it may import, and the model's sizes (a re-export with other sizes, e.g. convex pairs on, needs its own binary)."""
     src = src or ENGINE / 'live.mojo'
-    deps = [src] + [ENGINE / f for f in ('smooth.mojo', 'render.mojo', 'spider_brain.mojo', 'spectate.mojo', 'follow_camera.mojo', 'hud.mojo', 'world.mojo', 'game_state.mojo', 'world_content.mojo')]
-    h = hashlib.sha1(b''.join(f.read_bytes() for f in deps) + ' '.join(flags).encode() + bytes([brain])).hexdigest()[:8]
+    deps = [src] + sorted(f for f in ENGINE.glob('*.mojo') if f != src)
+    sz = (d / 'sizes.txt').read_text().split() + (d / 'rsizes.txt').read_text().split()
+    h = hashlib.sha1(b''.join(f.read_bytes() for f in deps) + ' '.join(flags + sz).encode() + bytes([brain])).hexdigest()[:8]
     b = d / f'{tag}_k{k}_{W}x{H}_{h}'
     if not b.is_file():
-        sz = (d / 'sizes.txt').read_text().split() + (d / 'rsizes.txt').read_text().split()
         nb = int([f for f in sz if f.startswith('-DNBODY=')][0][8:])
         subprocess.run([MOJO, 'build', '-I', str(ENGINE), *sz, '-DFLIES=1', '-DSTAGE=7', f'-DK={k}', '-DWAVE=1', f'-DW={W}', f'-DH={H}', f'-DPROWS={7 * (nb - 1)}',
                         '-DBOX_MM=0', f'-DBRAIN={brain}', *flags, str(src), '-o', str(b)], check=True, capture_output=True)
