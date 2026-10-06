@@ -53,17 +53,17 @@ def set_state(d, energy, health, stamina, dead):
     np.array([energy, health, stamina, dead], np.float32).tofile(d / 'game.bin')
 
 
-def build(d, tag, flags, k=K, src=None, brain=2):
+def build(d, tag, flags, k=K, src=None, brain=2, flies=1):
     """Content-addressed build (mutant-check restores old mtimes): live.mojo `src` (default the current one), every engine
     module it may import, and the model's sizes (a re-export with other sizes, e.g. convex pairs on, needs its own binary)."""
     src = src or ENGINE / 'live.mojo'
     deps = [src] + sorted(f for f in ENGINE.glob('*.mojo') if f != src)
     sz = (d / 'sizes.txt').read_text().split() + (d / 'rsizes.txt').read_text().split()
-    h = hashlib.sha1(b''.join(f.read_bytes() for f in deps) + ' '.join(flags + sz).encode() + bytes([brain])).hexdigest()[:8]
+    h = hashlib.sha1(b''.join(f.read_bytes() for f in deps) + ' '.join(flags + sz + [f'F{flies}']).encode() + bytes([brain])).hexdigest()[:8]
     b = d / f'{tag}_k{k}_{W}x{H}_{h}'
     if not b.is_file():
         nb = int([f for f in sz if f.startswith('-DNBODY=')][0][8:])
-        subprocess.run([MOJO, 'build', '-I', str(ENGINE), *sz, '-DFLIES=1', '-DSTAGE=7', f'-DK={k}', '-DWAVE=1', f'-DW={W}', f'-DH={H}', f'-DPROWS={7 * (nb - 1)}',
+        subprocess.run([MOJO, 'build', '-I', str(ENGINE), *sz, f'-DFLIES={flies}', '-DSTAGE=7', f'-DK={k}', '-DWAVE=1', f'-DW={W}', f'-DH={H}', f'-DPROWS={7 * (nb - 1)}',
                         '-DBOX_MM=0', f'-DBRAIN={brain}', *flags, str(src), '-o', str(b)], check=True, capture_output=True)
     return b
 

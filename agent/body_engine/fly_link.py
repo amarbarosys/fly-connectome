@@ -99,26 +99,38 @@ class Gait:
 
 
 class Engine:
-    """live.mojo -DBRAIN=1 for one fly: ctrl in over stdin, one sensor packet per step out, frames drawn every step to /dev/null (render cost)."""
-    def __init__(self, d, k, tag, frames):
+    """live.mojo -DBRAIN=1 for F flies in one process: ctrl (F, NU) in over stdin, one sensor packet per step out ((NU+nq+nv+ns) x F,
+    row-major by field); no frame drawn (brain=1 loops read no pixels). F > 1 runs in its own dir with the state tiled to F columns."""
+    def __init__(self, d, k, tag, frames, F=1):
         sizes = (d / 'sizes.txt').read_text()
         self.nu, self.nq, self.nv, self.ns = (int(re.search(rf'-D{n}=(\d+)', sizes).group(1)) for n in ('NU', 'NQ', 'NV', 'NSLOT'))
-        b = sc.build(d, 'fly', ['-DPROFILE=1'], k, brain=1)
-        self.p = subprocess.Popen(['bash', '-c', 'exec "$0" "$@" 4>/dev/null', str(b), str(d) + '/', str(frames), *sc.CAM, '1', '1'],
+        if F > 1:
+            src, d = d, d.parent / f'{d.name}-f{F}'
+            d.mkdir(exist_ok=True)
+            for f in src.glob('*'):
+                if f.is_file() and f.suffix in ('.bin', '.txt'):
+                    a = f.read_bytes()
+                    if f.name in ('qpos.bin', 'qvel.bin', 'ctrl.bin'):
+                        a = np.tile(np.frombuffer(a, np.float32).reshape(-1, 1), (1, F)).astype(np.float32).tobytes()
+                    (d / f.name).write_bytes(a)
+        b = sc.build(d, 'fly', [], k, brain=1, flies=F)
+        self.p = subprocess.Popen(['bash', '-c', 'exec "$0" "$@" 4>/dev/null', str(b), str(d) + '/', str(frames), *sc.CAM, '0', '1'],
                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        self.size = 4 * (self.nu + self.nq + self.nv + self.ns)
+        self.F, self.size = F, 4 * (self.nu + self.nq + self.nv + self.ns) * F
         self.tag = tag
 
     def send(self, ctrl):
-        self.p.stdin.write(np.ascontiguousarray(ctrl, np.float32).tobytes())
+        """ctrl: (NU,) for one fly or (F, NU)."""
+        self.p.stdin.write(np.ascontiguousarray(np.asarray(ctrl, np.float32).reshape(self.F, self.nu).T).tobytes())
         self.p.stdin.flush()
 
     def recv(self):
+        """qpos: (nq,) for F == 1, else (F, nq)."""
         buf = self.p.stdout.read(self.size)
         if len(buf) != self.size:
             raise SystemExit(f'FAIL engine {self.tag} ended early: {self.p.stderr.read().decode()[-300:]}')
-        a = np.frombuffer(buf, np.float32)
-        return a[self.nu:self.nu + self.nq].astype(float)
+        q = np.frombuffer(buf, np.float32)[self.nu * self.F:(self.nu + self.nq) * self.F].reshape(self.nq, self.F).T.astype(float)
+        return q[0] if self.F == 1 else q
 
     def close(self):
         self.p.stdin.close()
@@ -262,7 +274,7 @@ if __name__ == '__main__':
     if cmd == 'build':
         from agent.shiu import worker_binary
         d, m, cam = prepare()
-        sc.build(d, 'fly', ['-DPROFILE=1'], K, brain=1)
+        sc.build(d, 'fly', [], K, brain=1)
         b = brain_setup(start=False)[0]
         print('built', worker_binary(b.n, len(b.col), b.flies, *b.source))
     else:

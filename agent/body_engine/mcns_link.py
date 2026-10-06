@@ -68,7 +68,7 @@ def vision(repeats=1, seed=7, steer=False):
     d, m, _ = prepare()
     q0 = np.fromfile(d / 'qpos.bin', np.float32).astype(float)
     cols = [f'{k}{j}' for j in range(repeats) for k in VIS]
-    eng, gait = {k: Engine(d, K, f'mcnsvis{seed}-' + k, STEPS) for k in cols}, {k: Gait(m, d, K) for k in cols}
+    eng, gait = Engine(d, K, f'mcnsvis{seed}', STEPS, F=len(cols)), {k: Gait(m, d, K) for k in cols}  # one batched engine, a column per fly
     v = np.load('.work/agent/mcns/vision_readout.npz') if steer else None
     b, f, nl, nc = brain(vision=True, repeats=repeats, seed=seed, extra=None if v is None else v['dn'])
     nm = len(f['mnL']) + len(f['mnR'])
@@ -84,13 +84,12 @@ def vision(repeats=1, seed=7, steer=False):
     for i in range(STEPS):
         cum.append(b.advance(K).astype(float))
         x = (cum[-1] - cum[-1 - min(i + 1, WINDOW)]).reshape(len(cols), nc) * (WINDOW / min(i + 1, WINDOW))
+        eng.send([gait[k].ctrl(act(x[c]) if i + 1 >= WINDOW else np.zeros(2)) for c, k in enumerate(cols)])
+        q = eng.recv().reshape(len(cols), -1)
         for c, k in enumerate(cols):
-            eng[k].send(gait[k].ctrl(act(x[c]) if i + 1 >= WINDOW else np.zeros(2)))
-        for k in cols:
-            tr[k].append(eng[k].recv())
+            tr[k].append(q[c])
     b.close()
-    for k in cols:
-        eng[k].close()
+    eng.close()
     r = {k: metrics(m, None, np.array(tr[k])) for k in cols}
     fw = {k: float(r[k]['forward'][-1]) for k in cols}
     yaw = {k: float(r[k]['yaw_deg'][-1]) for k in cols}
@@ -127,7 +126,7 @@ def sense(repeats=1, seed=7):
     d, m, _ = prepare()
     q0 = np.fromfile(d / 'qpos.bin', np.float32).astype(float)
     cols = [(k, j) for j in range(repeats) for k in SENSE]
-    eng, gait = {c: Engine(d, K, f'mcnssense{seed}-{c[0]}{c[1]}', STEPS) for c in cols}, {c: Gait(m, d, K) for c in cols}
+    eng, gait = Engine(d, K, f'mcnssense{seed}', STEPS, F=len(cols)), {c: Gait(m, d, K) for c in cols}
     feel = {c: ls.Sense(m, q0) for c in cols}
     real = ls.cells()
     groups = {(k, j): ls.cells(np.random.default_rng(5 + j)) if k == 'shuffled' else real for k, j in cols}
@@ -154,14 +153,13 @@ def sense(repeats=1, seed=7):
         p.tofile(b.work / 'stim_p.bin')
         cum.append(b.advance(K).astype(float))
         x = (cum[-1] - cum[-1 - min(i + 1, WINDOW)]).reshape(len(cols), nc) * (WINDOW / min(i + 1, WINDOW))
+        eng.send([gait[k].ctrl(drive(f, x[c], nl) if i + 1 >= WINDOW else np.zeros(2)) for c, k in enumerate(cols)])
+        q = eng.recv().reshape(len(cols), -1)
         for c, k in enumerate(cols):
-            eng[k].send(gait[k].ctrl(drive(f, x[c], nl) if i + 1 >= WINDOW else np.zeros(2)))
-        for k in cols:
-            qs[k] = eng[k].recv()
+            qs[k] = q[c]
             tr[k].append(qs[k])
     b.close()
-    for k in cols:
-        eng[k].close()
+    eng.close()
     spk = np.diff(np.array(cum), axis=0).reshape(STEPS, len(cols), nc)[WINDOW:]
     bins = lambda a: a[:len(a) // 10 * 10].reshape(-1, 10, *a.shape[1:]).sum(1)
     spec = {}
