@@ -7,10 +7,13 @@ column over 200 ms: approach- and avoid-MBON spikes, valence (ap - av) / (ap + a
 change reach descending neurons through the existing MBON path).
 
 Arms: real wiring; degree-preserving shuffles (pre permuted globally: in- and out-degree exact, self-loops repaired);
-random (pre drawn uniformly). Edge groups (ALLN inhibition, KC -> approach/avoid) are recomputed on each arm's edges.
+block shuffles (pre permuted within each (pre class, post class) block: class-pair edge counts and both degrees exact);
+random (pre drawn uniformly); causal cuts of the real graph: cut:kc_mbon (KC -> MBON edges removed), cut:mbon_out (every
+MBON output edge removed). Edge groups (ALLN inhibition, KC -> approach/avoid) are recomputed on each arm's edges.
+A and the held-out odours are also tested at 0.5x and 2x the odour rate (intensity generalisation).
 
     python -m agent.learning_specificity noise SEEDS               # no reward anywhere: learner-twin gap = column noise
-    python -m agent.learning_specificity run ARM FIRST [SEEDS]     # ARM real | shuffle:K | random:K
+    python -m agent.learning_specificity run ARM FIRST [SEEDS]     # ARM real | shuffle:K | block:K | random:K | cut:kc_mbon | cut:mbon_out
 Writes .work/agent/shiu/specificity/<mode>-<arm>-<first>.json, one record per seed, per-column arrays.
 """
 import json
@@ -33,18 +36,34 @@ FLIES, WINDOW = 16, 2000  # columns per seed; 200 ms at dt 1e-4
 A, B = 1, 0  # verify_plastic's food and decoy; ODORS6[2:] are never rewarded (held out)
 
 
-def arm_edges(pre, post, arm):
-    if arm == 'real': return pre
+INTENSITIES = (0.5, 2.0)
+
+
+def arm_edges(pre, post, arm, names):
+    if arm == 'real' or arm.startswith('cut:'): return pre
     kind, k = arm.split(':')
-    if kind not in ('shuffle', 'random'): raise SystemExit(f'FAIL arm {arm!r}: real | shuffle:K | random:K')
+    if kind not in ('shuffle', 'block', 'random'): raise SystemExit(f'FAIL arm {arm!r}')
     rng = np.random.default_rng(1000 + int(k))
     n = int(max(pre.max(), post.max())) + 1
-    new = rng.permutation(pre) if kind == 'shuffle' else rng.integers(0, n, len(pre)).astype(pre.dtype)
-    for _ in range(20):  # self-loops: swap each against a random edge until none are left
-        loops = np.flatnonzero(new == post)
-        if not len(loops): break
-        other = rng.integers(0, len(new), len(loops))
-        new[loops], new[other] = new[other], new[loops].copy()
+    if kind == 'shuffle': new = rng.permutation(pre)
+    elif kind == 'random': new = rng.integers(0, n, len(pre)).astype(pre.dtype)
+    else:  # permute pre inside each (pre class, post class) block
+        _, cls = np.unique(names, return_inverse=True)
+        block = cls[pre].astype(np.int64) * (cls.max() + 1) + cls[post]
+        order = np.argsort(block, kind='stable')
+        bounds = np.flatnonzero(np.diff(block[order])) + 1
+        new = pre.copy()
+        for idx in np.split(order, bounds): new[idx] = pre[idx][rng.permutation(len(idx))]
+    # Self-loops: swap each, one at a time, with a random edge of the same block (any edge for shuffle/random) whose swap
+    # makes no new loop. One-at-a-time keeps the pre multiset exact; vectorised swaps hit one partner twice and lost values.
+    pool = (lambda i: np.flatnonzero(block == block[i])) if kind == 'block' else (lambda i: None)
+    for i in np.flatnonzero(new == post):
+        cand = pool(i)
+        for _ in range(100):
+            j = rng.choice(cand) if cand is not None else rng.integers(0, len(new))
+            if new[j] != post[i] and new[i] != post[j]:
+                new[i], new[j] = new[j], new[i]
+                break
     if (new == post).any(): raise SystemExit(f'FAIL {arm}: self-loops left after repair')
     return new
 
@@ -52,13 +71,16 @@ def arm_edges(pre, post, arm):
 def setup(arm):
     pre, post, w, _ = _reference_graph()
     pre, post, w = np.asarray(pre), np.asarray(post), np.asarray(w)
-    pre = arm_edges(pre, post, arm)
-    order = np.argsort(pre, kind='stable')
-    pre, post, w = pre[order], post[order], w[order]
     c = cells()
     names, n = c.klass, len(c.klass)
     approach, avoid = mbons(c)
     kc = np.flatnonzero(names == 'Kenyon_Cell')
+    pre = arm_edges(pre, post, arm, names)
+    keep = {'cut:kc_mbon': ~((names[pre] == 'Kenyon_Cell') & (names[post] == 'MBON')),
+            'cut:mbon_out': names[pre] != 'MBON'}.get(arm)
+    if keep is not None: pre, post, w = pre[keep], post[keep], w[keep]
+    order = np.argsort(pre, kind='stable')
+    pre, post, w = pre[order], post[order], w[order]
     dn = np.flatnonzero(names == 'descending')
     graph_dir(pre, post, w, n)
     is_kc, is_app, is_avo = (np.isin(np.arange(n), x) for x in (kc, approach, avoid))
@@ -85,8 +107,8 @@ def trial(g, seed, reward=True):
     cut = np.cumsum([len(x) for x in groups])[:-1]
     dop = np.where(np.arange(FLIES) < FLIES // 2, 1 if reward else 0, 0).astype(np.float32)
 
-    def test(i):
-        x = live.sniff(only[i])[-1].reshape(-1, FLIES).astype(float)
+    def test(i, scale=1.0):
+        x = live.sniff((only[i] * scale).astype(np.float32))[-1].reshape(-1, FLIES).astype(float)
         ap, av, d = (s.sum(0) for s in np.split(x, cut))
         return {'approach': ap.tolist(), 'avoid': av.tolist(), 'dn': d.tolist(), 'valence': ((ap - av) / np.maximum(ap + av, 1)).tolist()}
 
@@ -94,6 +116,7 @@ def trial(g, seed, reward=True):
     live.sniff(only[A])
     live.reward(dop)
     rec['after_A'] = {f'o{i}': test(i) for i in range(len(odour))}
+    rec['after_A_intensity'] = {f'o{i}x{s}': test(i, s) for i in [A, *range(2, len(odour))] for s in INTENSITIES}
     live.sniff(only[B])
     live.reward(dop)
     rec['after_reversal'] = {f'o{i}': test(i) for i in (A, B)}
