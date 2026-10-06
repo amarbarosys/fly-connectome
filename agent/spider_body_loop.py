@@ -27,10 +27,11 @@ from agent.body_engine.spider_gait import gait
 
 T, SCORE, SPEED = 500, 200, 0.6
 START = threading.Lock()  # parallel arms: model files and engine builds are made one at a time
-YAW_PER_TURN, TRIM, TAU = -140.0, 0.0, 0.25  # gait_rate (no brain): yaw deg/s per unit turn (sign: + turn yaws right), turn for zero yaw; body closes the gaze in TAU s
+YAW_PER_TURN, TRIM, TAU = -140.0, 0.0, 1.0  # gait_rate (no brain): yaw deg/s per unit turn (sign: + turn yaws right), turn for zero yaw; body closes the gaze in TAU s
 POS = 5.0  # 1/s, the teacher's centring term (0.2 s); set before the run, not tuned
 REFLEX = False  # 95fa88a added it; with the position-trained pathway the reflex-off arm held 0.54 / 0.60 deg, the reflex arm lost the prey (38d70f0)
-SEEDS = (41, 43)  # prey speeds, trial stream: new for the reflex-free claim (31, 37 were used while choosing the design)
+SEEDS = (47, 53)  # prey speeds, trial stream: fresh for this claim (31/37 and 41/43 already used)
+DEAD = 1.0  # deg: the body turns only on the gaze beyond this (salticid-like pivots); with TAU 1 s (was 0.25: 6f8a87b, the body-turn loop ran away). Set before the run
 
 
 def yaw(q):
@@ -53,7 +54,7 @@ def pursue(net, rec, sp, rng, arm, view=None, log=None):
     gaze, eye_v, prev = np.zeros(B), np.zeros(B), None
     err, gz, y0, b0, yaws, bears = [], [], None, None, [], []
     for k in range(T):
-        turn = TRIM + {'body': 1.0, 'noturn': 0.0, 'flip': -1.0, 'silenced': 1.0, 'stand': 0.0, 'novor': 1.0}[arm] * np.clip(gaze / TAU / YAW_PER_TURN, -1, 1)
+        turn = TRIM + {'body': 1.0, 'noturn': 0.0, 'flip': -1.0, 'silenced': 1.0, 'stand': 0.0, 'novor': 1.0}[arm] * np.clip(np.sign(gaze) * np.maximum(np.abs(gaze) - DEAD, 0) / TAU / YAW_PER_TURN, -1, 1)
         ctrl = None if arm == 'stand' else gait(k * L.P.DT, np.full(B, SPEED), turn).T
         now = L.receptors(rec, eyes.sense(gaze, ctrl))
         q = eyes.q
