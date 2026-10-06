@@ -343,8 +343,11 @@ def main() raises:
         comptime if PROFILE > 0:
             ms[4] += Float64(perf_counter_ns() - tp)
         if fr % 100 == 0:
-            var ms = Float64(perf_counter_ns() - t0) / Float64(fr) / 1e6
-            print(fr, "frames,", ms, "ms per frame,", Float64(fr * max(eng.K, 1)) * 0.1, "ms simulated", file=stderr)
+            var ms_frame = Float64(perf_counter_ns() - t0) / Float64(fr) / 1e6
+            print(fr, "frames,", ms_frame, "ms per frame,", Float64(fr * max(eng.K, 1)) * 0.1, "ms simulated", file=stderr)
+            comptime if PROFILE > 0:  # running per-phase split, so a long or killed run still reports where the time goes
+                var per = 1e-6 / Float64(max(fr, 1))
+                print("COST@" + String(fr), "physics", ms[1] * per, "neural_control", ms[0] * per, "render", ms[2] * per, "copy", ms[3] * per, "display", ms[4] * per, file=stderr)
     comptime if PROFILE > 0:
         var per = 1e-6 / Float64(max(fr, 1))
         print("COST physics", ms[1] * per, "neural_control", ms[0] * per, "render", ms[2] * per, "copy", ms[3] * per, "display", ms[4] * per, "frames", fr, file=stderr)
