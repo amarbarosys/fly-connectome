@@ -29,10 +29,12 @@ from agent import spider_eye_loop as L
 from agent.body_engine.spider_gait import gait
 
 DEBUG = os.environ.get('SPIDER_TIER') == 'debug'  # debug tier: 8 animals (spider_pool_gpu.B), 200 steps, debug seeds, no seed claim
-T, SCORE, SPEED = (200, 80, 0.6) if DEBUG else (500, 200, 0.6)
+T, SCORE, SPEED = (200, 80, 0.3) if DEBUG else (500, 200, 0.3)  # 0.3: the hand-wired eye holds 0.61 deg walking, 3.3-3.9 at 0.6 (stride wobble)
 PROF = bool(os.environ.get('SPIDER_PYPROF'))  # Python-side split per step: engine exchange, brain step, bookkeeping
 START = threading.Lock()  # parallel arms: model files and engine builds are made one at a time
-YAW_PER_TURN, TRIM, TAU = -140.0, 0.0, 1.0  # gait_rate (no brain): yaw deg/s per unit turn (sign: + turn yaws right), turn for zero yaw; body closes the gaze in TAU s
+YAW_PER_TURN, TRIM, TAU = -44.0, 0.0, 1.0  # at SPEED 0.3 (gait_rate: -40.9 to +40.9 deg/s over turn -1..1, trim yaw +1.1); was -140 at 0.6.
+# gait_rate (no brain): yaw deg/s per unit turn (sign: + turn yaws right), turn for zero yaw; body closes the gaze in TAU s
+RAMP = 30  # steps (0.3 s) over which the gait speed rises from 0, as fly_link ramps its servos: full speed at step 0 jerked the head 2.0 deg
 POS = 5.0  # 1/s, the teacher's centring term (0.2 s); set before the run, not tuned
 REFLEX = False  # 95fa88a added it; with the position-trained pathway the reflex-off arm held 0.54 / 0.60 deg, the reflex arm lost the prey (38d70f0)
 SEEDS = (5, 7) if DEBUG else (47, 53)  # prey speeds, trial stream; claim seeds pass agent.seeds.claim (docs/seeds_used.json)
@@ -70,7 +72,7 @@ def pursue(net, rec, sp, rng, arm, view=None, log=None):
     for k in range(T):
         t0 = time.perf_counter()
         turn = turn_law(gaze, arm)
-        ctrl = None if arm == 'stand' else gait(k * L.P.DT, np.full(B, SPEED), turn).T
+        ctrl = None if arm == 'stand' else gait(k * L.P.DT, np.full(B, SPEED * min(1.0, k / RAMP) if RAMP else SPEED), turn).T
         now = L.receptors(rec, eyes.sense(gaze, ctrl))
         t1 = time.perf_counter()
         q = eyes.q
