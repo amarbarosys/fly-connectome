@@ -27,10 +27,10 @@ from agent.body_engine.spider_gait import gait
 
 T, SCORE, SPEED = 500, 200, 0.6
 START = threading.Lock()  # parallel arms: model files and engine builds are made one at a time
-YAW_PER_TURN, TRIM, TAU = -140.0, 0.0, 0.25
+YAW_PER_TURN, TRIM, TAU = -140.0, 0.0, 0.25  # gait_rate (no brain): yaw deg/s per unit turn (sign: + turn yaws right), turn for zero yaw; body closes the gaze in TAU s
 POS = 5.0  # 1/s, the teacher's centring term (0.2 s); set before the run, not tuned
 REFLEX = False  # 95fa88a added it; with the position-trained pathway the reflex-off arm held 0.54 / 0.60 deg, the reflex arm lost the prey (38d70f0)
-SEEDS = (41, 43)  # prey speeds, trial stream: new for the reflex-free claim (31, 37 were used while choosing the design)  # gait_rate (no brain): yaw deg/s per unit turn (sign: + turn yaws right), turn for zero yaw; body closes the gaze in TAU s
+SEEDS = (41, 43)  # prey speeds, trial stream: new for the reflex-free claim (31, 37 were used while choosing the design)
 
 
 def yaw(q):
