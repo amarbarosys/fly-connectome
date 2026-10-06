@@ -38,7 +38,12 @@ def sessions():
     for path in REGISTRY.glob('*.json'):
         r = json.loads(path.read_text())
         if r.get('lifecycle') == 'running' and alive(r['pid']):
-            out.append({k: r.get(k) for k in ('session_id', 'pid', 'profile', 'backend', 'output', 'created_unix')})
+            s = {k: r.get(k) for k in ('session_id', 'pid', 'profile', 'backend', 'output', 'created_unix')}
+            try:
+                st = request_control(s['session_id'], 'status', timeout=2)
+                s.update(paused=st.get('paused'), time_s=st.get('time_s'), world_food=st.get('world_food', []))
+            except (OSError, ValueError, RuntimeError, TimeoutError) as exc: s['status_error'] = str(exc)[:200]
+            out.append(s)
     return sorted(out, key=lambda r: r['created_unix'])
 
 

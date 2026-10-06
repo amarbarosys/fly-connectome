@@ -163,7 +163,7 @@ def run(out, backend='gpu', seconds=0., viewer=True, audit=True, profile='diagno
                 'counts':last['counts'][0] if last else [0,0],
                 'decoder_sha256':hashlib.sha256(model.weights.tobytes()).hexdigest(),
                 'hunger':organism.hunger,'ingested_total':organism.state.ingested_total,
-                'world_food_amounts':{p.id:p.amount for p in environment.food},'world_event_cursor':environment.event_cursor}
+                'world_food_amounts':{p.id:p.amount for p in environment.food},'world_food':[{'id':p.id,'x':p.x,'y':p.y,'amount':p.amount} for p in environment.food],'world_event_cursor':environment.event_cursor}
         print('SINGLE_NEURAL_FLY_READY',flush=True)
         with (out/'telemetry.jsonl').open('w',buffering=1) as trace,(out/'events.jsonl').open('w',buffering=1) as events:
             while not stopping and (seconds==0 or t<seconds):
