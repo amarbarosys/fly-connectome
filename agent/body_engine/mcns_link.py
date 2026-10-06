@@ -24,7 +24,7 @@ FWD_HZ, TURN_HZ = 80, 100  # drive 80/140 = 0.57 forward; a turn adds 0.5 on its
 VIS = ('blank', 'left', 'right', 'mirrored')  # vision mode: forward 80 Hz + an image; disc at az +-70 (left/right eye), mirrored = left disc through the mirrored eye map (mutant)
 
 
-def brain(vision=False, cols=None):
+def brain(vision=False, cols=None, repeats=1, seed=7):
     from agent import mcns, shiu_g1
     from agent.mcns_mapping import descending_name_sets
     from agent.shiu import ShiuLive
@@ -32,13 +32,13 @@ def brain(vision=False, cols=None):
     n = data[4][0]
     dn, _ = descending_name_sets()
     late = cols is not None  # caller adds its own stimuli, then calls start
-    cols = cols or (4 if vision else 3)
-    b = ShiuLive(*next(shiu_g1.arms(data, 'mcns'))[1], n=n, flies=cols, seed=7)
+    cols = cols or (4 * repeats if vision else 3)
+    b = ShiuLive(*next(shiu_g1.arms(data, 'mcns'))[1], n=n, flies=cols, seed=seed)
     if vision:
         from agent import fly_vision as fv
         ids, az, el = fv.receptors(fv.LAMINA)
         img = {'blank': fv.np.full((90, 180), fv.BG), 'left': fv.disc(70), 'right': fv.disc(-70), 'mirrored': fv.disc(70)}
-    for col, t in enumerate(VIS if vision else (None,) * cols if late else (None, 'left', 'right')):
+    for col, t in enumerate(VIS * repeats if vision else (None,) * cols if late else (None, 'left', 'right')):
         b.stimulate(dn['forward'], FWD_HZ, fly=col, key=col)
         if vision:
             for cells, hz in fv.drive(img[t], ids, -az if t == 'mirrored' else az, el):
@@ -58,32 +58,38 @@ def drive(f, x, nl):
     return np.clip([((x[:nl] - f['mu0']) / f['sd0']) @ f['w0'] + f['y0'], ((x[nl:] - f['mu1']) / f['sd1']) @ f['w1'] + f['y1']], 0, 1)
 
 
-def vision():
-    """fly vision in the walking body: a dark disc left or right of the fly (fixed on the retina, open loop) -> L1-L3/R1-6 ->
+def vision(repeats=1, seed=7):
+    """repeats > 1 (new seed): paired means vs blank, opposite with each |mean| >= 10 deg and |t| >= 2.5; mirrored mean on the right's side.
+    fly vision in the walking body: a dark disc left or right of the fly (fixed on the retina, open loop) -> L1-L3/R1-6 ->
     MCNS brain -> leg-MN readout -> gait. Gates (1 s): left and right discs turn opposite ways, each >= 10 deg more than blank;
     blank walks > 1 body length; mutant mirrored eye map: the left disc turns like the right one (sign vs blank flips)."""
     d, m, _ = prepare()
     q0 = np.fromfile(d / 'qpos.bin', np.float32).astype(float)
-    eng, gait = {k: Engine(d, K, 'mcnsvis-' + k, STEPS) for k in VIS}, {k: Gait(m, d, K) for k in VIS}
-    b, f, nl, nc = brain(vision=True)
-    cum, tr = [np.zeros(4 * nc)], {k: [q0] for k in VIS}
+    cols = [f'{k}{j}' for j in range(repeats) for k in VIS]
+    eng, gait = {k: Engine(d, K, f'mcnsvis{seed}-' + k, STEPS) for k in cols}, {k: Gait(m, d, K) for k in cols}
+    b, f, nl, nc = brain(vision=True, repeats=repeats, seed=seed)
+    cum, tr = [np.zeros(len(cols) * nc)], {k: [q0] for k in cols}
     for i in range(STEPS):
         cum.append(b.advance(K).astype(float))
-        x = (cum[-1] - cum[-1 - min(i + 1, WINDOW)]).reshape(4, nc) * (WINDOW / min(i + 1, WINDOW))
-        for c, k in enumerate(VIS):
+        x = (cum[-1] - cum[-1 - min(i + 1, WINDOW)]).reshape(len(cols), nc) * (WINDOW / min(i + 1, WINDOW))
+        for c, k in enumerate(cols):
             eng[k].send(gait[k].ctrl(drive(f, x[c], nl) if i + 1 >= WINDOW else np.zeros(2)))
-        for k in VIS:
+        for k in cols:
             tr[k].append(eng[k].recv())
     b.close()
-    for k in VIS:
+    for k in cols:
         eng[k].close()
-    r = {k: metrics(m, None, np.array(tr[k])) for k in VIS}
-    fw = {k: float(r[k]['forward'][-1]) for k in VIS}
-    yaw = {k: float(r[k]['yaw_deg'][-1]) for k in VIS}
-    dl, dr, dm = yaw['left'] - yaw['blank'], yaw['right'] - yaw['blank'], yaw['mirrored'] - yaw['blank']
-    print(json.dumps({'forward_mm': fw, 'yaw_deg': yaw}))
-    ok = [(f"blank walks {fw['blank']:.2f} mm > {BODY_LENGTH}", fw['blank'] > BODY_LENGTH),
-          (f"left disc {dl:+.1f}, right disc {dr:+.1f} deg vs blank: opposite, each >= 10", dl * dr < 0 and min(abs(dl), abs(dr)) >= 10),
+    r = {k: metrics(m, None, np.array(tr[k])) for k in cols}
+    fw = {k: float(r[k]['forward'][-1]) for k in cols}
+    yaw = {k: float(r[k]['yaw_deg'][-1]) for k in cols}
+    rel = {k: np.array([yaw[f'{k}{j}'] - yaw[f'blank{j}'] for j in range(repeats)]) for k in VIS[1:]}
+    dl, dr, dm = (float(rel[k].mean()) for k in VIS[1:])
+    t = {k: float(v.mean() / (v.std(ddof=1) / np.sqrt(repeats))) if repeats > 1 else np.inf for k, v in rel.items()}
+    fb = float(np.mean([fw[f'blank{j}'] for j in range(repeats)]))
+    print(json.dumps({'forward_mm': fw, 'yaw_deg': yaw, 'rel_mean': [dl, dr, dm], 't': t}))
+    ok = [(f"blank walks {fb:.2f} mm > {BODY_LENGTH}", fb > BODY_LENGTH),
+          (f"left disc {dl:+.1f} (t {t['left']:+.1f}), right disc {dr:+.1f} (t {t['right']:+.1f}) deg vs blank: opposite, each >= 10, |t| >= 2.5",
+           dl * dr < 0 and min(abs(dl), abs(dr)) >= 10 and min(abs(t['left']), abs(t['right'])) >= 2.5),
           (f"mutant mirrored map: {dm:+.1f} vs left {dl:+.1f}, sign flips", dm * dl < 0)]
     for k, v in ok:
         print(('PASS ' if v else 'FAIL ') + k)
@@ -198,4 +204,4 @@ def main():
 
 
 if __name__ == '__main__':
-    {'vision': vision, 'sense': sense}.get(sys.argv[1] if sys.argv[1:] else '', main)()
+    {'vision': vision, 'sense': sense}.get(sys.argv[1] if sys.argv[1:] else '', main)(*map(int, sys.argv[2:]))
