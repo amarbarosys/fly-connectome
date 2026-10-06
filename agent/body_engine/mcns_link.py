@@ -65,6 +65,9 @@ def vision(repeats=1, seed=7, steer=False):
     fly vision in the walking body: a dark disc left or right of the fly (fixed on the retina, open loop) -> L1-L3/R1-6 ->
     MCNS brain -> leg-MN readout -> gait. Gates (1 s): left and right discs turn opposite ways, each >= 10 deg more than blank;
     blank walks > 1 body length; mutant mirrored eye map: the left disc turns like the right one (sign vs blank flips)."""
+    if steer and repeats > 1:  # a claim run: its seed is used once (docs/seeds_used.json)
+        from agent import seeds
+        seeds.claim('mcns_steer', [seed])
     d, m, _ = prepare()
     q0 = np.fromfile(d / 'qpos.bin', np.float32).astype(float)
     cols = [f'{k}{j}' for j in range(repeats) for k in VIS]
@@ -122,6 +125,9 @@ def sense(repeats=1, seed=7):
     corr(leg touch, own-leg MN counts) - mean corr(leg touch, other legs' MNs), 10 ms bins, after the warm-up.
     Gates (pre-registered): sense walks > 1 body length, tilt < 20; S(sense) - S(nosense) >= 0.05; mutant: S(sense) - S(shuffled) >= 0.05."""
     from agent import fly_legsense as ls
+    if repeats > 1:
+        from agent import seeds
+        seeds.claim('mcns_sense', [seed])
     from agent.mcns_mapping import annotation_table
     d, m, _ = prepare()
     q0 = np.fromfile(d / 'qpos.bin', np.float32).astype(float)
