@@ -11,7 +11,7 @@ sense   (WORLD) one thread per odor site: world xyz from the engine's pose rows 
 hud_text, minimap   (WORLD + HUD) the sampled concentrations as 'd.ddd' text under the bars, and the same descriptor's sources drawn at
         hud.project_source in a mini-map (world XY orthographic around the animal, MAP_SCALE px per mm).
 """
-from std.gpu import block_idx, block_dim, thread_idx
+from max.gpu import block_idx, block_dim, thread_idx
 from std.math import sqrt
 from std.sys import get_defined_int
 from layout import TileTensor, row_major

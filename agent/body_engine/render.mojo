@@ -23,7 +23,7 @@ from std.ffi import external_call
 from std.math import cos, sin, sqrt, tan
 from std.sys import argv, get_defined_int
 from std.time import perf_counter_ns
-from std.gpu import block_idx, block_dim, thread_idx
+from max.gpu import block_idx, block_dim, thread_idx
 from max.gpu.host import DeviceContext
 from layout import TileTensor, row_major
 from world import NP, PW, height_grad

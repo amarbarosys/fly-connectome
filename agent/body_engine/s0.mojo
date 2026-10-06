@@ -17,7 +17,7 @@ usage: mojo build -DFLIES=N s0.mojo; s0 LAUNCHES      prints fly-steps/s and the
 from std.math import cos, sin, sqrt
 from std.sys import argv, get_defined_int
 from std.time import perf_counter_ns
-from std.gpu import block_idx, block_dim, thread_idx
+from max.gpu import block_idx, block_dim, thread_idx
 from max.gpu.host import DeviceContext
 from layout import TileTensor, row_major
 

@@ -4,13 +4,13 @@ Experimental interface: dynamics are the existing simplified LIF model. The
 readout learns an engineered motor interface, not recovered biological behavior.
 """
 from std.python import Python
-from std.collections import List, InlineArray
+from std.collections import List, Array
 from std.math import fma
 from std.memory import unsafe_memset_zero
 from std.os import getenv
 from std.sys import get_defined_int, stderr
 from std.time import perf_counter_ns
-from std.gpu import block_idx, block_dim, thread_idx
+from max.gpu import block_idx, block_dim, thread_idx
 from max.gpu.host import DeviceContext
 from layout import TileTensor, row_major
 
@@ -52,13 +52,13 @@ def update(
     var neuron = block_idx.x * block_dim.x + thread_idx.x
     if neuron >= N:
         return
-    var total = InlineArray[Float32, C](fill=Float32(0.0))
+    var total = Array[Float32, C](fill=Float32(0.0))
     var edge = Int(rows[neuron])
     var end = Int(rows[neuron + 1])
     # U edges per pass so their loads overlap; each fly's sum keeps edge order.
     while edge < end:
-        var source = InlineArray[Int, U](uninitialized=True)
-        var weight = InlineArray[Float32, U](uninitialized=True)
+        var source = Array[Int, U](uninitialized=True)
+        var weight = Array[Float32, U](uninitialized=True)
         comptime for k in range(U):
             var index = min(edge + k, end - 1)
             source[k] = Int(spikes[Int(cols[index])])
@@ -70,9 +70,9 @@ def update(
                         total[fly] += weight[k]
         edge += U
     # Load every fly's state before the first store so the loads overlap too.
-    var drive = InlineArray[Float32, C](fill=Float32(0.0))
-    var held = InlineArray[Float32, C](uninitialized=True)
-    var faded = InlineArray[Float32, C](uninitialized=True)
+    var drive = Array[Float32, C](fill=Float32(0.0))
+    var held = Array[Float32, C](uninitialized=True)
+    var faded = Array[Float32, C](uninitialized=True)
     var seen = Int(ever[neuron])
     comptime for fly in range(C):
         # Explicit fma pins the contraction the per-fly kernel compiled to.

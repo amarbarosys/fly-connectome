@@ -4,7 +4,7 @@ results go to DIR/outgpu.f64 (compared with the CPU out.f64 by convex_check.py g
 usage: gpu-wait run --priority 60 --timeout 300 -- convex_gpu DIR/   (build: -DNCASES=n -DNHV=.. -DNHF=.. -DNHE=.. from convex_check.py)"""
 from std.sys import argv, get_defined_int
 from std.time import perf_counter_ns
-from std.gpu import block_idx, block_dim, thread_idx
+from max.gpu import block_idx, block_dim, thread_idx
 from max.gpu.host import DeviceContext
 from layout import TileTensor, row_major
 from convex import *

@@ -12,7 +12,7 @@ usage: proto_factor DIR/   (DIR from the probe's export: pat.bin, M.bin, L64.bin
 from std.math import sqrt
 from std.sys import argv, get_defined_int
 from std.time import perf_counter_ns
-from std.gpu import block_idx, block_dim, thread_idx, lane_id
+from max.gpu import block_idx, block_dim, thread_idx, lane_id
 from max.gpu.host import DeviceContext
 from max.gpu.memory import AddressSpace
 from max.gpu.sync import barrier

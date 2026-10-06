@@ -43,7 +43,7 @@ from std.ffi import c_ssize_t, external_call
 from std.os import getenv, remove
 from std.os.path import exists
 from std.sys import argv, get_defined_int
-from std.gpu import block_idx, block_dim, thread_idx
+from max.gpu import block_idx, block_dim, thread_idx
 from max.gpu.host import DeviceContext
 from layout import TileTensor, row_major
 
