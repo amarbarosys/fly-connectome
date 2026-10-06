@@ -162,7 +162,43 @@ def acquisition(g, seed, schedule, x):
     return rec
 
 
+def eligibility(g, seed, windows):
+    """Eligibility-window probe: the worker credits every KC that spiked during the sniff, which runs to the last
+    readout window. windows (500,) = 50 ms eligibility, (500, 2000) = 200 ms; the probe always reads window 0 (50 ms)."""
+    pre, post, w, n, grp, kc, approach, avoid, dn, odour = g
+    live = ShiuLive(pre, post, w, n=n, flies=FLIES, seed=seed)
+    for f in range(FLIES):
+        for ids in odour: live.stimulate(ids, HZ, fly=f)
+    live.edge_groups(grp, np.tile(np.float32([1, LN, GAIN, GAIN]), (FLIES, 1)))
+    live.plastic(3, kc)
+    groups = [approach, avoid]
+    readout = (np.arange(FLIES)[None] * n + np.concatenate(groups)[:, None]).reshape(-1)
+    live.start(list(windows), readout)
+    entries, p0 = live._stim_arrays()
+    only = [np.where(np.isin(entries % n, ids), p0, 0).astype(np.float32) for ids in odour]
+
+    def test(i):
+        y = live.sniff(only[i])[0].reshape(-1, FLIES).astype(float)
+        ap, av = y[:len(approach)].sum(0), y[len(approach):].sum(0)
+        return {'approach': ap.tolist(), 'avoid': av.tolist(), 'valence': ((ap - av) / np.maximum(ap + av, 1)).tolist()}
+
+    live.sniff(only[A])
+    live.reward(np.where(np.arange(FLIES) < FLIES // 2, 1, 0).astype(np.float32))
+    rec = {'seed': seed, 'windows': list(windows), 'after_A': {f'o{i}': test(i) for i in range(len(odour))}}
+    live.close()
+    return rec
+
+
 def main(mode, *args):
+    if mode == 'elig':  # elig FIRST SEEDS: 50 ms vs 200 ms eligibility, same seeds, probe at 50 ms
+        first, seeds = int(args[0]), int(args[1])
+        OUT.mkdir(parents=True, exist_ok=True)
+        g = setup('real')
+        recs = [eligibility(g, 9000 + s, win) for win in ((500,), (500, 2000)) for s in range(first, first + seeds)]
+        path = OUT / f'elig-{first}.json'
+        path.write_text(json.dumps({'mode': 'elig', 'flies': FLIES, 'records': recs}) + '\n')
+        print('written', path)
+        return
     if mode == 'acq':  # acq X FIRST SEEDS: every schedule, second odour index X
         x, first, seeds = int(args[0]), int(args[1]), int(args[2])
         OUT.mkdir(parents=True, exist_ok=True)
