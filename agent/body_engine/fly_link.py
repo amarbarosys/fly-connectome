@@ -41,13 +41,13 @@ LOOM = ('LC4', 'LPLC2')
 BODY_LENGTH = 4.077  # model units (mm), flyloop's measurement on body-v2 (tools/fly_gait_oracle.py --rollout)
 
 
-def prepare():
+def prepare(out=None, mjcf=MJCF, convex=True):
     """live.prepare's standing fly, then settled into FlyGym's stance: the standing pose (servos at the standing angles, thorax pitched 66 deg) falls
     over when the controller's first targets (up to 2.4 rad away) arrive in one step, in MuJoCo as well (flyloop's `--rollout` preflight FAILs the
     same way: tilt 170 deg). So the servos are ramped from the standing angles to the controller's drive-0 pose over 0.3 s and held 0.3 s (CPU,
     MuJoCo, engine's noslip 0); that state and ctrl are the engine's start."""
-    d = OUT / 'fly'
-    cam, m = live.prepare(d, mjcf=MJCF, convex=True)  # walls and stones collide too (check.sh convexstep)
+    d = out or OUT / 'fly'
+    cam, m = live.prepare(d, mjcf=mjcf, convex=convex)  # walls and stones collide too (check.sh convexstep)
     np.array([1, 2.0], np.float32).tofile(d / 'roots.bin')
     if not (d / 'settled').exists():
         q = np.fromfile(d / 'qpos.bin', np.float32).astype(float)
