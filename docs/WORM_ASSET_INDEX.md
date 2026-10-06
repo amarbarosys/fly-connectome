@@ -41,3 +41,14 @@ Posterior touch drives the backward command like anterior touch does, responses 
 a mV, and shuffles do as well as the real wiring. The all-excitatory-except-GABA sign rule is the
 first suspect: glutamate acts through inhibitory GluCl channels on some command interneurons, and
 Wicks 1996 fitted per-synapse signs for this circuit. Tests: `tests/test_worm_brain.py`.
+
+### Cause (`tools/worm_reflex_diag.py`)
+1. Chemical overdrive: Cook synapse counts x Gs 100 pS swamp the 10 pS leak, rest sits near -1 mV,
+   synaptic activation at 98% of max, so touch input cannot change chemical output; only gap
+   junctions carry the stimulus.
+2. Gap route favours backward: PLM gaps to AVA/AVD and PVC, and PVC-AVA gaps (up to 22 per pair)
+   pull AVA with PVC; PVC-AVB is chemical only.
+3. Per-neuron Vth at rest, Gs 100/10/1, Wicks 1996 inhibitory touch->opposite-command synapses and
+   forward/backward cross-inhibition: posterior response shrinks to +0.001 mV but never turns
+   negative. The reflex is not reproduced by any tested combination; a fitted model (Wicks fitted
+   gap and chemical strengths per synapse) or a different readout is needed.
