@@ -831,7 +831,7 @@ def convex_block(m, regex, convex=True, hfexact=False):
     return np.array(kind), np.concatenate([head, *size]), sizes
 
 
-def meshes(mjcf, out):
+def meshes(mjcf, out, grid=0):
     """Renderer tables (docs/plans/RENDERER.md) for every mesh geom: rmi.bin int32 per part (body, vertex offset,
     vertex count, triangle offset, triangle count), rmf.bin float32 per part (local pos 3, local quat 4, box
     offset 3, box scale 3, bounding sphere centre 3 and radius 1, rgba 4), rv.bin int16 vertices quantised to the
@@ -843,6 +843,13 @@ def meshes(mjcf, out):
         k = m.geom_dataid[g]
         v = m.mesh_vert[m.mesh_vertadr[k]:m.mesh_vertadr[k] + m.mesh_vertnum[k]].astype(np.float64)
         f = m.mesh_face[m.mesh_faceadr[k]:m.mesh_faceadr[k] + m.mesh_facenum[k]]
+        if grid:  # vertex clustering on a grid x grid x grid lattice over the part (Flybody's 1.6 M-vertex meshes; render only)
+            c = np.floor((v - v.min(0)) / (np.ptp(v, 0).max() / grid + 1e-12)).astype(np.int64)
+            _, inv = np.unique(c, axis=0, return_inverse=True)
+            inv = inv.ravel()
+            v = np.array([np.bincount(inv, v[:, a]) for a in range(3)]).T / np.bincount(inv)[:, None]
+            f = inv[f]
+            f = np.unique(f[(f[:, 0] != f[:, 1]) & (f[:, 1] != f[:, 2]) & (f[:, 0] != f[:, 2])], axis=0)
         if len(v) > 65535 or len(ints) // 5 >= 255:
             raise SystemExit(f'FAIL meshes: geom {g}: over 65,535 vertices (uint16 triangles) or 255 parts (uint8 part ids)')
         lo, hi = v.min(0), v.max(0)
