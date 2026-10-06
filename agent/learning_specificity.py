@@ -8,6 +8,7 @@ change reach descending neurons through the existing MBON path).
 
 Arms: real wiring; degree-preserving shuffles (pre permuted globally: in- and out-degree exact, self-loops repaired);
 block shuffles (pre permuted within each (pre class, post class) block: class-pair edge counts and both degrees exact);
+Dale shuffles dale:K (pre permuted within excitatory and within inhibitory slots: degrees exact, every source keeps its sign);
 random (pre drawn uniformly); causal cuts of the real graph: cut:kc_mbon (KC -> MBON edges removed), cut:mbon_out (every
 MBON output edge removed). Edge groups (ALLN inhibition, KC -> approach/avoid) are recomputed on each arm's edges.
 A and the held-out odours are also tested at 0.5x and 2x the odour rate (intensity generalisation).
@@ -40,13 +41,19 @@ A, B = 1, 0  # verify_plastic's food and decoy; ODORS6[2:] are never rewarded (h
 INTENSITIES = (0.5, 2.0)
 
 
-def arm_edges(pre, post, arm, names):
+def arm_edges(pre, post, arm, names, w=None):
     if arm == 'real' or arm.startswith('cut:'): return pre
     kind, k = arm.split(':')
-    if kind not in ('shuffle', 'block', 'random'): raise SystemExit(f'FAIL arm {arm!r}')
+    if kind not in ('shuffle', 'block', 'random', 'dale'): raise SystemExit(f'FAIL arm {arm!r}')
     rng = np.random.default_rng(1000 + int(k))
     n = int(max(pre.max(), post.max())) + 1
     if kind == 'shuffle': new = rng.permutation(pre)
+    elif kind == 'dale':  # permute pre within excitatory slots and within inhibitory slots: every source keeps its sign
+        block = (w > 0).astype(np.int64)
+        new = pre.copy()
+        for s in (0, 1):
+            idx = np.flatnonzero(block == s)
+            new[idx] = pre[idx][rng.permutation(len(idx))]
     elif kind == 'random': new = rng.integers(0, n, len(pre)).astype(pre.dtype)
     else:  # permute pre inside each (pre class, post class) block
         _, cls = np.unique(names, return_inverse=True)
@@ -57,7 +64,7 @@ def arm_edges(pre, post, arm, names):
         for idx in np.split(order, bounds): new[idx] = pre[idx][rng.permutation(len(idx))]
     # Self-loops: swap each, one at a time, with a random edge of the same block (any edge for shuffle/random) whose swap
     # makes no new loop. One-at-a-time keeps the pre multiset exact; vectorised swaps hit one partner twice and lost values.
-    pool = (lambda i: np.flatnonzero(block == block[i])) if kind == 'block' else (lambda i: None)
+    pool = (lambda i: np.flatnonzero(block == block[i])) if kind in ('block', 'dale') else (lambda i: None)
     for i in np.flatnonzero(new == post):
         cand = pool(i)
         for _ in range(100):
@@ -76,7 +83,7 @@ def setup(arm):
     names, n = c.klass, len(c.klass)
     approach, avoid = mbons(c)
     kc = np.flatnonzero(names == 'Kenyon_Cell')
-    pre = arm_edges(pre, post, arm, names)
+    pre = arm_edges(pre, post, arm, names, w)
     keep = {'cut:kc_mbon': ~((names[pre] == 'Kenyon_Cell') & (names[post] == 'MBON')),
             'cut:mbon_out': names[pre] != 'MBON'}.get(arm)
     if keep is not None: pre, post, w = pre[keep], post[keep], w[keep]
