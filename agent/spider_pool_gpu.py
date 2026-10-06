@@ -187,21 +187,33 @@ class GPUPathway:
         self._cmd(0); self.p.stdin.close(); self.p.wait()
 
 
-def run(net, rec, sp, rng, silence=False, learn=False, shuffle=None, flip=False):
-    """shuffle: a separate generator for the control's random signs, so both arms see the same task stream."""
+def wobble_windows(trace, rng, n):
+    """(STEPS, n) head yaw (deg) windows from a recorded walking trace (steps, animals), each animal's linear trend removed
+    (turning is the legs' job; the stride wobble is what the eye must ride), starting at 0."""
+    t = np.arange(len(trace))
+    flat = trace - np.polyval(np.polyfit(t, trace, 1), t[:, None]) if trace.ndim == 1 else trace - (np.polyfit(t, trace, 1).T @ np.c_[t, np.ones_like(t)].T).T
+    col, start = rng.integers(0, flat.shape[1], n), rng.integers(0, len(flat) - P.STEPS, n)
+    w = np.stack([flat[s0:s0 + P.STEPS, c] for s0, c in zip(start, col)], 1)
+    return w - w[0]
+
+
+def run(net, rec, sp, rng, silence=False, learn=False, shuffle=None, flip=False, head=None):
+    """shuffle: a separate generator for the control's random signs, so both arms see the same task stream.
+    head: (STEPS, n) head yaw in deg (the walking body's stride wobble): the retina sees tgt - gaze - head, the teacher its slip."""
     n = len(sp)
+    head = np.zeros((P.STEPS, n)) if head is None else head
     net.reset()
     tgt0, gaze, eye_v, prev, errs = rng.uniform(-0.3, 0.3, n), np.zeros(n), np.zeros(n), None, []
     for k in range(P.STEPS):
         tgt = tgt0 + sp * k * P.DT
-        now = P.activation(rec, tgt - gaze)
+        now = P.activation(rec, tgt - gaze - head[k])
         if prev is not None:
             c = net.step(P.motion(prev, now).astype(np.float32)).astype(np.float64)
             d = np.zeros(n) if silence else (c[:, :6].sum(1) - c[:, 6:].sum(1)) / 6  # per-direction mean: 2-motor scale (astra: 12 motors at KA 1.5 gave 2.85 deg/s noise)
         else:
             d = np.zeros(n)
         prev = now
-        seen = sp - eye_v  # the slip this step's neurons responded to, before their own command moves the eye
+        seen = sp - eye_v - (head[k] - head[k - 1]) / P.DT * (k > 0)  # the slip this step's neurons responded to, before their own command moves the eye
         eye_v = eye_v + P.KA * d
         gaze = gaze + eye_v * P.DT
         if learn and k > 1:
@@ -233,7 +245,7 @@ def parity():
     return ok
 
 
-def train(arm, iters, rec, seed=2, stop_above=None, keep=False):
+def train(arm, iters, rec, seed=2, stop_above=None, keep=False, wobble=None):
     """arm: learn, shuffle (random-sign teacher), frozen (no teaching), flip (mutant: teacher sign reversed).
     frozen never changes a weight, so it is not trained (its after = its before, exactly). stop_above: a control arm ends
     once its held-out error has been >= stop_above at 4 successive test points from batch 100 on (decided, not run out)."""
@@ -244,7 +256,8 @@ def train(arm, iters, rec, seed=2, stop_above=None, keep=False):
     n = 0
     for it in range(0 if arm == 'frozen' else iters):
         n = it + 1
-        run(net, rec, P.speeds(rng, 2, 5, B), rng, learn=arm != 'frozen', shuffle=sign if arm == 'shuffle' else None, flip=arm == 'flip')
+        run(net, rec, P.speeds(rng, 2, 5, B), rng, learn=arm != 'frozen', shuffle=sign if arm == 'shuffle' else None, flip=arm == 'flip',
+            head=None if wobble is None else wobble_windows(wobble, rng, B))
         if it % 25 == 24:
             curve.append(round(test(11), 2)); print(arm, it + 1, curve[-1], f'{(time.perf_counter() - t0) / (it + 1):.2f} s/batch', flush=True)
             if stop_above and it >= 99 and len(curve) >= 4 and min(curve[-4:]) >= stop_above:
