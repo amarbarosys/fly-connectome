@@ -18,12 +18,13 @@ from agent.visual_side import decode
 
 K = 8
 ids, az, el = fv.receptors(fv.LAMINA if 'lamina' in sys.argv else r'^R[1-6]')
+gain = fv.eye_gain(ids) if 'balanced' in sys.argv else None
 a = annotation_table()
 dn = np.flatnonzero(a.superclass.fillna('').str.startswith('descending').to_numpy())
 data = mcns.graph()
 n = data[4][0]
-cond = [('left', fv.drive(fv.disc(70), ids, az, el)), ('right', fv.drive(fv.disc(-70), ids, az, el)),
-        ('blank', fv.drive(np.full((90, 180), fv.BG), ids, az, el)), ('mirrored', fv.drive(fv.disc(70), ids, -az, el))]
+cond = [('left', fv.drive(fv.disc(70), ids, az, el, gain)), ('right', fv.drive(fv.disc(-70), ids, az, el, gain)),
+        ('blank', fv.drive(np.full((90, 180), fv.BG), ids, az, el, gain)), ('mirrored', fv.drive(fv.disc(70), ids, -az, el, gain))]
 brain = ShiuGPU(*next(shiu_g1.arms(data, 'mcns'))[1], n=n, flies=len(cond) * K, seed=23)
 for c, (_, groups) in enumerate(cond):
     for r in range(K):

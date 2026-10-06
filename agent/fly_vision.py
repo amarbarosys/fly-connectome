@@ -21,6 +21,17 @@ def receptors(types=r'^R[1-6]'):
     return ids, m['az'][ids], m['el'][ids]
 
 
+LEFT_GAIN = 1.6  # tools/fly_eye_calibrate.py: smallest left gain whose LC4/LPLC2 output on a calibration disc (az +-55, el +35) matches the right's
+
+
+def eye_gain(ids):
+    """per-cell rate gain: LEFT_GAIN on the left eye, 1 on the right. The male CNS left path runs weaker (fewer placed L3,
+    10-20 % fewer synapses, LPLC2 82k vs 111k input synapses) and dies at the LC4/LPLC2 threshold (disc 5 vs 38 spikes at gain 1);
+    equal cell counts were not enough (18 vs 38), so the gain is calibrated on a stimulus no test uses."""
+    side = annotations()['somaSide'].fillna('').str[:1].str.upper().to_numpy()[ids]
+    return np.where(side == 'L', LEFT_GAIN, 1.0)
+
+
 def sample(img, az, el):
     """luminance at each direction; img rows = elevation +90..-90, columns = azimuth +180..-180 (left to right)."""
     h, w = img.shape
@@ -29,11 +40,13 @@ def sample(img, az, el):
     return img[r, c]
 
 
-def drive(img, ids, az, el):
-    """[(cell ids, Hz)] for ShiuGPU.stimulate: darkening below the background, quantized to BINS levels (0 dropped)."""
+def drive(img, ids, az, el, gain=None):
+    """[(cell ids, Hz)] for ShiuGPU.stimulate: darkening below the background, quantized to BINS levels (0 dropped);
+    gain: per-cell rate factor (eye_gain), applied after quantizing."""
     dark = np.clip((BG - sample(img, az, el)) / BG, 0, 1)
     lvl = np.round(dark * BINS).astype(int)
-    return [(ids[lvl == k], RMAX * k / BINS) for k in range(1, BINS + 1) if (lvl == k).any()]
+    hz = RMAX * lvl / BINS * (1.0 if gain is None else gain)
+    return [(ids[hz == r], float(r)) for r in np.unique(hz[lvl > 0])]
 
 
 def disc(az0, el0=0.0, radius=40.0, h=90, w=180):
