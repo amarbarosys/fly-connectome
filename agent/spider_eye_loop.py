@@ -59,10 +59,12 @@ class Eyes:
         self.ctrl = np.fromfile(self.d / 'ctrl.bin', np.float32).reshape(NU, G.B)  # the stance, held
         self.nq, self.nv, self.ns = sizes(self.d)
         prof = bool(os.environ.get('SPIDER_PROFILE'))  # -DPROFILE=1: the engine's COST line (physics, control, render, copy) to cost.txt
+        if prof:  # -DPROFILE=1 reads roots.bin and writes its root trace to arg 12: without them it sent nothing
+            np.array([1, 8.0], np.float32).tofile(self.d / 'roots.bin')
         b = build(self.d, G.B, K, 1, w=W, h=H, eyes=True, gaze=True, row=row, profile=prof)
         self.row = row
         cam, frames = view if view else (CAM, '/dev/null')
-        self.p = subprocess.Popen(['bash', '-c', 'exec "$0" "$@" 4>"$FRAMES"', str(b), str(self.d) + '/', str(steps), *map(str, cam), '1' if view else '0', '1'],
+        self.p = subprocess.Popen(['bash', '-c', 'exec "$0" "$@" 4>"$FRAMES"', str(b), str(self.d) + '/', str(steps), *map(str, cam), '1' if view else '0', '1', *([str(self.d / 'root-trace.bin')] if prof else [])],
                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                   stderr=open(self.d / f'cost-{os.getpid()}.txt', 'w') if prof else subprocess.DEVNULL, env={**os.environ, 'FRAMES': str(frames)})
         self.head0 = (head, quat)

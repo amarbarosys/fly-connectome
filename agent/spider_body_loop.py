@@ -79,7 +79,7 @@ def pursue(net, rec, sp, rng, arm, view=None, log=None):
     B = len(sp)
     tgt0 = rng.uniform(-0.3, 0.3, B)
     with START:
-        eyes = L.Eyes(tgt0, sp, T, view=view)
+        eyes = L.Eyes(tgt0, sp, T, view=view, row=view is None)  # row: AM_L's darkest pixel per column only, byte-identical (spider_eyerow_test)
     gaze, eye_v, prev, cost = np.zeros(B), np.zeros(B), None, np.zeros(3)
     err, gz, y0, b0, yaws, bears = [], [], None, None, [], []
     for k in range(T):

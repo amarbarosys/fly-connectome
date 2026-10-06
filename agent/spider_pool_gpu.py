@@ -28,7 +28,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tools'))
 import spider_blank_pool_test as P  # noqa: E402
 
-B, NM, FREF = 32, 12, 20  # the debug tier keeps all 32 animals: 8 could not resolve a 1 deg bar (identical runs 1.87 / 3.69 deg)
+B, NM, FREF = int(os.environ.get('SPIDER_B', 32)), 12, 20  # the debug tier keeps all 32 animals: 8 could not resolve a 1 deg bar (identical runs 1.87 / 3.69 deg)
 SLICE = os.environ.get('SLICE') == '1'  # 1: the 3-layer slice (5,212 neurons); default: the whole scaffold
 if SLICE:
     NR, N1, N2, F12, FM = 1200, 2000, 2000, 20, 200
