@@ -15,6 +15,9 @@ the run's end stays where it was.
 import sys
 from pathlib import Path
 
+import os
+import threading
+
 import numpy as np
 
 from agent.body_engine.models.spider import PREY_R
@@ -44,8 +47,10 @@ def eye_table(npix=NPIX):
 
 def write_tables(d, env, npix=NPIX):
     """eyes.bin and env.bin in d. env: (F, 6) rows x0 y0 z0 vx vy t_on (mm, mm/s, s), written [field][animal]."""
-    eye_table(npix).tofile(Path(d) / 'eyes.bin')
-    np.ascontiguousarray(np.asarray(env, np.float32).T).tofile(Path(d) / 'env.bin')
+    for name, a in (('eyes.bin', eye_table(npix)), ('env.bin', np.ascontiguousarray(np.asarray(env, np.float32).T))):
+        tmp = Path(d) / f'{name}.{os.getpid()}.{threading.get_ident()}'
+        a.tofile(tmp)
+        os.replace(tmp, Path(d) / name)  # atomic: parallel arms rewrite the same table while another engine starts
 
 
 def quat_rot(q, v):

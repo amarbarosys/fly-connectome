@@ -11,12 +11,14 @@ check (5 s, the last 2 s scored; truth from the body packet: head pose, prey pos
   G2 body arm: |eye-in-head gaze| < 1/3 of the no-turn arm's (the body took the turn over)
   G3 body arm: body yaw change has the prey bearing change's sign and >= 50 % of its size
   M1 mutant, turn sign flipped: eye error >= 3 x the body arm's or the body turns the wrong way
-  R1 reflex off: eye error >= 3 x the body arm's
   C1 silenced brain (no eye motor output): eye error >= 5 x the body arm's
 usage: gpu-wait run --shared --vram 4 --priority 60 --timeout 3600 --env PYTHONPATH=$PWD -- .venv/bin/python -m agent.spider_body_loop check
 """
 import json
 import sys
+import time
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
@@ -24,8 +26,11 @@ from agent import spider_eye_loop as L
 from agent.body_engine.spider_gait import gait
 
 T, SCORE, SPEED = 500, 200, 0.6
+START = threading.Lock()  # parallel arms: model files and engine builds are made one at a time
 YAW_PER_TURN, TRIM, TAU = -140.0, 0.0, 0.25
-POS = 5.0  # 1/s, the teacher's centring term (0.2 s); set before the run, not tuned  # gait_rate (no brain): yaw deg/s per unit turn (sign: + turn yaws right), turn for zero yaw; body closes the gaze in TAU s
+POS = 5.0  # 1/s, the teacher's centring term (0.2 s); set before the run, not tuned
+REFLEX = False  # 95fa88a added it; with the position-trained pathway the reflex-off arm held 0.54 / 0.60 deg, the reflex arm lost the prey (38d70f0)
+SEEDS = (41, 43)  # prey speeds, trial stream: new for the reflex-free claim (31, 37 were used while choosing the design)  # gait_rate (no brain): yaw deg/s per unit turn (sign: + turn yaws right), turn for zero yaw; body closes the gaze in TAU s
 
 
 def yaw(q):
@@ -43,7 +48,8 @@ def pursue(net, rec, sp, rng, arm, view=None, log=None):
     reset()
     B = len(sp)
     tgt0 = rng.uniform(-0.3, 0.3, B)
-    eyes = L.Eyes(tgt0, sp, T, view=view)
+    with START:
+        eyes = L.Eyes(tgt0, sp, T, view=view)
     gaze, eye_v, prev = np.zeros(B), np.zeros(B), None
     err, gz, y0, b0, yaws, bears = [], [], None, None, [], []
     for k in range(T):
@@ -55,7 +61,7 @@ def pursue(net, rec, sp, rng, arm, view=None, log=None):
         bear = np.degrees(np.arctan2(q[-6] - q[1], q[-7] - q[0]))  # prey from the head, world frame
         if y0 is None:
             y0, b0, last_yaw = head_yaw.copy(), bear.copy(), head_yaw.copy()
-        if arm != 'novor':  # counter-rotation reflex: the eye turns back by the head's measured yaw this step (a fixed reflex, like a VOR)
+        if REFLEX and arm != 'novor':  # counter-rotation reflex (off: it fights the position-trained pathway, 38d70f0)
             gaze = gaze - wrap(head_yaw - last_yaw)
         last_yaw = head_yaw.copy()
         err.append(np.abs(wrap(bear - head_yaw - gaze)))
@@ -132,10 +138,14 @@ def diag():
 
 def check():
     rec = L.P.retina(np.random.default_rng(0))
-    _, net = L.G.train('learn', 300, rec, 2, keep=True, pos=POS)  # still-head brain: the reflex removes the head's yaw; POS: it also learns to centre
-    sp = L.P.speeds(np.random.default_rng(31), 6, 9, L.G.B)
-    r = {arm: pursue(L.pathway(net), rec, sp, np.random.default_rng(37), arm) for arm in ('body', 'noturn', 'flip', 'silenced', 'novor')}
-    net.close()
+    _, net = L.G.train_cached('learn', 300, rec, 2, pos=POS)  # POS: it also learns to centre
+    sp = L.P.speeds(np.random.default_rng(SEEDS[0]), 6, 9, L.G.B)
+    arms = ('body', 'noturn', 'flip', 'silenced')
+    nets = {a: L.G.clone(net) for a in arms}  # one resident pathway and one engine per arm, all arms at once
+    with ThreadPoolExecutor(len(arms)) as ex:
+        r = dict(zip(arms, ex.map(lambda a: pursue(L.pathway(nets[a]), rec, sp, np.random.default_rng(SEEDS[1]), a), arms)))
+    for n in [net, *nets.values()]:
+        n.close()
     med = {a: {k: float(np.median(v)) if k in ('lost', 'trace') else float(np.median(np.abs(v)) if k != 'err' else np.median(v)) for k, v in x.items()} for a, x in r.items()}
     b = r['body']
     follow = np.sign(b['yaw']) == np.sign(b['bearing'])
@@ -146,7 +156,6 @@ def check():
           (f"G3 body yaw follows the prey bearing: sign in {follow.mean():.0%}, size median {np.median(frac):.0%} (>= 50 %)", follow.mean() >= 0.9 and np.median(frac) >= 0.5),
           (f"M1 mutant flipped turn: error {med['flip']['err']:.2f} vs {med['body']['err']:.2f} deg, or wrong-way body", med['flip']['err'] >= 3 * med['body']['err'] or
            np.mean(np.sign(r['flip']['yaw']) == np.sign(r['flip']['bearing'])) < 0.5),
-          (f"R1 reflex off (novor): error {med['novor']['err']:.2f} >= 3 x {med['body']['err']:.2f}", med['novor']['err'] >= 3 * med['body']['err']),
           (f"C1 silenced brain: error {med['silenced']['err']:.2f} >= 5 x {med['body']['err']:.2f}", med['silenced']['err'] >= 5 * med['body']['err'])]
     for k, v in ok:
         print(('PASS ' if v else 'FAIL ') + k)

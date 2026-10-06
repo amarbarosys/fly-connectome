@@ -247,6 +247,34 @@ def parity():
     return ok
 
 
+def clone(net, seed=2):
+    """a second resident pathway with net's current weights (one per parallel arm; same init slots, then the weights)."""
+    w, idx = net.weights()
+    c = GPUPathway(*init(seed), seed=7)
+    c.set_weights(w, idx)
+    return c
+
+
+def train_cached(arm, iters, rec, seed=2, wobble=None, pos=0.0):
+    """train(..., keep=True) once per (arm, iters, seed, pos, wobble, retina, sources); later calls load the weights
+    (.work/agent/spider/weights/). The key holds every input of the result, so a stale entry cannot be read."""
+    srcs = [Path(__file__), Path(P.__file__), ROOT / 'agent/spider_pool.mojo']
+    key = hashlib.sha1(b''.join(f.read_bytes() for f in srcs) + repr((arm, int(iters), seed, float(pos))).encode()
+                       + (b'' if wobble is None else np.ascontiguousarray(wobble).tobytes())
+                       + b''.join(np.ascontiguousarray(r).tobytes() for r in rec)).hexdigest()[:12]
+    f = ROOT / f'.work/agent/spider/weights/{key}.npz'
+    if f.is_file():
+        z = np.load(f)
+        net = GPUPathway(*init(seed), seed=7)
+        net.set_weights(z['w'], z['idx'])
+        return json.loads(str(z['out'])), net
+    out, net = train(arm, iters, rec, seed, keep=True, wobble=wobble, pos=pos)
+    w, idx = net.weights()
+    f.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(f, w=w, idx=idx, out=json.dumps(out))
+    return out, net
+
+
 def train(arm, iters, rec, seed=2, stop_above=None, keep=False, wobble=None, pos=0.0):
     """arm: learn, shuffle (random-sign teacher), frozen (no teaching), flip (mutant: teacher sign reversed).
     frozen never changes a weight, so it is not trained (its after = its before, exactly). stop_above: a control arm ends
