@@ -56,6 +56,10 @@ if [ "$stage" = stone ]; then  # a stone in the walking fly's path through the l
   $M -m agent.body_engine.stone_check || { echo "FAIL stone: log above"; exit 1; }
   exit 0
 fi
+if [ "$stage" = wall ]; then  # a wall square across the walking fly's path (box-vs-mesh pairs), same gates and mutant as stone
+  $M -m agent.body_engine.stone_check wall || { echo "FAIL wall: log above"; exit 1; }
+  exit 0
+fi
 if [ "$stage" = convexstep ]; then  # box and ellipsoid stones in a CHAINED engine run vs MuJoCo mj_step: fly (arena walls and stones) and spider (stones under its feet, model.stones)
   # per body: (1) 20 steps in one launch, qpos and qvel vs 20 chained mj_step, states whose own MuJoCo trajectory moves under a 1e-6 perturbation dropped (model.check,
   # at most half, listed); (2) the full one-step fields (ncon, qacc, qfrc_constraint, ...) on the states the engine reached after 3 steps (spider: 1), so forces are gated
