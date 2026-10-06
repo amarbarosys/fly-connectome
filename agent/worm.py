@@ -56,9 +56,11 @@ class WormBrain:
         """chems, gaps: per arm (N, N) post x pre counts; gaps symmetrised here. batch: columns per arm."""
         k, n = len(chems), chems[0].shape[0]
         eye = np.eye(n)
-        self.m = np.stack([np.linalg.inv(eye * (1 + dt * GC / C) - dt / C * GG * (lap(g))) for g in gaps]).astype(np.float32)
+        inv = {}  # arms sharing one gap matrix share one inverse
+        self.m = np.stack([inv.setdefault(id(g), np.linalg.inv(eye * (1 + dt * GC / C) - dt / C * GG * lap(g)))
+                           for g in gaps]).astype(np.float32)
         w = np.stack(chems) * np.float32(GS)
-        self.syn = np.concatenate([w, w * rev.astype(np.float32)], 1)  # (K, 2N, N)
+        self.syn = np.concatenate([w, w * np.asarray(rev, np.float32).reshape(-1, 1, n)], 1)  # (K, 2N, N); rev (N,) or per arm (K, N)
         self.v = np.full((k, n, batch), EC, np.float32)
         self.s = np.zeros((k, n, batch), np.float32)
         self.x, self.ss = np.empty_like(self.v), np.empty((k, 2 * n, batch), np.float32)
