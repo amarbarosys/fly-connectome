@@ -124,8 +124,56 @@ def trial(g, seed, reward=True):
     return rec
 
 
+SCHEDULES = {'AtoX': (A, 1), 'AtoNoX': (A, 0), 'Xonly': (None, 1)}  # (first rewarded odour or none, dopamine on the second)
+
+
+def acquisition(g, seed, schedule, x):
+    """Second-odour acquisition (docs/plans/LEARNING_ACQUISITION.md): optional reward on A, then sniff x with the
+    learners' dopamine 1 (AtoX, Xonly) or 0 (AtoNoX); probe x and A. Raw avoid counts carry the effect (no valence ceiling)."""
+    pre, post, w, n, grp, kc, approach, avoid, dn, odour = g
+    live = ShiuLive(pre, post, w, n=n, flies=FLIES, seed=seed)
+    for f in range(FLIES):
+        for ids in odour: live.stimulate(ids, HZ, fly=f)
+    live.edge_groups(grp, np.tile(np.float32([1, LN, GAIN, GAIN]), (FLIES, 1)))
+    live.plastic(3, kc)
+    groups = [approach, avoid, dn]
+    readout = (np.arange(FLIES)[None] * n + np.concatenate(groups)[:, None]).reshape(-1)
+    live.start([WINDOW], readout)
+    entries, p0 = live._stim_arrays()
+    only = [np.where(np.isin(entries % n, ids), p0, 0).astype(np.float32) for ids in odour]
+    cut = np.cumsum([len(i) for i in groups])[:-1]
+    learners = np.arange(FLIES) < FLIES // 2
+
+    def test(i):
+        y = live.sniff(only[i])[-1].reshape(-1, FLIES).astype(float)
+        ap, av, d = (s.sum(0) for s in np.split(y, cut))
+        return {'approach': ap.tolist(), 'avoid': av.tolist(), 'dn': d.tolist(), 'valence': ((ap - av) / np.maximum(ap + av, 1)).tolist()}
+
+    first, dop2 = SCHEDULES[schedule]
+    rec = {'seed': seed, 'schedule': schedule, 'x': x, 'pre_x': test(x)}
+    if first is not None:
+        live.sniff(only[first])
+        live.reward(np.where(learners, 1, 0).astype(np.float32))
+        rec['mid_x'] = test(x)
+    live.sniff(only[x])
+    live.reward(np.where(learners, dop2, 0).astype(np.float32))
+    rec['post_x'], rec['post_A'] = test(x), test(A)
+    live.close()
+    return rec
+
+
 def main(mode, *args):
-    if mode not in ('noise', 'run'): raise SystemExit('usage: learning_specificity noise SEEDS | run ARM FIRST [SEEDS]')
+    if mode == 'acq':  # acq X FIRST SEEDS: every schedule, second odour index X
+        x, first, seeds = int(args[0]), int(args[1]), int(args[2])
+        OUT.mkdir(parents=True, exist_ok=True)
+        g = setup('real')
+        head = subprocess.run(['git', 'rev-parse', '--short', 'HEAD'], cwd=ROOT, capture_output=True, text=True).stdout.strip()
+        recs = [acquisition(g, 8000 + s, sch, x) for sch in SCHEDULES for s in range(first, first + seeds)]
+        path = OUT / f'acq-o{x}-{first}.json'
+        path.write_text(json.dumps({'mode': 'acq', 'x': x, 'flies': FLIES, 'git_head': head, 'records': recs}) + '\n')
+        print('written', path)
+        return
+    if mode not in ('noise', 'run'): raise SystemExit('usage: learning_specificity noise SEEDS | run ARM FIRST [SEEDS] | acq X FIRST SEEDS')
     OUT.mkdir(parents=True, exist_ok=True)
     arm = 'real' if mode == 'noise' else args[0]
     first = 0 if mode == 'noise' else int(args[1])
