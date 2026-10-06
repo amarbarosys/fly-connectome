@@ -28,13 +28,14 @@ import numpy as np
 from agent import spider_eye_loop as L
 from agent.body_engine.spider_gait import gait
 
-DEBUG = os.environ.get('SPIDER_TIER') == 'debug'  # debug tier: 8 animals (spider_pool_gpu.B), 200 steps, debug seeds, no seed claim
+DEBUG = os.environ.get('SPIDER_TIER') == 'debug'  # debug tier: 200 steps (32 animals as the claim), debug seeds, no seed claim
 T, SCORE, SPEED = (200, 80, 0.3) if DEBUG else (500, 200, 0.3)  # 0.3: the hand-wired eye holds 0.61 deg walking, 3.3-3.9 at 0.6 (stride wobble)
 PROF = bool(os.environ.get('SPIDER_PYPROF'))  # Python-side split per step: engine exchange, brain step, bookkeeping
 START = threading.Lock()  # parallel arms: model files and engine builds are made one at a time
 YAW_PER_TURN, TRIM, TAU = -44.0, 0.0, 1.0  # at SPEED 0.3 (gait_rate: -40.9 to +40.9 deg/s over turn -1..1, trim yaw +1.1); was -140 at 0.6.
 # gait_rate (no brain): yaw deg/s per unit turn (sign: + turn yaws right), turn for zero yaw; body closes the gaze in TAU s
 RAMP = 30  # steps (0.3 s) over which the gait speed rises from 0, as fly_link ramps its servos: full speed at step 0 jerked the head 2.0 deg
+GAIN_FILE = L.G.ROOT / '.work/agent/spider/gait-rate.json'  # gait_rate's measured yaw deg/s per unit turn at SPEED
 POS = 5.0  # 1/s, the teacher's centring term (0.2 s); set before the run, not tuned
 REFLEX = False  # 95fa88a added it; with the position-trained pathway the reflex-off arm held 0.54 / 0.60 deg, the reflex arm lost the prey (38d70f0)
 SEEDS = (5, 7) if DEBUG else (47, 53)  # prey speeds, trial stream; claim seeds pass agent.seeds.claim (docs/seeds_used.json)
@@ -52,6 +53,18 @@ def wrap(a):
 
 
 GAIN = {'body': 1.0, 'noturn': 0.0, 'flip': -1.0, 'silenced': 1.0, 'stand': 0.0, 'novor': 1.0, 'hand': 1.0}
+
+
+def hand_net():
+    """the hand-wired circuit, fresh per run: its rng draws every input spike, so a shared one made identical arms differ ~2x."""
+    n = L.P.Net(np.random.default_rng(1), hand=True)
+    return (lambda: n.trial_reset(L.G.B)), n.step
+
+
+def ci(x, q=(5, 95)):
+    """bootstrap 90 % interval of the median over animals."""
+    m = np.median(np.random.default_rng(0).choice(x, (2000, len(x))), 1)
+    return tuple(np.percentile(m, q))
 
 
 def turn_law(gaze, arm):
@@ -83,7 +96,7 @@ def pursue(net, rec, sp, rng, arm, view=None, log=None):
         if REFLEX and arm != 'novor':  # counter-rotation reflex (off: it fights the position-trained pathway, 38d70f0)
             gaze = gaze - wrap(head_yaw - last_yaw)
         last_yaw = head_yaw.copy()
-        err.append(np.abs(wrap(bear - head_yaw - gaze)))
+        err.append(wrap(bear - head_yaw - gaze))  # signed: split into slow (lag) and fast (wobble) parts below
         gz.append(np.abs(gaze))
         yaws.append(wrap(head_yaw - y0)); bears.append(wrap(bear - b0))
         t2 = time.perf_counter()
@@ -99,7 +112,9 @@ def pursue(net, rec, sp, rng, arm, view=None, log=None):
         print(f'PROFILE {arm}: s/step engine exchange {cost[0] / T:.4f}, brain {cost[1] / T:.4f}, bookkeeping {cost[2] / T:.4f}', flush=True)
     last = slice(T - SCORE, T)
     e = np.array(err)
-    return {'lost': np.where((e > 2.5).any(0), (e > 2.5).argmax(0), T), 'trace': np.median(e, 1),'err': np.median(np.array(err)[last], 0), 'gaze': np.median(np.array(gz)[last], 0),
+    slow = np.apply_along_axis(lambda x: np.convolve(x, np.ones(25) / 25, 'same'), 0, e)  # 0.25 s mean: lag; the rest: stride wobble
+    e, fast, slow = np.abs(e), np.abs(e - slow), np.abs(slow)
+    return {'lost': np.where((e > 2.5).any(0), (e > 2.5).argmax(0), T), 'trace': np.median(e, 1),'err': np.median(e[last], 0), 'slow': np.median(slow[last], 0), 'fast': np.median(fast[last], 0), 'gaze': np.median(np.array(gz)[last], 0),
             'yaw': np.array(yaws)[-1], 'bearing': np.array(bears)[-1]}
 
 
@@ -133,6 +148,7 @@ def gait_rate():
     eyes.close()
     y = np.unwrap(np.radians(np.array(ys)), axis=0)
     rate = np.degrees(y[-1] - y[50]) / 1.5
+    GAIN_FILE.write_text(json.dumps({'speed': SPEED, 'yaw_per_turn': float(np.polyfit(turn, rate, 1)[0])}) + '\n')
     yd = np.degrees(y)
     np.save(L.G.ROOT / '.work/agent/spider/head-yaw.npy', yd)  # (steps, B) head yaw deg, 10 ms steps
     i0 = int(np.argmin(np.abs(turn - TRIM)))
@@ -176,20 +192,30 @@ def preflight():
         sys.exit('FAIL preflight')
 
 
+def gain_ok():
+    g = json.loads(GAIN_FILE.read_text()) if GAIN_FILE.is_file() else {}
+    if g.get('speed') != SPEED or abs(g['yaw_per_turn'] - YAW_PER_TURN) > 0.1 * abs(YAW_PER_TURN):
+        sys.exit(f'FAIL turn gain: YAW_PER_TURN {YAW_PER_TURN} at speed {SPEED}, measured {g} ({GAIN_FILE}); run gait_rate and set it')
+
+
 def check():
     preflight()
+    gain_ok()
     if not DEBUG:
         from agent import seeds
         seeds.claim('spider_body_loop', SEEDS)
     rec = L.P.retina(np.random.default_rng(0))
-    hand = L.P.Net(np.random.default_rng(1), hand=True)
     src = [f.read_bytes() for f in (Path(__file__), Path(L.__file__), Path(L.G.__file__), L.G.ROOT / 'agent/spider_pool.mojo', *sorted((L.G.ROOT / 'agent/body_engine').glob('*.mojo')))]
     key = lambda arm, *w: src + [repr((arm, SEEDS, T, SCORE, L.G.B, DEAD, TAU, POS, REFLEX)).encode(), *w]
     sp = L.P.speeds(np.random.default_rng(SEEDS[0]), 6, 9, L.G.B)
-    h = L.G.cached('hand', key('hand'), lambda: pursue((lambda: hand.trial_reset(L.G.B), hand.step), rec, sp, np.random.default_rng(SEEDS[1]), 'hand'))
+    h = L.G.cached('hand', key('hand'), lambda: pursue(hand_net(), rec, sp, np.random.default_rng(SEEDS[1]), 'hand'))
     hf = float(np.mean(np.sign(h['yaw']) == np.sign(h['bearing'])))
-    print(f"hand-wired body arm: eye error {np.median(h['err']):.2f} deg, body follows the bearing in {hf:.0%}", flush=True)
-    if not (np.median(h['err']) < 1 and hf >= 0.9):
+    lo, hi = ci(h['err'])
+    print(f"hand-wired body arm: eye error {np.median(h['err']):.2f} deg (90 % CI {lo:.2f}-{hi:.2f}; slow {np.median(h['slow']):.2f}, fast {np.median(h['fast']):.2f}), "
+          f"body follows the bearing in {hf:.0%}", flush=True)
+    if lo < 1 <= hi:
+        sys.exit(f'FAIL undecided: the hand arm CI {lo:.2f}-{hi:.2f} straddles 1 deg; more animals, not a verdict')
+    if not (hi < 1 and hf >= 0.9):
         sys.exit('FAIL body cannot pursue: the hand-wired circuit misses G1/G3, a learner run would test the body, not the learning')
     _, net = L.G.train_cached('learn', 300, rec, 2, pos=POS)  # POS: it also learns to centre
     wkey = b''.join(np.ascontiguousarray(x).tobytes() for x in net.weights())
