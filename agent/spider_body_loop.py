@@ -24,7 +24,8 @@ from agent import spider_eye_loop as L
 from agent.body_engine.spider_gait import gait
 
 T, SCORE, SPEED = 500, 200, 0.6
-YAW_PER_TURN, TRIM, TAU = -140.0, 0.0, 0.25  # gait_rate (no brain): yaw deg/s per unit turn (sign: + turn yaws right), turn for zero yaw; body closes the gaze in TAU s
+YAW_PER_TURN, TRIM, TAU = -140.0, 0.0, 0.25
+POS = 5.0  # 1/s, the teacher's centring term (0.2 s); set before the run, not tuned  # gait_rate (no brain): yaw deg/s per unit turn (sign: + turn yaws right), turn for zero yaw; body closes the gaze in TAU s
 
 
 def yaw(q):
@@ -36,7 +37,7 @@ def wrap(a):
     return (a + 180) % 360 - 180
 
 
-def pursue(net, rec, sp, rng, arm, view=None):
+def pursue(net, rec, sp, rng, arm, view=None, log=None):
     """arm: body, noturn, flip, silenced. Returns per-spider (eye error, |gaze|, body yaw change, prey bearing change), last SCORE steps."""
     reset, step = net
     reset()
@@ -61,6 +62,8 @@ def pursue(net, rec, sp, rng, arm, view=None):
         gz.append(np.abs(gaze))
         yaws.append(wrap(head_yaw - y0)); bears.append(wrap(bear - b0))
         d = step(L.P.motion(prev, now).astype(np.float32)) if prev is not None and arm != 'silenced' else np.zeros(B)
+        if log is not None:  # per step, all animals: bearing, head yaw, gaze, eye command, turn (deg / units)
+            log.append(np.stack([wrap(bear - b0), wrap(head_yaw - y0), gaze, d, turn]))
         prev = now
         eye_v = eye_v + L.P.KA * d
         gaze = gaze + eye_v * L.P.DT
@@ -69,6 +72,24 @@ def pursue(net, rec, sp, rng, arm, view=None):
     e = np.array(err)
     return {'lost': np.where((e > 2.5).any(0), (e > 2.5).argmax(0), T), 'trace': np.median(e, 1),'err': np.median(np.array(err)[last], 0), 'gaze': np.median(np.array(gz)[last], 0),
             'yaw': np.array(yaws)[-1], 'bearing': np.array(bears)[-1]}
+
+
+def trace():
+    """body arm, per-step log: where the eye's world direction leaves the prey, and what the eye command and body did."""
+    rec = L.P.retina(np.random.default_rng(0))
+    _, net = L.G.train('learn', 300, rec, 2, keep=True, pos=POS)
+    sp = L.P.speeds(np.random.default_rng(31), 6, 9, L.G.B)
+    log = []
+    pursue(L.pathway(net), rec, sp, np.random.default_rng(37), 'body', log=log)
+    net.close()
+    a = np.array(log)  # (T, 5, B)
+    np.save(L.G.ROOT / '.work/agent/spider/trace.npy', a)
+    eye = a[:, 1] + a[:, 2]
+    err = wrap(a[:, 0] - eye)
+    print('step  bearing  yaw  gaze  eye_world  err  d  turn  (median over animals; err also p90)')
+    for k in list(range(0, 60, 5)) + list(range(60, T, 40)):
+        m = lambda x: float(np.median(x[k]))
+        print(f'{k:4d} {m(a[:, 0]):8.2f} {m(a[:, 1]):6.2f} {m(a[:, 2]):6.2f} {m(eye):8.2f} {m(np.abs(err)):6.2f}/{np.percentile(np.abs(err[k]), 90):6.2f} {m(a[:, 3]):6.2f} {m(a[:, 4]):+.3f}')
 
 
 def gait_rate():
@@ -111,7 +132,7 @@ def diag():
 
 def check():
     rec = L.P.retina(np.random.default_rng(0))
-    _, net = L.G.train('learn', 300, rec, 2, keep=True)  # still-head brain: the reflex removes the head's yaw
+    _, net = L.G.train('learn', 300, rec, 2, keep=True, pos=POS)  # still-head brain: the reflex removes the head's yaw; POS: it also learns to centre
     sp = L.P.speeds(np.random.default_rng(31), 6, 9, L.G.B)
     r = {arm: pursue(L.pathway(net), rec, sp, np.random.default_rng(37), arm) for arm in ('body', 'noturn', 'flip', 'silenced', 'novor')}
     net.close()
@@ -136,4 +157,4 @@ def check():
 
 
 if __name__ == '__main__':
-    {'check': check, 'diag': diag, 'gait_rate': gait_rate}[sys.argv[1]]()
+    {'check': check, 'diag': diag, 'gait_rate': gait_rate, 'trace': trace}[sys.argv[1]]()

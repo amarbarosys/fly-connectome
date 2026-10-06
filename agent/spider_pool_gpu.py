@@ -197,9 +197,11 @@ def wobble_windows(trace, rng, n):
     return w - w[0]
 
 
-def run(net, rec, sp, rng, silence=False, learn=False, shuffle=None, flip=False, head=None):
+def run(net, rec, sp, rng, silence=False, learn=False, shuffle=None, flip=False, head=None, pos=0.0):
     """shuffle: a separate generator for the control's random signs, so both arms see the same task stream.
-    head: (STEPS, n) head yaw in deg (the walking body's stride wobble): the retina sees tgt - gaze - head, the teacher its slip."""
+    head: (STEPS, n) head yaw in deg (the walking body's stride wobble): the retina sees tgt - gaze - head, the teacher its slip.
+    pos: teacher += pos x the prey's retinal position (deg, 1/s): learn to centre, not only to match the slip (a velocity-only
+    pathway lets offsets accumulate until the prey leaves the retina, agent/spider_body_loop.py trace)."""
     n = len(sp)
     head = np.zeros((P.STEPS, n)) if head is None else head
     net.reset()
@@ -213,7 +215,7 @@ def run(net, rec, sp, rng, silence=False, learn=False, shuffle=None, flip=False,
         else:
             d = np.zeros(n)
         prev = now
-        seen = sp - eye_v - (head[k] - head[k - 1]) / P.DT * (k > 0)  # the slip this step's neurons responded to, before their own command moves the eye
+        seen = sp - eye_v - (head[k] - head[k - 1]) / P.DT * (k > 0) + pos * (tgt - gaze - head[k])  # the slip this step's neurons responded to (+ the centring term), before their own command moves the eye
         eye_v = eye_v + P.KA * d
         gaze = gaze + eye_v * P.DT
         if learn and k > 1:
@@ -245,7 +247,7 @@ def parity():
     return ok
 
 
-def train(arm, iters, rec, seed=2, stop_above=None, keep=False, wobble=None):
+def train(arm, iters, rec, seed=2, stop_above=None, keep=False, wobble=None, pos=0.0):
     """arm: learn, shuffle (random-sign teacher), frozen (no teaching), flip (mutant: teacher sign reversed).
     frozen never changes a weight, so it is not trained (its after = its before, exactly). stop_above: a control arm ends
     once its held-out error has been >= stop_above at 4 successive test points from batch 100 on (decided, not run out)."""
@@ -257,7 +259,7 @@ def train(arm, iters, rec, seed=2, stop_above=None, keep=False, wobble=None):
     for it in range(0 if arm == 'frozen' else iters):
         n = it + 1
         run(net, rec, P.speeds(rng, 2, 5, B), rng, learn=arm != 'frozen', shuffle=sign if arm == 'shuffle' else None, flip=arm == 'flip',
-            head=None if wobble is None else wobble_windows(wobble, rng, B))
+            head=None if wobble is None else wobble_windows(wobble, rng, B), pos=pos)
         if it % 25 == 24:
             curve.append(round(test(11), 2)); print(arm, it + 1, curve[-1], f'{(time.perf_counter() - t0) / (it + 1):.2f} s/batch', flush=True)
             if stop_above and it >= 99 and len(curve) >= 4 and min(curve[-4:]) >= stop_above:
