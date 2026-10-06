@@ -24,6 +24,7 @@ SEG = [('coxa', 0.5, 0.0), ('femur', 1.8, 35.0), ('patella', 0.8, -70.0), ('tibi
 LEGS = [(1, 55.0, 1.10, 0.55), (2, 25.0, 0.90, 0.45), (3, -20.0, 0.90, 0.40), (4, -60.0, 1.05, 0.40)]  # pair, yaw, scale, radius
 JUMP_S = 95.6  # servo boost of the jump variant (see build)
 PREY_R = 0.5  # mm, prey ellipsoid radius (a ~1 mm fly-sized dot)
+WATER_XY, WATER_R = (19.5, 23.0), 3.0  # mm: a bright drop of water on the ground, 30 mm from the start at 50 deg left (spider_drives.py)
 KP, FMAX, DAMP = 2700.0, 4000.0, 3.0  # servo gain and force limit, dof damping (fly 45 / 65 / 0.06, x ~60 for ~20x mass and ~3x length)
 
 
@@ -74,6 +75,7 @@ def build(out=OUT, prey=False, jump=False):
     ellipsoid(out / 'opisthosoma.stl', 1.5, 1.1, 0.9)
     if prey:
         ellipsoid(out / 'prey.stl', PREY_R, PREY_R, PREY_R, n=6)
+        ellipsoid(out / 'water.stl', WATER_R, WATER_R, 0.05, n=12)
     assets, geoms, actuators, pairs = ['<mesh name="prosoma" file="prosoma.stl"/>', '<mesh name="opisthosoma" file="opisthosoma.stl"/>'], [], [], []
 
     def leg(side, pair, yaw, scale, radius):
@@ -113,6 +115,8 @@ def build(out=OUT, prey=False, jump=False):
         PREYBODY = ('<body name="prey" pos="0 0 0" gravcomp="1">\n<freejoint name="prey"/>\n'
                     '<geom name="prey" type="mesh" mesh="prey" rgba="0.02 0.02 0.02 1"/>\n'
                     '<body name="prey_tip" pos="0 0 0" gravcomp="1"><geom type="sphere" size="1e-3" mass="1e-9"/></body>\n</body>\n')  # a child: a leaf free body is a "simple dof"
+        assets.append('<mesh name="water" file="water.stl"/>')
+        PREYBODY += f'<body name="water" pos="{WATER_XY[0]} {WATER_XY[1]} 0.05"><geom name="water" type="mesh" mesh="water" rgba="0.95 0.95 0.95 1"/></body>\n'  # no joint: fixed, after the prey (prey_set: the last 7 qpos)
 
     xml = f'''<mujoco model="spider">
 <compiler angle="degree" meshdir="."/>
