@@ -28,7 +28,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tools'))
 import spider_blank_pool_test as P  # noqa: E402
 
-B, NM, FREF = 32, 12, 20
+B, NM, FREF = 8 if os.environ.get('SPIDER_TIER') == 'debug' else 32, 12, 20  # debug tier: 8 animals
 SLICE = os.environ.get('SLICE') == '1'  # 1: the 3-layer slice (5,212 neurons); default: the whole scaffold
 if SLICE:
     NR, N1, N2, F12, FM = 1200, 2000, 2000, 20, 200
@@ -253,6 +253,19 @@ def clone(net, seed=2):
     c = GPUPathway(*init(seed), seed=7)
     c.set_weights(w, idx)
     return c
+
+
+def cached(name, parts, fn):
+    """fn()'s dict of arrays, stored once per key (bytes of everything the result depends on) in .work/agent/spider/refcache/.
+    For reference arms only: the arm under test is always run."""
+    f = ROOT / f'.work/agent/spider/refcache/{name}-{hashlib.sha1(b"".join(parts)).hexdigest()[:12]}.npz'
+    if f.is_file():
+        print(f'cache hit {name}', flush=True)
+        return dict(np.load(f))
+    out = fn()
+    f.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(f, **out)
+    return out
 
 
 def train_cached(arm, iters, rec, seed=2, wobble=None, pos=0.0):

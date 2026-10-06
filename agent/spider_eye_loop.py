@@ -52,7 +52,7 @@ class Eyes:
         env: callable (head, quat) -> prey rows (x0 y0 z0 vx vy t_on) per animal, instead of the tangential crossing.
         row: the engine renders AM_L only and sends its darkest pixel per column (-DEYEROW=1: B x W bytes per step, not
         B x 6 x H x W); self.ret is then None."""
-        self.d = files(G.B, 'eyeloop', prey=True)
+        self.d = files(G.B, 'eyeloop' if G.B == 32 else f'eyeloop-b{G.B}', prey=True)  # files() keys the dir by name only
         q0 = np.fromfile(self.d / 'qpos.bin', np.float32).reshape(-1, G.B)
         head, quat = q0[:3, 0].astype(float), q0[3:7, 0].astype(float)
         E.write_tables(self.d, env(head, quat) if env else env_rows(head, quat, tgt0, sp), npix=W)
@@ -72,6 +72,8 @@ class Eyes:
         self.p.stdin.write(np.ascontiguousarray(self.ctrl if ctrl is None else ctrl, np.float32).tobytes() + np.asarray(gaze, np.float32).tobytes())
         self.p.stdin.flush()
         pk = np.frombuffer(self.p.stdout.read(4 * (NU + self.nq + self.nv + self.ns) * G.B), np.float32)
+        if not pk.size:
+            raise SystemExit(f'FAIL eye loop: engine sent nothing (exit {self.p.wait()}); stderr in {self.d}/cost-*.txt when SPIDER_PROFILE')
         self.q = pk[NU * G.B:(NU + self.nq) * G.B].reshape(self.nq, G.B)
         if self.row:
             self.ret = None

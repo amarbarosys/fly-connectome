@@ -15,32 +15,46 @@ check (5 s, the last 2 s scored; truth from the body packet: head pose, prey pos
 usage: gpu-wait run --shared --vram 4 --priority 60 --timeout 3600 --env PYTHONPATH=$PWD -- .venv/bin/python -m agent.spider_body_loop check
 """
 import json
+import os
 import sys
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor
+
+from pathlib import Path
 
 import numpy as np
 
 from agent import spider_eye_loop as L
 from agent.body_engine.spider_gait import gait
 
-T, SCORE, SPEED = 500, 200, 0.6
+DEBUG = os.environ.get('SPIDER_TIER') == 'debug'  # debug tier: 8 animals (spider_pool_gpu.B), 200 steps, debug seeds, no seed claim
+T, SCORE, SPEED = (200, 80, 0.6) if DEBUG else (500, 200, 0.6)
+PROF = bool(os.environ.get('SPIDER_PYPROF'))  # Python-side split per step: engine exchange, brain step, bookkeeping
 START = threading.Lock()  # parallel arms: model files and engine builds are made one at a time
 YAW_PER_TURN, TRIM, TAU = -140.0, 0.0, 1.0  # gait_rate (no brain): yaw deg/s per unit turn (sign: + turn yaws right), turn for zero yaw; body closes the gaze in TAU s
 POS = 5.0  # 1/s, the teacher's centring term (0.2 s); set before the run, not tuned
 REFLEX = False  # 95fa88a added it; with the position-trained pathway the reflex-off arm held 0.54 / 0.60 deg, the reflex arm lost the prey (38d70f0)
-SEEDS = (47, 53)  # prey speeds, trial stream: fresh for this claim (31/37 and 41/43 already used)
+SEEDS = (5, 7) if DEBUG else (47, 53)  # prey speeds, trial stream; claim seeds pass agent.seeds.claim (docs/seeds_used.json)
 DEAD = 1.0  # deg: the body turns only on the gaze beyond this (salticid-like pivots); with TAU 1 s (was 0.25: 6f8a87b, the body-turn loop ran away). Set before the run
 
 
 def yaw(q):
+    """heading deg of a (7+, ...) qpos: one animal (vector) or all at once (nq, B)."""
     w, x, y, z = q[3:7]
     return np.degrees(np.arctan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z)))
 
 
 def wrap(a):
     return (a + 180) % 360 - 180
+
+
+GAIN = {'body': 1.0, 'noturn': 0.0, 'flip': -1.0, 'silenced': 1.0, 'stand': 0.0, 'novor': 1.0, 'hand': 1.0}
+
+
+def turn_law(gaze, arm):
+    """the gait turn command from the eye-in-head angle: the body closes the gaze beyond DEAD in TAU s."""
+    return TRIM + GAIN[arm] * np.clip(np.sign(gaze) * np.maximum(np.abs(gaze) - DEAD, 0) / TAU / YAW_PER_TURN, -1, 1)
 
 
 def pursue(net, rec, sp, rng, arm, view=None, log=None):
@@ -51,14 +65,16 @@ def pursue(net, rec, sp, rng, arm, view=None, log=None):
     tgt0 = rng.uniform(-0.3, 0.3, B)
     with START:
         eyes = L.Eyes(tgt0, sp, T, view=view)
-    gaze, eye_v, prev = np.zeros(B), np.zeros(B), None
+    gaze, eye_v, prev, cost = np.zeros(B), np.zeros(B), None, np.zeros(3)
     err, gz, y0, b0, yaws, bears = [], [], None, None, [], []
     for k in range(T):
-        turn = TRIM + {'body': 1.0, 'noturn': 0.0, 'flip': -1.0, 'silenced': 1.0, 'stand': 0.0, 'novor': 1.0}[arm] * np.clip(np.sign(gaze) * np.maximum(np.abs(gaze) - DEAD, 0) / TAU / YAW_PER_TURN, -1, 1)
+        t0 = time.perf_counter()
+        turn = turn_law(gaze, arm)
         ctrl = None if arm == 'stand' else gait(k * L.P.DT, np.full(B, SPEED), turn).T
         now = L.receptors(rec, eyes.sense(gaze, ctrl))
+        t1 = time.perf_counter()
         q = eyes.q
-        head_yaw = np.array([yaw(q[:, i]) for i in range(B)])
+        head_yaw = yaw(q)
         bear = np.degrees(np.arctan2(q[-6] - q[1], q[-7] - q[0]))  # prey from the head, world frame
         if y0 is None:
             y0, b0, last_yaw = head_yaw.copy(), bear.copy(), head_yaw.copy()
@@ -68,13 +84,17 @@ def pursue(net, rec, sp, rng, arm, view=None, log=None):
         err.append(np.abs(wrap(bear - head_yaw - gaze)))
         gz.append(np.abs(gaze))
         yaws.append(wrap(head_yaw - y0)); bears.append(wrap(bear - b0))
+        t2 = time.perf_counter()
         d = step(L.P.motion(prev, now).astype(np.float32)) if prev is not None and arm != 'silenced' else np.zeros(B)
+        cost += (t1 - t0, time.perf_counter() - t2, t2 - t1)
         if log is not None:  # per step, all animals: bearing, head yaw, gaze, eye command, turn (deg / units)
             log.append(np.stack([wrap(bear - b0), wrap(head_yaw - y0), gaze, d, turn]))
         prev = now
         eye_v = eye_v + L.P.KA * d
         gaze = gaze + eye_v * L.P.DT
     eyes.close()
+    if PROF:
+        print(f'PROFILE {arm}: s/step engine exchange {cost[0] / T:.4f}, brain {cost[1] / T:.4f}, bookkeeping {cost[2] / T:.4f}', flush=True)
     last = slice(T - SCORE, T)
     e = np.array(err)
     return {'lost': np.where((e > 2.5).any(0), (e > 2.5).argmax(0), T), 'trace': np.median(e, 1),'err': np.median(np.array(err)[last], 0), 'gaze': np.median(np.array(gz)[last], 0),
@@ -137,14 +157,45 @@ def diag():
     net.close()
 
 
+def preflight():
+    """CPU, no engine: a stub body (yaw rate = YAW_PER_TURN x turn) under turn_law, prey bearing moving 6-9 deg/s, a perfect
+    eye (gaze = bearing - yaw). The body arm must turn with the bearing, the flip arm against it; all finite."""
+    rng = np.random.default_rng(0)
+    v = rng.uniform(6, 9, 64) * rng.choice([-1, 1], 64)
+    out = {}
+    for arm in ('body', 'flip'):
+        y = np.zeros(64)
+        for k in range(T):
+            y = y + YAW_PER_TURN * turn_law(v * k * L.P.DT - y, arm) * L.P.DT
+        out[arm] = float(np.mean(np.sign(y) == np.sign(v)))
+    ok = out['body'] >= 0.9 and out['flip'] < 0.5 and np.isfinite(y).all()
+    print(f"{'PASS' if ok else 'FAIL'} preflight turn law: body follows the bearing sign in {out['body']:.0%} (>= 90 %), flip {out['flip']:.0%} (< 50 %)")
+    if not ok:
+        sys.exit('FAIL preflight')
+
+
 def check():
+    preflight()
+    if not DEBUG:
+        from agent import seeds
+        seeds.claim('spider_body_loop', SEEDS)
     rec = L.P.retina(np.random.default_rng(0))
-    _, net = L.G.train_cached('learn', 300, rec, 2, pos=POS)  # POS: it also learns to centre
+    hand = L.P.Net(np.random.default_rng(1), hand=True)
+    src = [f.read_bytes() for f in (Path(__file__), Path(L.__file__), Path(L.G.__file__), L.G.ROOT / 'agent/spider_pool.mojo', *sorted((L.G.ROOT / 'agent/body_engine').glob('*.mojo')))]
+    key = lambda arm, *w: src + [repr((arm, SEEDS, T, SCORE, L.G.B, DEAD, TAU, POS, REFLEX)).encode(), *w]
     sp = L.P.speeds(np.random.default_rng(SEEDS[0]), 6, 9, L.G.B)
-    arms = ('body', 'noturn', 'flip', 'silenced')
+    h = L.G.cached('hand', key('hand'), lambda: pursue((lambda: hand.trial_reset(L.G.B), hand.step), rec, sp, np.random.default_rng(SEEDS[1]), 'hand'))
+    hf = float(np.mean(np.sign(h['yaw']) == np.sign(h['bearing'])))
+    print(f"hand-wired body arm: eye error {np.median(h['err']):.2f} deg, body follows the bearing in {hf:.0%}", flush=True)
+    if not (np.median(h['err']) < 1 and hf >= 0.9):
+        sys.exit('FAIL body cannot pursue: the hand-wired circuit misses G1/G3, a learner run would test the body, not the learning')
+    _, net = L.G.train_cached('learn', 300, rec, 2, pos=POS)  # POS: it also learns to centre
+    wkey = b''.join(np.ascontiguousarray(x).tobytes() for x in net.weights())
+    arms, ref = ('body', 'noturn', 'flip', 'silenced'), ('noturn', 'silenced')  # ref: not the arm under test, cached
     nets = {a: L.G.clone(net) for a in arms}  # one resident pathway and one engine per arm, all arms at once
+    one = lambda a: pursue(L.pathway(nets[a]), rec, sp, np.random.default_rng(SEEDS[1]), a)
     with ThreadPoolExecutor(len(arms)) as ex:
-        r = dict(zip(arms, ex.map(lambda a: pursue(L.pathway(nets[a]), rec, sp, np.random.default_rng(SEEDS[1]), a), arms)))
+        r = dict(zip(arms, ex.map(lambda a: L.G.cached(a, key(a, wkey), lambda: one(a)) if a in ref else one(a), arms)))
     for n in [net, *nets.values()]:
         n.close()
     med = {a: {k: float(np.median(v)) if k in ('lost', 'trace') else float(np.median(np.abs(v)) if k != 'err' else np.median(v)) for k, v in x.items()} for a, x in r.items()}
@@ -160,11 +211,11 @@ def check():
           (f"C1 silenced brain: error {med['silenced']['err']:.2f} >= 5 x {med['body']['err']:.2f}", med['silenced']['err'] >= 5 * med['body']['err'])]
     for k, v in ok:
         print(('PASS ' if v else 'FAIL ') + k)
-    (L.G.ROOT / '.work/agent/spider/body-loop.json').write_text(json.dumps(med, indent=2) + '\n')
+    (L.G.ROOT / f".work/agent/spider/body-loop{'-debug' if DEBUG else ''}.json").write_text(json.dumps(med, indent=2) + '\n')
     if not all(v for _, v in ok):
         sys.exit('FAIL spider orientation')
     print('PASS spider orientation: the eyes lead, the body follows')
 
 
 if __name__ == '__main__':
-    {'check': check, 'diag': diag, 'gait_rate': gait_rate, 'trace': trace}[sys.argv[1]]()
+    {'check': check, 'diag': diag, 'gait_rate': gait_rate, 'trace': trace, 'preflight': preflight}[sys.argv[1]]()
