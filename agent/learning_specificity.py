@@ -16,6 +16,7 @@ A and the held-out odours are also tested at 0.5x and 2x the odour rate (intensi
     python -m agent.learning_specificity run ARM FIRST [SEEDS]     # ARM real | shuffle:K | block:K | random:K | cut:kc_mbon | cut:mbon_out
 Writes .work/agent/shiu/specificity/<mode>-<arm>-<first>.json, one record per seed, per-column arrays.
 """
+import hashlib
 import json
 import subprocess
 import sys
@@ -189,25 +190,36 @@ def eligibility(g, seed, windows):
     return rec
 
 
+def save(name, payload, g):
+    """Receipt with provenance, written twice: an immutable copy under runs/<utc time>/ (exclusive create, never
+    overwritten) and the latest copy at <name>.json that the report reads. Provenance: git head, hash of the
+    uncommitted diff, the graph directory (content-hashed by graph_dir), command line, time."""
+    head = subprocess.run(['git', 'rev-parse', '--short', 'HEAD'], cwd=ROOT, capture_output=True, text=True).stdout.strip()
+    diff = subprocess.run(['git', 'diff', 'HEAD', '--', 'agent', 'tools'], cwd=ROOT, capture_output=True).stdout
+    payload = dict(payload, provenance={'git_head': head, 'diff_sha256': hashlib.sha256(diff).hexdigest() if diff else None,
+                                        'graph_dir': str(graph_dir(*g[:3], g[3]).name), 'argv': sys.argv, 'written_unix': time.time()})
+    body = json.dumps(payload) + '\n'
+    run = OUT / 'runs' / time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())
+    run.mkdir(parents=True, exist_ok=True)
+    with open(run / f'{name}.json', 'x') as f: f.write(body)
+    (OUT / f'{name}.json').write_text(body)
+    print('written', run / f'{name}.json')
+
+
 def main(mode, *args):
     if mode == 'elig':  # elig FIRST SEEDS: 50 ms vs 200 ms eligibility, same seeds, probe at 50 ms
         first, seeds = int(args[0]), int(args[1])
         OUT.mkdir(parents=True, exist_ok=True)
         g = setup('real')
         recs = [eligibility(g, 9000 + s, win) for win in ((500,), (500, 2000)) for s in range(first, first + seeds)]
-        path = OUT / f'elig-{first}.json'
-        path.write_text(json.dumps({'mode': 'elig', 'flies': FLIES, 'records': recs}) + '\n')
-        print('written', path)
+        save(f'elig-{first}', {'mode': 'elig', 'flies': FLIES, 'records': recs}, g)
         return
     if mode == 'acq':  # acq X FIRST SEEDS: every schedule, second odour index X
         x, first, seeds = int(args[0]), int(args[1]), int(args[2])
         OUT.mkdir(parents=True, exist_ok=True)
         g = setup('real')
-        head = subprocess.run(['git', 'rev-parse', '--short', 'HEAD'], cwd=ROOT, capture_output=True, text=True).stdout.strip()
         recs = [acquisition(g, 8000 + s, sch, x) for sch in SCHEDULES for s in range(first, first + seeds)]
-        path = OUT / f'acq-o{x}-{first}.json'
-        path.write_text(json.dumps({'mode': 'acq', 'x': x, 'flies': FLIES, 'git_head': head, 'records': recs}) + '\n')
-        print('written', path)
+        save(f'acq-o{x}-{first}', {'mode': 'acq', 'x': x, 'flies': FLIES, 'records': recs}, g)
         return
     if mode not in ('noise', 'run'): raise SystemExit('usage: learning_specificity noise SEEDS | run ARM FIRST [SEEDS] | acq X FIRST SEEDS')
     OUT.mkdir(parents=True, exist_ok=True)
@@ -215,16 +227,13 @@ def main(mode, *args):
     first = 0 if mode == 'noise' else int(args[1])
     seeds = int(args[0]) if mode == 'noise' else int(args[2]) if len(args) > 2 else 1
     g = setup(arm)
-    head = subprocess.run(['git', 'rev-parse', '--short', 'HEAD'], cwd=ROOT, capture_output=True, text=True).stdout.strip()
     recs = []
     for s in range(first, first + seeds):
         t = time.time()
         recs.append(trial(g, 7000 + s, reward=(mode != 'noise')))
         print(f'{mode} {arm} seed {s} {time.time() - t:.1f}s', flush=True)
-    path = OUT / f"{mode}-{arm.replace(':', '')}-{first}.json"
-    path.write_text(json.dumps({'mode': mode, 'arm': arm, 'flies': FLIES, 'git_head': head, 'odours': ODORS6, 'A': A, 'B': B,
-                                'records': recs}) + '\n')
-    print('written', path)
+    save(f"{mode}-{arm.replace(':', '')}-{first}", {'mode': mode, 'arm': arm, 'flies': FLIES, 'odours': ODORS6, 'A': A, 'B': B,
+                                                     'records': recs}, g)
 
 
 if __name__ == '__main__':
