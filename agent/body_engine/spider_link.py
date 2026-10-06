@@ -43,15 +43,15 @@ def files(F, name=None, prey=False):
     return d
 
 
-def build(d, F, k, brain, w=64, h=64, eyes=False, gaze=False):
+def build(d, F, k, brain, w=64, h=64, eyes=False, gaze=False, row=False, profile=False):
     flags = (d / 'sizes.txt').read_text().split() + (d / 'rsizes.txt').read_text().split()
     nb = int([f for f in flags if f.startswith('-DNBODY=')][0][8:])
     src = [ENGINE / f for f in ('live.mojo', 'smooth.mojo', 'render.mojo', 'spider_brain.mojo', 'eyes.mojo')]
     tag = hashlib.sha1(b''.join(f.read_bytes() for f in src + [d / 'sizes.txt', d / 'rsizes.txt'])).hexdigest()[:8]  # content (incl. the model's sizes), not mtime: mutant-check restores old mtimes
-    b = d / f'link_b{brain}_k{k}_{w}x{h}{"_eyes" if eyes else ""}{"_gaze" if gaze else ""}_{tag}'
+    b = d / f'link_b{brain}_k{k}_{w}x{h}{"_eyes" if eyes else ""}{"_gaze" if gaze else ""}{"_row" if row else ""}{"_prof" if profile else ""}_{tag}'
     if not b.is_file():
         subprocess.run([MOJO, 'build', '-I', str(ENGINE), *flags, f'-DFLIES={F}', '-DSTAGE=7', f'-DK={k}', '-DWAVE=1', f'-DW={w}', f'-DH={h}',
-                        f'-DPROWS={7 * (nb - 1)}', '-DBOX_MM=0', f'-DBRAIN={brain}', f'-DEYES={int(eyes)}', f'-DGAZE={int(gaze)}', str(ENGINE / 'live.mojo'), '-o', str(b)], check=True,
+                        f'-DPROWS={7 * (nb - 1)}', '-DBOX_MM=0', f'-DBRAIN={brain}', f'-DEYES={int(eyes)}', f'-DGAZE={int(gaze)}', f'-DEYEROW={int(row)}', *(['-DPROFILE=1'] if profile else []), str(ENGINE / 'live.mojo'), '-o', str(b)], check=True,
                        capture_output=True)
     return b
 

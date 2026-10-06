@@ -49,6 +49,8 @@ comptime WORLD = get_defined_int["WORLD", 0]()
 comptime GAZE = get_defined_int["GAZE", 0]() == 1  # BRAIN = 1 and EYES: F gaze yaws (deg, AM eyes) follow the ctrl on stdin
 comptime EYES = get_defined_int["EYES", 0]() == 1  # BRAIN > 0: eyes.mojo retinas in the packet, prey moved by DIR/env.bin
 comptime NRET = eyes.F * eyes.NE * eyes.W * eyes.H if EYES else 1
+comptime EYEROW = get_defined_int["EYEROW", 0]() == 1  # EYES: render AM_L only and send its darkest pixel per column (F x W bytes)
+comptime NPKR = eyes.F * eyes.W if EYEROW else NRET
 
 
 def write_all(fd: Int, p: Pointer[UInt8, MutUntrackedOrigin], n: Int) -> Bool:
@@ -166,7 +168,9 @@ def main() raises:
     gaze_b.enqueue_fill(0)
     var gaze_h = ctx.enqueue_create_host_buffer[DType.float32](eng.F)
     var ret_b = ctx.enqueue_create_buffer[DType.uint8](NRET)
-    var pkt_r = ctx.enqueue_create_host_buffer[DType.uint8](NRET)
+    var row_b = ctx.enqueue_create_buffer[DType.uint8](NPKR if EYEROW else 1)
+    var pkt_r = ctx.enqueue_create_host_buffer[DType.uint8](NPKR)
+    var k_rm = ctx.compile_function[eyes.eye_rowmin]()
     comptime if EYES:
         var et = eng.load(dir + "eyes.bin", eyes.NE * 8)
         var ev = eng.load(dir + "env.bin", 6 * eng.F)
@@ -248,11 +252,13 @@ def main() raises:
             var tecam = TileTensor(ecam_b, eyes.LECAM)
             var tevis = TileTensor(evis_b, eyes.LEVIS)
             var tret = TileTensor(ret_b, eyes.LRET)
-            for e in range(eyes.NE):
+            for e in range(1 if EYEROW else eyes.NE):
                 ctx.enqueue_function(k_ec, tecam, tpose, TileTensor(eyet_b, eyes.LEYE), TileTensor(gaze_b, eyes.LGAZE), Int32(e), grid_dim=(eng.F + 63) // 64, block_dim=64)
                 ctx.enqueue_function(k_ecl, tevis, grid_dim=(eyes.F * eyes.W * eyes.H + 255) // 256, block_dim=256)
                 ctx.enqueue_function(k_er, tevis, tecam, tpi, tpf, trv, trt, trp, tpose, tcam, grid_dim=(eyes.F * ren.NTRI + 255) // 256, block_dim=256)
                 ctx.enqueue_function(k_es, tevis, tret, Int32(e), tpi, tpf, trv, trt, trp, tpose, tcam, grid_dim=(eyes.F * eyes.W * eyes.H + 255) // 256, block_dim=256)
+            comptime if EYEROW:
+                ctx.enqueue_function(k_rm, tret, TileTensor(row_b, eyes.LROW), grid_dim=(eyes.F * eyes.W + 255) // 256, block_dim=256)
         var draw = render_every > 0 and fr % render_every == 0 if BRAIN > 0 else True
         comptime if WORLD > 0:  # the plume at the odor sites of this step's pose: the HUD text, the trace and a brain's sense packet read it
             ctx.enqueue_function(ksn, tplume, tpose, tsite, tsrc, grid_dim=1, block_dim=64)
@@ -279,7 +285,9 @@ def main() raises:
                 ctx.enqueue_copy(pkt_u, u_b)
                 ctx.enqueue_copy(pkt_q, q_b)
                 ctx.enqueue_copy(pkt_v, v_b)
-                comptime if EYES:
+                comptime if EYEROW:
+                    ctx.enqueue_copy(pkt_r, row_b)
+                elif EYES:
                     ctx.enqueue_copy(pkt_r, ret_b)
                 comptime if NVALID > 0:
                     ctx.enqueue_copy(pkt_s, o_b.create_sub_buffer[DType.float32](eng.OVALID * eng.F, NVALID * eng.F))
@@ -327,7 +335,7 @@ def main() raises:
                     or not write_all(1, pkt_s.unsafe_ptr().unsafe_bitcast[UInt8](), NVALID * eng.F * 4):
                     return
                 comptime if EYES:
-                    if not write_all(1, pkt_r.unsafe_ptr(), NRET):
+                    if not write_all(1, pkt_r.unsafe_ptr(), NPKR):
                         return
         if draw:
             if not write_all(4 if BRAIN > 0 else 1, out_h.unsafe_ptr().unsafe_bitcast[UInt8](), ren.W * ren.H * 4):

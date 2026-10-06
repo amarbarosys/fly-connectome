@@ -25,12 +25,14 @@ comptime LECAM = row_major[F * ren.NCAM]()
 comptime LEVIS = row_major[F * W * H]()
 comptime LEYE = row_major[NE * 8]()
 comptime LRET = row_major[F * NE * W * H]()
+comptime LROW = row_major[F * W]()
 comptime LENV = row_major[6 * F]()
 comptime LGAZE = row_major[F]()
 comptime TECAM = TileTensor[DType.float32, type_of(LECAM), MutAnyOrigin]
 comptime TEVIS = TileTensor[DType.uint64, type_of(LEVIS), MutAnyOrigin]
 comptime TEYE = TileTensor[DType.float32, type_of(LEYE), MutAnyOrigin]
 comptime TRET = TileTensor[DType.uint8, type_of(LRET), MutAnyOrigin]
+comptime TROW = TileTensor[DType.uint8, type_of(LROW), MutAnyOrigin]
 comptime TENV = TileTensor[DType.float32, type_of(LENV), MutAnyOrigin]
 comptime TGAZE = TileTensor[DType.float32, type_of(LGAZE), MutAnyOrigin]
 comptime NEAR = Float32(1e-3)
@@ -139,6 +141,19 @@ def eye_shade(vis: TEVIS, ret: TRET, eye_id: Int32, pi: ren.TPI, pf: ren.TPF, rv
         var lit = Float32(0.35) + Float32(0.65) * abs(dot(n, V3(0.3, 0.2, 0.93, 0)))
         lum = (0.299 * pf[ren.PFS * p + 17] + 0.587 * pf[ren.PFS * p + 18] + 0.114 * pf[ren.PFS * p + 19]) * lit
     ret[(f * NE + e) * W * H + i % (W * H)] = UInt8(min(max(lum, 0), 1) * 255)
+
+
+def eye_rowmin(ret: TRET, row: TROW):
+    """AM_L's darkest pixel per column (the host's vertical-strip retina, agent/spider_eye_loop.py): F x W bytes instead of the
+    F x NE x H x W retinas (-DEYEROW=1, live.mojo)."""
+    var i = Int(block_idx.x * block_dim.x + thread_idx.x)
+    if i >= F * W:
+        return
+    var f, c = i // W, i % W
+    var m = UInt8(255)
+    for h in range(H):
+        m = min(m, rebind[Scalar[DType.uint8]](ret[f * NE * W * H + h * W + c]))
+    row[i] = m
 
 
 def prey_set(q: eng.TQ, v: eng.TV, env: TENV, t: Float32):

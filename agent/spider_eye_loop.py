@@ -47,19 +47,24 @@ def env_rows(head, quat, tgt0, sp):
 
 class Eyes:
     """One engine run of `steps` frames for B spiders; sense(gaze) sends this frame's ctrl + gaze and returns AM_L's row."""
-    def __init__(self, tgt0, sp, steps, view=None, env=None):
+    def __init__(self, tgt0, sp, steps, view=None, env=None, row=False):
         """view: (camera 7 values as spider_link.CAM, path): also render the third-person frame every step, RGBA W x H to path.
-        env: callable (head, quat) -> prey rows (x0 y0 z0 vx vy t_on) per animal, instead of the tangential crossing."""
+        env: callable (head, quat) -> prey rows (x0 y0 z0 vx vy t_on) per animal, instead of the tangential crossing.
+        row: the engine renders AM_L only and sends its darkest pixel per column (-DEYEROW=1: B x W bytes per step, not
+        B x 6 x H x W); self.ret is then None."""
         self.d = files(G.B, 'eyeloop', prey=True)
         q0 = np.fromfile(self.d / 'qpos.bin', np.float32).reshape(-1, G.B)
         head, quat = q0[:3, 0].astype(float), q0[3:7, 0].astype(float)
         E.write_tables(self.d, env(head, quat) if env else env_rows(head, quat, tgt0, sp), npix=W)
         self.ctrl = np.fromfile(self.d / 'ctrl.bin', np.float32).reshape(NU, G.B)  # the stance, held
         self.nq, self.nv, self.ns = sizes(self.d)
-        b = build(self.d, G.B, K, 1, w=W, h=H, eyes=True, gaze=True)
+        prof = bool(os.environ.get('SPIDER_PROFILE'))  # -DPROFILE=1: the engine's COST line (physics, control, render, copy) to cost.txt
+        b = build(self.d, G.B, K, 1, w=W, h=H, eyes=True, gaze=True, row=row, profile=prof)
+        self.row = row
         cam, frames = view if view else (CAM, '/dev/null')
         self.p = subprocess.Popen(['bash', '-c', 'exec "$0" "$@" 4>"$FRAMES"', str(b), str(self.d) + '/', str(steps), *map(str, cam), '1' if view else '0', '1'],
-                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env={**os.environ, 'FRAMES': str(frames)})
+                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                  stderr=open(self.d / f'cost-{os.getpid()}.txt', 'w') if prof else subprocess.DEVNULL, env={**os.environ, 'FRAMES': str(frames)})
         self.head0 = (head, quat)
 
     def sense(self, gaze, ctrl=None):
@@ -68,6 +73,9 @@ class Eyes:
         self.p.stdin.flush()
         pk = np.frombuffer(self.p.stdout.read(4 * (NU + self.nq + self.nv + self.ns) * G.B), np.float32)
         self.q = pk[NU * G.B:(NU + self.nq) * G.B].reshape(self.nq, G.B)
+        if self.row:
+            self.ret = None
+            return np.frombuffer(self.p.stdout.read(G.B * W), np.uint8).reshape(G.B, W).astype(np.float32)
         ret = np.frombuffer(self.p.stdout.read(G.B * E.NE * H * W), np.uint8).reshape(G.B, E.NE, H, W)
         self.ret = ret  # all six eyes (spider_drives reads the secondary ones)
         return ret[:, 0].min(1).astype(np.float32)  # AM_L darkest pixel per column (a vertical strip retina), left edge = + azimuth
