@@ -15,6 +15,7 @@ import numpy as np
 from agent.neural_connectome import ROOT, ASSETS, CHANNELS, CPUBrain, Worker, Readout
 from agent.neural_duel import MotorDecision, encode, _json_default
 from agent.runtime_control import RuntimeControl
+from agent import world_edit
 from agent.desire import Desire
 from agent.vision import EyeVision
 from fly_arena.ethology_arena import EthologyArena
@@ -208,6 +209,11 @@ def run(out, backend='gpu', seconds=0., viewer=True, audit=True, profile='diagno
                             extra['reset_receipt']['gpu_zero_observables']=not np.any(zero['features']) and not np.any(zero['counts'])
                             extra['reset_receipt']['gpu_reset_probe_ticks']=4
                             extra['reset_receipt']['gpu_reset_scope']='zero-input features/counts in both lanes; full arrays not exported'
+                    elif command=='world_edit':
+                        try:extra['world_edit']=world_edit.apply(request['edit'],environment,arena)
+                        except (ValueError,TypeError,KeyError) as exc:
+                            remote.reply(connection,dict(snapshot(),status='REJECTED',error=f'world_edit: {exc}'))
+                            continue
                     elif command=='step':
                         if not paused:
                             remote.reply(connection,dict(snapshot(),status='REJECTED',error='pause before stepping'))

@@ -81,7 +81,7 @@ def act(req):
     if do == 'stop': return flyctl('stop')
     if do == 'control':
         if req.get('action') not in ACTIONS: raise ValueError('unsupported action')
-        return {'ok': True, 'out': request_control(req.get('session_id'), req['action'], req.get('steps', 1))}
+        return {'ok': True, 'out': request_control(req.get('session_id'), req['action'], req.get('steps', 1), edit=req.get('edit'))}
     raise ValueError(f'unknown do: {do!r}')
 
 

@@ -10,7 +10,7 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 REGISTRY = ROOT / '.work/neural-flies/control-sessions'
-ACTIONS = ('status', 'pause', 'resume', 'reset_body_brain', 'step', 'stop', 'checkpoint')
+ACTIONS = ('status', 'pause', 'resume', 'reset_body_brain', 'step', 'stop', 'checkpoint', 'world_edit')
 
 
 def peer_is_owner(sock):
@@ -57,6 +57,7 @@ class RuntimeControl:
                 steps = request.get('steps', 1)
                 if type(steps) is not int or not 1 <= steps <= 100: raise ValueError('steps must be integer in [1,100]')
                 if request['action'] != 'step' and steps != 1: raise ValueError('steps applies only to step')
+                if (request['action'] == 'world_edit') != isinstance(request.get('edit'), dict): raise ValueError('edit object goes with world_edit only')
                 requests.append((connection, request))
             except (ValueError, OSError) as exc:
                 self.reply(connection, {'status': 'REJECTED', 'error': str(exc)})
@@ -84,7 +85,7 @@ def session_records():
     return [json.loads(path.read_text()) for path in sorted(REGISTRY.glob('*.json'))]
 
 
-def request_control(session_id, action, steps=1, timeout=120):
+def request_control(session_id, action, steps=1, timeout=120, edit=None):
     if not isinstance(session_id, str) or not re.fullmatch('[0-9a-f]{32}', session_id):
         raise ValueError('expected explicit 32-character session_id from fly_status')
     if action not in ACTIONS: raise ValueError('unsupported action')
@@ -98,7 +99,7 @@ def request_control(session_id, action, steps=1, timeout=120):
         connection.connect('\0fly-control-' + session_id)
         if not peer_is_owner(connection): raise ValueError('server uid mismatch')
         connection.send(json.dumps({'session_id': session_id, 'request_id': request_id,
-            'action': action, 'steps': steps}).encode())
+            'action': action, 'steps': steps, **({'edit': edit} if edit is not None else {})}).encode())
         try: raw = connection.recv(65536)
         except TimeoutError as exc:
             raise TimeoutError('No acknowledgement; action may have applied. Query status before retrying.') from exc
