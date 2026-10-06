@@ -76,5 +76,6 @@ validation.
 ## Navigation
 
 - Asset index: [`docs/FLY_ASSET_INDEX.md`](docs/FLY_ASSET_INDEX.md)
+- Worm (C. elegans) connectome: [`docs/WORM_ASSET_INDEX.md`](docs/WORM_ASSET_INDEX.md)
 - Plans and protocols: [`docs/plans/`](docs/plans/)
 - Tests: `pytest tests/` (see `pytest.ini` for markers)
