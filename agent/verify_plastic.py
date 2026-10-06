@@ -11,7 +11,9 @@ spikes do fall too (KCs shared with A lose their factor), which is generalisatio
 """
 import os
 import json
+import subprocess
 import sys
+import time
 
 import numpy as np
 
@@ -81,8 +83,14 @@ def main():
           and late['avoid_A_learner_twin'][0] < .5 * late['avoid_A_learner_twin'][1]
           and gain(late['valence_A_learner_twin']) > max(.3, 3 * abs(gain(late['valence_B_learner_twin']))))
     out['status'] = 'PASS' if ok else 'FAIL'
-    print(out['status'])
-    (ROOT / '.work/agent/shiu/verify-plastic.json').write_text(json.dumps(out, indent=2) + '\n')
+    # Baseline and mutant keep separate receipts: one shared path let the no-reward mutant's FAIL overwrite the PASS.
+    mutant = bool(os.environ.get('MUTANT'))
+    head = subprocess.run(['git', 'rev-parse', '--short', 'HEAD'], cwd=ROOT, capture_output=True, text=True).stdout.strip()
+    dirty = bool(subprocess.run(['git', 'status', '--porcelain', '--', 'agent'], cwd=ROOT, capture_output=True, text=True).stdout.strip())
+    out['provenance'] = {'mode': 'mutant_no_reward' if mutant else 'baseline', 'git_head': head, 'agent_dirty': dirty,
+                         'written_unix': time.time(), 'expect': 'FAIL' if mutant else 'PASS'}
+    print(out['status'], out['provenance'])
+    (ROOT / f".work/agent/shiu/verify-plastic{'-mutant' if mutant else ''}.json").write_text(json.dumps(out, indent=2) + '\n')
     return ok
 
 
