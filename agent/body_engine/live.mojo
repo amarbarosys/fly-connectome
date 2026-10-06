@@ -9,7 +9,7 @@ brain link (-DBRAIN=1 or 2, docs/plans/SPIDER_BRAIN.md unit 1; BRAIN=0 compiles 
        step. BRAIN=1: the ctrl for the step arrives on stdin (NU x F float32, [servo][animal]) and goes to the engine's
        ctrl buffer; BRAIN=2: spider_brain.mojo's gait kernel writes it on the card (drives from DIR/drive.bin, 2 x F float32:
        speed, turn). After the launch a sensor packet goes to stdout every PACKET-th step (arg 11, 0 = never, and at the last step):
-       ctrl, qpos, qvel, valid contact slots (OVALID.., NSLOT rows), each float32 [row][animal]; with -DEYES=1 then the retinas, uint8
+       ctrl, qpos, qvel, valid contact slots (OVALID.., NSLOT rows), under -DGAME=1 the 4 game rows, each float32 [row][animal]; with -DEYES=1 then the retinas, uint8
        [animal][eye][H x W] (eyes.mojo; DIR/eyes.bin the eye table, DIR/env.bin the prey's path). Frames (arg 10 = every n-th
        step, 0 = never) go to fd 4 instead of stdout. No target state anywhere in the packet.
 
@@ -153,6 +153,7 @@ def main() raises:
     var pkt_q = ctx.enqueue_create_host_buffer[DType.float32](eng.NQ * eng.F)
     var pkt_v = ctx.enqueue_create_host_buffer[DType.float32](eng.NV * eng.F)
     var pkt_s = ctx.enqueue_create_host_buffer[DType.float32](max(NVALID, 1) * eng.F)
+    var pkt_g = ctx.enqueue_create_host_buffer[DType.float32](4 * eng.F)  # GAME: the game rows ride after the contacts
     var kb = ctx.compile_function[brain.gait]()  # launched only when BRAIN == 2
     var drive_b = ctx.enqueue_create_buffer[DType.float32](2 * eng.F)
     var k_ec = ctx.compile_function[eyes.eye_cam]()  # the eye kernels launch only when EYES
@@ -291,6 +292,8 @@ def main() raises:
                     ctx.enqueue_copy(pkt_r, ret_b)
                 comptime if NVALID > 0:
                     ctx.enqueue_copy(pkt_s, o_b.create_sub_buffer[DType.float32](eng.OVALID * eng.F, NVALID * eng.F))
+                comptime if eng.GAME:
+                    ctx.enqueue_copy(pkt_g, o_b.create_sub_buffer[DType.float32](eng.OGAME * eng.F, 4 * eng.F))
         ctx.synchronize()
         comptime if PROFILE > 0:
             ms[3] += Float64(perf_counter_ns() - tp)
@@ -334,6 +337,9 @@ def main() raises:
                     or not write_all(1, pkt_v.unsafe_ptr().unsafe_bitcast[UInt8](), eng.NV * eng.F * 4) \
                     or not write_all(1, pkt_s.unsafe_ptr().unsafe_bitcast[UInt8](), NVALID * eng.F * 4):
                     return
+                comptime if eng.GAME:
+                    if not write_all(1, pkt_g.unsafe_ptr().unsafe_bitcast[UInt8](), 4 * eng.F * 4):
+                        return
                 comptime if EYES:
                     if not write_all(1, pkt_r.unsafe_ptr(), NPKR):
                         return

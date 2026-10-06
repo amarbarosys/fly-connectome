@@ -1,0 +1,44 @@
+# Keys fire neurons, not motors (agent/body_engine/play.py). Each key held = Poisson input at `hz` on its targets.
+# target: "TYPE" both sides, "TYPE-left|right" one side, a preset stimulus name (.work/agent/shiu/presets/*.json, must be
+# verified), or "sugar-both" (the authors' 21 sugar GRNs). walk = true: scaled by stamina (a tired fly obeys less).
+# No S: MDN (moonwalker) needs a reversing decoder; the gait controller's drives are 0..1, forward only.
+
+[keys.w]
+targets = ["DNp09"]                    # P9, forward walking (Bidaye 2020)
+hz = 150
+walk = true
+
+[keys.a]
+targets = ["DNa02-right"]              # turns left: the decoder turns away from the side whose DNs fire (play check: yaw sign)
+hz = 150
+walk = true
+
+[keys.d]
+targets = ["DNa02-left"]
+hz = 150
+walk = true
+
+[keys.space]
+targets = ["DNp01"]                    # giant fiber, escape
+hz = 300
+
+[keys.e]
+targets = ["BM_Ant-left", "BM_Ant-right"]  # antennal mechanosensory preset (verified) -> grooming DNs
+hz = 150
+
+[keys.f]
+targets = ["sugar-both"]               # taste preset, feeding
+hz = 150
+
+[mouse]
+left = "DNa02-right"                   # mouse dx < 0 turns left
+right = "DNa02-left"
+hz_per_px = 15
+max_hz = 200
+
+[threat]                               # the world, not the player: looming on both eyes (fly_link's LC4 + LPLC2 drive)
+targets = ["LC4", "LPLC2"]
+hz = 150
+key = "t"                              # trigger by hand; play also fires one every `every_s` sim seconds
+every_s = 0.6
+dur_s = 0.15

@@ -100,8 +100,9 @@ class Gait:
 
 class Engine:
     """live.mojo -DBRAIN=1 for F flies in one process: ctrl (F, NU) in over stdin, one sensor packet per step out ((NU+nq+nv+ns) x F,
-    row-major by field); no frame drawn (brain=1 loops read no pixels). F > 1 runs in its own dir with the state tiled to F columns."""
-    def __init__(self, d, k, tag, frames, F=1):
+    row-major by field); no frame drawn (brain=1 loops read no pixels). F > 1 runs in its own dir with the state tiled to F columns.
+    flags: extra build flags (-DGAME=1 adds the 4 game rows, kept in self.game (F, 4)); frames go to `out` every `render`-th step."""
+    def __init__(self, d, k, tag, frames, F=1, flags=(), out='/dev/null', render=0):
         sizes = (d / 'sizes.txt').read_text()
         self.nu, self.nq, self.nv, self.ns = (int(re.search(rf'-D{n}=(\d+)', sizes).group(1)) for n in ('NU', 'NQ', 'NV', 'NSLOT'))
         if F > 1:
@@ -113,10 +114,11 @@ class Engine:
                     if f.name in ('qpos.bin', 'qvel.bin', 'ctrl.bin'):
                         a = np.tile(np.frombuffer(a, np.float32).reshape(-1, 1), (1, F)).astype(np.float32).tobytes()
                     (d / f.name).write_bytes(a)
-        b = sc.build(d, 'fly', [], k, brain=1, flies=F)
-        self.p = subprocess.Popen(['bash', '-c', 'exec "$0" "$@" 4>/dev/null', str(b), str(d) + '/', str(frames), *sc.CAM, '0', '1'],
-                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        self.F, self.size = F, 4 * (self.nu + self.nq + self.nv + self.ns) * F
+        b = sc.build(d, 'fly', list(flags), k, brain=1, flies=F)
+        self.p = subprocess.Popen(['bash', '-c', 'exec "$0" "$@" 4>"$OUT"', str(b), str(d) + '/', str(frames), *sc.CAM, str(render), '1'],
+                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env={**os.environ, 'OUT': str(out)})
+        self.ng = 4 if '-DGAME=1' in flags else 0
+        self.F, self.size = F, 4 * (self.nu + self.nq + self.nv + self.ns + self.ng) * F
         self.tag = tag
 
     def send(self, ctrl):
@@ -129,7 +131,9 @@ class Engine:
         buf = self.p.stdout.read(self.size)
         if len(buf) != self.size:
             raise SystemExit(f'FAIL engine {self.tag} ended early: {self.p.stderr.read().decode()[-300:]}')
-        q = np.frombuffer(buf, np.float32)[self.nu * self.F:(self.nu + self.nq) * self.F].reshape(self.nq, self.F).T.astype(float)
+        a = np.frombuffer(buf, np.float32)
+        q = a[self.nu * self.F:(self.nu + self.nq) * self.F].reshape(self.nq, self.F).T.astype(float)
+        self.game = a[len(a) - self.ng * self.F:].reshape(self.ng, self.F).T
         return q[0] if self.F == 1 else q
 
     def close(self):
