@@ -273,7 +273,7 @@ if [ "$stage" = tendon_limit ]; then  # tendon limit rows (mj_instantiateLimit, 
 fi
 if [ "$stage" = flight_contacts ]; then  # the Flybody flight model's own contacts: 842 automatic capsule/ellipsoid/cylinder/sphere body-body pairs
   # (model.with_auto_pairs: the same pairs and mixed parameters as explicit pairs; tools/auto_pairs_check.py proves them against MuJoCo's dynamic
-  # pairs; multiccd off, so one contact per pair, two for parallel capsules), condim 1 (frictionless rows), noslip 5, pyramidal. Narrowphase
+  # pairs; up to 5 contacts per capsule/cylinder pair from mjc_Convex's perturbation search, two for parallel capsules), condim 1 (frictionless rows), noslip 5, pyramidal. Narrowphase
   # (convex_check, float64): capsule-capsule, sphere-capsule, sphere-cylinder analytic (exact), the rest GJK + EPA with the sphere/capsule core
   # trick (dist 1e-9, normal 1.5e-4: both sides stop at the 1e-6 ccd tolerance; cases with a centre inside the other geom are left out, EPA's
   # answer there is tolerance-arbitrary on both sides), and every contact MuJoCo reports on 64 near-rest states. Engine vs mj_step: random

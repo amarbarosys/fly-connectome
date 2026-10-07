@@ -1441,7 +1441,7 @@ def convex_pair(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int, p: Int, kin
         else:
             var s1 = Sp(mf.ptr.unsafe_offset(CVERT + 3 * voff), mi.ptr.unsafe_offset(CFIRST + eoff), mi.ptr.unsafe_offset(CEDGE))
             var s2 = Sp(mf.ptr.unsafe_offset(CVERT + 3 * voff), mi.ptr.unsafe_offset(CFIRST + eoff), mi.ptr.unsafe_offset(CEDGE))
-            if kind == 4:  # two primitives (sphere, capsule, ellipsoid, cylinder): mjc_Convex with one contact (multiccd off in the gate body)
+            if kind == 4:  # two primitives (sphere, capsule, ellipsoid, cylinder): mjc_Convex, the perturbation search on capsule/cylinder pairs (up to 5)
                 s1.kind = Int(mi[CGT + 2 * p]); s2.kind = Int(mi[CGT + 2 * p + 1])
                 s2.size = m3(mf, CCV + 6 + 3 * NCP + 3 * p).cast[CT]()
             else:
@@ -1454,7 +1454,7 @@ def convex_pair(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int, p: Int, kin
             s2.pos = pos2.cast[CT]()
             var c = rows3(q2)
             s2.r0 = c[0].cast[CT](); s2.r1 = c[1].cast[CT](); s2.r2 = c[2].cast[CT]()
-            cs = collide(s1, s2, margin.cast[CT](), mf[CCV].cast[CT](), min(rb1, rb2).cast[CT](), kind != 4)
+            cs = collide(s1, s2, margin.cast[CT](), mf[CCV].cast[CT](), min(rb1, rb2).cast[CT]())
         var com = V3(get(res, f, OSC + 3 * Int(mi[ROOT + b])), get(res, f, OSC + 3 * Int(mi[ROOT + b]) + 1), get(res, f, OSC + 3 * Int(mi[ROOT + b]) + 2), 0)
         var take = pool_alloc(mi, res, f, p, min(cs.n, Int(mi[CPH + 11 * p + 9])))
         while count < take:

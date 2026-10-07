@@ -7,7 +7,7 @@ or float32 (the engine; bar measured, stated by the caller).
 
 usage: python -m agent.body_engine.convex_check KIND N [f64|f32] [BAR] [SEED]   KIND: ellipsoid | box (vs mesh, the fly), or a primitive pair of
 the flight twin (FLIGHT_PAIRS, model.with_auto_pairs): capsule-cylinder, capsule-ellipsoid, ellipsoid-ellipsoid, ellipsoid-cylinder, sphere-ellipsoid
-(GJK + EPA, one contact, multiccd off), capsule-capsule, sphere-capsule, sphere-cylinder (analytic)
+(GJK + EPA, one contact in the driver), capsule-capsule, sphere-capsule, sphere-cylinder (analytic)
 """
 import subprocess, sys, os
 import numpy as np
@@ -110,7 +110,7 @@ def run(kind, n, prec='f64', bar=1e-9, seed=0, mutant=None, verbose=True):
         row[1] = SHAPE_KIND[G(m.geom_type[g2])] if prim else 1
         row[2:5] = m.geom_size[g1]
         row[33:36] = m.geom_size[g2]
-        row[36] = 0 if prim else 1
+        row[36] = 1  # mjc_Convex's perturbation search (multiccd on), as the engine
         row[37] = ANALYTIC.get(kind, 0)
         row[5:8] = pos1
         row[8:17] = mat1
@@ -309,8 +309,12 @@ def flight_poses(count, prec='f32', seed=0):
     for n in range(count):
         d.qpos[:], d.qvel[:] = q[n], v[n]
         mujoco.mj_forward(m, d)
+        seen = set()
         for c in d.contact[:d.ncon]:
             i = [j for j in range(m.npair) if set(pair_geoms(m, j)) == {int(c.geom1), int(c.geom2)}][0]
+            if i in seen:  # the perturbation search's extra contacts of a pair: the first contact is the one compared
+                continue
+            seen.add(i)
             g1, g2 = pair_geoms(m, i)
             row = np.zeros(CW)
             row[0], row[1] = SHAPE_KIND[G(m.geom_type[g1])], SHAPE_KIND[G(m.geom_type[g2])]
@@ -318,6 +322,7 @@ def flight_poses(count, prec='f32', seed=0):
             row[5:8], row[8:17] = d.geom_xpos[g1], d.geom_xmat[g1]
             row[17:20], row[20:29] = d.geom_xpos[g2], d.geom_xmat[g2]
             row[30], row[31], row[32] = m.pair_margin[i] + m.pair_gap[i], m.opt.ccd_tolerance, min(m.geom_rbound[g1], m.geom_rbound[g2])
+            row[36] = 1
             name = G(m.geom_type[g1]).name[7:].lower() + '-' + G(m.geom_type[g2]).name[7:].lower()
             row[37] = ANALYTIC.get(name, 0)
             rows.append(row); want.append((float(c.dist), c.pos.copy(), c.frame[:3].copy())); kinds.append(name)

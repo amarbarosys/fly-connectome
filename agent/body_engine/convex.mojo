@@ -4,8 +4,8 @@
 3.9 collides every convex pair that is not a primitive case with this NATIVE GJK + EPA (mjc_ccd), not libccd / MPR
 (mjDSBL_NATIVECCD off): ellipsoid-mesh returns one contact, box-mesh up to 4 (5 with a margin) from the multicontact
 step inside mjc_ccd. Primitive pairs (sphere, capsule, ellipsoid, cylinder: the flight model) run the same mjc_ccd with its
-sphere/capsule core trick (GJK on the point or segment, the radius folded into the margin, EPA only when the cores meet) and
-one contact each (multiccd off); capsule-capsule, sphere-capsule and sphere-cylinder are the analytic primitives
+sphere/capsule core trick (GJK on the point or segment, the radius folded into the margin, EPA only when the cores meet) and,
+for capsule/cylinder pairs, the perturbation search (up to 5 contacts); capsule-capsule, sphere-capsule and sphere-cylinder are the analytic primitives
 (engine_collision_primitive.c), ported below in the same scalar type.
 
 Scalar type: float32 as the engine, or float64 with -DCCD64=1 (the CPU build that must match MuJoCo's doubles).

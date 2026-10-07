@@ -552,8 +552,9 @@ def feet(m, regex, couple=(), hrows=None, convex=False, hfexact=False):
                 verts += list(m.mesh_vert[m.mesh_vertadr[mesh] + gid].ravel())
         prim = prim_pair(m, i) if convex else 0
         ns = (5 if m.geom_type[g1] == mujoco.mjtGeom.mjGEOM_BOX else 1) if m.geom_type[g1] in (mujoco.mjtGeom.mjGEOM_BOX, mujoco.mjtGeom.mjGEOM_ELLIPSOID) else (3 if nv else 1)
-        if prim:
-            ns = 2 if prim == 5 else 1  # mj_maxContact: capsule-capsule 2 (both ends when parallel), one otherwise (multiccd off)
+        if prim:  # mj_maxContact: capsule-capsule 2 (both ends when parallel); capsule/cylinder pairs up to 5 (mjc_Convex's perturbation search, multiccd); one with a sphere or ellipsoid
+            G_ = mujoco.mjtGeom
+            ns = 2 if prim == 5 else (5 if prim == 4 and {G_(m.geom_type[g1]), G_(m.geom_type[g2])} <= {G_.mjGEOM_CAPSULE, G_.mjGEOM_CYLINDER} else 1)
         if hfexact and m.geom_type[g1] == mujoco.mjtGeom.mjGEOM_HFIELD:
             ns = HF_SLOTS  # one contact per cell-triangle prism under the mesh (MuJoCo keeps up to 50)
         G = mujoco.mjtGeom
@@ -843,7 +844,6 @@ def with_auto_pairs(mjcf, out, cone='pyramidal', explicit=True):
         for g in spec.geoms:
             g.contype = g.conaffinity = 0
     spec.option.cone = getattr(mujoco.mjtCone, 'mjCONE_' + cone.upper())
-    spec.option.disableflags |= int(mujoco.mjtDisableBit.mjDSBL_MULTICCD)  # one contact per capsule/cylinder pair (EPA multicontact is not ported)
     Path(out).parent.mkdir(parents=True, exist_ok=True)
     Path(out).write_text(spec.to_xml())
     return str(out)
