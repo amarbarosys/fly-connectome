@@ -1,5 +1,5 @@
-"""implicit and implicitfast must refuse, at export, every model whose velocity derivatives (fluid, tendon) are not ported
-(mjd_passive_vel fluid and tendon-damping terms in engine_derivative.c), under both integrators. Each case builds a tiny MJCF and requires
+"""implicit and implicitfast must refuse, at export, every model whose velocity derivatives (fluid) are not ported
+(mjd_passive_vel fluid terms in engine_derivative.c; the tendon-damping term is ported), under both integrators. Each case builds a tiny MJCF and requires
 model.load to exit with 'FAIL export'. usage: python -m agent.body_engine.reject_check"""
 import sys
 
@@ -12,10 +12,10 @@ BASE = '<mujoco><option integrator="{integ}"{opt}/><worldbody><body name="b"><fr
 CASES = {
     'viscosity': dict(opt=' viscosity="1e-3"', extra=''),
     'density': dict(opt=' density="1e-3"', extra=''),
-    'tendon damping': dict(opt='', extra='<tendon><fixed name="t" damping="1"><joint joint="j" coef="1"/></fixed></tendon>'),
 }
-ACCEPT = {  # no velocity derivative in qDeriv: a spring-only tendon is exported as under Euler
+ACCEPT = {  # a spring-only tendon has no velocity derivative; tendon damping's is ported (check.sh implicit, 2026-10-07)
     'tendon spring only': dict(opt='', extra='<tendon><fixed name="t" stiffness="1"><joint joint="j" coef="1"/></fixed></tendon>'),
+    'tendon damping': dict(opt='', extra='<tendon><fixed name="t" damping="1"><joint joint="j" coef="1"/></fixed></tendon>'),
 }
 bad = []
 for integ in ('implicitfast', 'implicit'):

@@ -392,7 +392,17 @@ if [ "$stage" = integrator ]; then  # implicitfast (mj_implicitSkip) vs MuJoCo w
   echo "COVERAGE integrator=implicitfast (3): fly step + actuated (airborne states, kv=$KV, shipped kv=0 in step), spider_test step, world fly+spider at 8 and 200 mm"
   echo "COVERAGE not covered: standalone free body (midpoint, refused at export), implicit (full), RK4, tendon-damping and fluid derivatives (refused), spring-only tendons (accepted, no velocity derivative, no parity case), contact states (MEASURED only)"
   $M -m agent.body_engine.reject_check || { echo "FAIL reject"; fail=$((fail+1)); }
-  ~/iTools/bin/mutant-check agent/body_engine/model.py 's/m.opt.density or m.opt.viscosity or m.tendon_damping.any()/False/' -- $M -m agent.body_engine.reject_check || fail=$((fail+1))
+  ~/iTools/bin/mutant-check agent/body_engine/model.py 's/m.opt.density or m.opt.viscosity:/False:/' -- $M -m agent.body_engine.reject_check || fail=$((fail+1))
+  # tendon damping under both implicit integrators (mjd_passive_vel's tendon term, the J' damping J block of qDeriv on D's / M's pattern): models/tendon_spatial.xml
+  # (five spatial + one fixed tendon, every one damped) at random states; mutant: the block's sign
+  T=agent/body_engine/models/tendon_spatial.xml
+  for integ in 2 3; do
+    ENGINE_OPT=integrator=$integ $M -m agent.body_engine.model check $T $I/tendon$integ sptendon 64 || { echo "FAIL tendon damping implicit integrator=$integ"; fail=$((fail+1)); }
+  done
+  ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo 's/res\[(OQLU + e) \* F + f\] += h \* damp \* jk/res[(OQLU + e) * F + f] -= h * damp * jk/' -- \
+    env ENGINE_OPT=integrator=2 $M -m agent.body_engine.model check $T $I/mutant sptendon 64 || fail=$((fail+1))
+  ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo 's/res\[(OQH + e) \* F + f\] += h \* damp \* jk/res[(OQH + e) * F + f] -= h * damp * jk/' -- \
+    env ENGINE_OPT=integrator=3 $M -m agent.body_engine.model check $T $I/mutant sptendon 64 || fail=$((fail+1))
   export ENGINE_OPT=integrator=3,kv=$KV
   A=$($M -m agent.body_engine.model airborne $F $I/fly | tail -1)
   STATES=$A $M -m agent.body_engine.model check $F $I/fly actuated 64 || { echo "FAIL fly actuated implicitfast"; fail=$((fail+1)); }
@@ -422,7 +432,8 @@ if [ "$stage" = implicit ]; then  # full implicit (mj_implicit: qDeriv with mjd_
   SB=.work/agent/body_engine/spider-body/spider.xml; I=$X/implicit; KV=0.01
   echo "COVERAGE integrator=implicit (2): fly step (shipped kv 0) + actuated (airborne states, kv=$KV), spider_test step (free, ball, hinge, slide), world fly+spider at 8 and 200 mm"
   echo "COVERAGE integrator=implicitfast (3) midpoint: four standalone free bodies (models/midpoint.xml: simple, aligned, coupled, coupled and rotated), contact-free; contact eligibility in the midpoint_contact part"
-  echo "COVERAGE not covered: fluid and tendon-damping derivatives (refused at export), contact states under full implicit (MEASURED only, active-set float32 noise as the implicitfast gate), WAVE=1"
+  echo "COVERAGE tendon damping derivative: models/tendon_spatial.xml step under integrator 2 and 3, sign mutants"
+  echo "COVERAGE not covered: fluid derivatives (refused at export), contact states under full implicit (MEASURED only, active-set float32 noise as the implicitfast gate), WAVE=1"
   $M -m agent.body_engine.reject_check || { echo "FAIL reject"; fail=$((fail+1)); }
   ~/iTools/bin/mutant-check agent/body_engine/model.py 's/m.opt.density or m.opt.viscosity or m.tendon_damping.any()/False/' -- $M -m agent.body_engine.reject_check || fail=$((fail+1))
   export ENGINE_OPT=integrator=2

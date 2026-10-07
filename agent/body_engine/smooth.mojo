@@ -2740,6 +2740,18 @@ def rne_vel_col(mi: TI, res: TO, f: Int, badr: Int, j: Int):
     add6(res, f, ODCV + 6 * (badr + Int(mi[MNNZ + j]) - 1), get6(res, f, OCD + 6 * j))
 
 
+@always_inline
+def ten_j(mi: TI, mf: TF, res: TO, f: Int, t: Int, v: Int) -> Float32:
+    """Tendon t's moment on dof v: the dense row spatial() wrote (OTJ), else the fixed tendon's wrap coef on that dof (0 if none)."""
+    comptime if SPATIAL:
+        return get(res, f, OTJ + t * NV + v)
+    var a = Int(mi[TNI + t])
+    for w in range(a, a + Int(mi[TNI + NTEN + t])):
+        if Int(mi[TNI + 2 * NTEN + w]) == v:
+            return mf[TNF + w]
+    return Float32(0)
+
+
 def implicit_factor(mi: TI, mf: TF, qvel: TV, res: TO, f: Int):
     """MuJoCo mj_implicitSkip, full implicit (engine_forward.c:1864, INTEGRATOR 2): qLU = M - h qDeriv in MuJoCo's dof-dof sparsity D
     (mju_gatherMasked of M through mapM2D, then mju_addToScl), factored in place by mju_factorLUSparse (engine_util_solve.c:841: reverse
@@ -2754,6 +2766,17 @@ def implicit_factor(mi: TI, mf: TF, qvel: TV, res: TO, f: Int):
         res[(OQLU + e) * F + f] = get(res, f, OM + m_) if m_ >= 0 else Float32(0)
     for v in range(NV):
         res[(OQLU + Int(mi[DRA + v]) + Int(mi[DDG + v])) * F + f] += h * mf[DAMP + v]
+    for t in range(NTEN):  # mjd_passive_vel tendon damping (engine_derivative.c:1953): qDeriv += J' (-damping) J, onto D's entries only (addJTBJSparse)
+        var damp = mf[TNF + NWRAP + NTEN + t]
+        if damp == 0:
+            continue
+        for k in range(NV):
+            var jk = ten_j(mi, mf, res, f, t, k)
+            if jk == 0:
+                continue
+            for c in range(Int(mi[DRN + k])):
+                var e = Int(mi[DRA + k]) + c
+                res[(OQLU + e) * F + f] += h * damp * jk * ten_j(mi, mf, res, f, t, Int(mi[DCOL + e]))
     comptime if STAGE >= 7:  # as implicitfast: moment' bias_vel moment per joint actuator, skipped where forcerange clamps
         for u in range(NU):
             var a = CACT + 5 * u
@@ -3020,6 +3043,18 @@ def euler(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int):
             res[(OQH + c) * F + f] = get(res, f, OM + c)
         for v in range(NV):
             res[(OQH + Int(mi[MADR + v]) + Int(mi[MNNZ + v]) - 1) * F + f] += h * mf[DAMP + v]
+        comptime if INTEGRATOR == 3:  # implicitfast: the tendon damping term of qDeriv gathered onto M's lower pattern (mapD2M), as mj_implicitSkip
+            for t in range(NTEN):
+                var damp = mf[TNF + NWRAP + NTEN + t]
+                if damp == 0:
+                    continue
+                for k in range(NV):
+                    var jk = ten_j(mi, mf, res, f, t, k)
+                    if jk == 0:
+                        continue
+                    for c in range(Int(mi[MNNZ + k])):
+                        var e = Int(mi[MADR + k]) + c
+                        res[(OQH + e) * F + f] += h * damp * jk * ten_j(mi, mf, res, f, t, Int(mi[MCOL + e]))
         comptime if INTEGRATOR == 3 and STAGE >= 7:
             # mj_implicitSkip (engine_forward.c:1864) implicitfast: qH = M - h qDeriv. The dof damping above is -qDeriv of mjd_passive_vel;
             # mjd_actuator_vel adds moment' bias_vel moment per joint actuator (diagonal: gear^2 biasprm[2]), skipped where forcerange clamps

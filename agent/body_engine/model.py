@@ -343,8 +343,8 @@ def load(mjcf):
             or m.tendon_stiffnesspoly.any() or m.tendon_dampingpoly.any() or m.tendon_actfrclimited.any():
         raise SystemExit('FAIL export: only unlimited tendons without friction loss, with linear spring and damper, are ported')
     if m.opt.integrator in (mujoco.mjtIntegrator.mjINT_IMPLICIT, mujoco.mjtIntegrator.mjINT_IMPLICITFAST):
-        if m.opt.density or m.opt.viscosity or m.tendon_damping.any():  # mjd_passive_vel fluid and tendon-damper terms of qDeriv: not ported
-            raise SystemExit('FAIL export: implicit and implicitfast need the fluid and tendon-damping velocity derivatives (mjd_passive_vel), not ported')
+        if m.opt.density or m.opt.viscosity:  # mjd_passive_vel fluid terms of qDeriv: not ported (tendon damping is: check.sh implicit)
+            raise SystemExit('FAIL export: implicit and implicitfast need the fluid velocity derivatives (mjd_passive_vel), not ported')
     return m
 
 
