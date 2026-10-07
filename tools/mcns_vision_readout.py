@@ -63,12 +63,13 @@ def fit(X, y, lam=30.0):
 
 
 def held_out(t):
-    """leave-one-azimuth-out (blank always in training): predicted T per held-out condition, all windows and repeats."""
+    """leave-one-azimuth-pair-out (blank always in training): +a and -a both held out, since mirror() turns a trained +a
+    into -a; predicted T per held-out condition, all windows and repeats."""
     pred = {}
     for c, a in enumerate(COND):
         if a is None:
             continue
-        tr = [k for k in range(len(COND)) if k != c]
+        tr = [k for k, b in enumerate(COND) if b is None or abs(b) != abs(a)]
         X = x[:, tr].reshape(-1, x.shape[-1]); y = np.broadcast_to(t[tr][None, :, None], (x.shape[0], len(tr), K)).ravel()
         mu, sd, y0, w = fit(np.r_[X, mirror(X)], np.r_[y, -y])
         pred[a] = ((x[:, c].reshape(-1, x.shape[-1]) - mu) / sd) @ w + y0
