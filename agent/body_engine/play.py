@@ -46,7 +46,7 @@ EYE_EVERY = 20  # control steps per eye frame: 50 Hz
 CAL = 250  # control steps (0.25 s) of W held after fl.WINDOW: the drive reference is their mean DN rate per side; the first 50 ms
 # alone (still ramping: 244 vs 524 Hz L/R) left W decoding 0.84 vs 0.67 and the fly turning -34 deg
 HOLD = fl.WINDOW + 2 * CAL  # two calibration windows: W alone (-> HEADROOM), then W + symmetric loom (-> 1)
-HEADROOM = 0.8  # W decodes to this drive: room above it for the brain's own turns before the clip at 1
+HEADROOM = float(os.environ.get('PLAY_HEADROOM', 0.5))  # W decodes to this drive; the rest is the loom's (0.8 left 0.2: probe R +5.5, 2026-10-07)
 NAMES = ('idle', 'w', 'a', 'd', 'w+threat')
 
 
@@ -68,7 +68,7 @@ def resolve(target, c):
 
 class Brain:
     """Resident brain, `cols` columns; every input of keymap.toml a stim entry; readout = DNs per side per column."""
-    def __init__(self, cols, km=None):
+    def __init__(self, cols, km=None, seed=71):
         from agent import shiu_g1
         from agent.experiment import cells
         from agent.shiu import ShiuLive
@@ -83,7 +83,7 @@ class Brain:
                         for s in ('left', 'right')}
         self.inputs['threat'] = (np.concatenate([resolve(t, c) for t in km['threat']['targets']]), km['threat']['hz'], False)
         self.km, self.names = km, list(self.inputs)
-        self.brain = ShiuLive(*next(shiu_g1.arms(data, 'flywire'))[1], n=self.n, flies=cols, seed=71)
+        self.brain = ShiuLive(*next(shiu_g1.arms(data, 'flywire'))[1], n=self.n, flies=cols, seed=seed)
         for col in range(cols):
             for ids, _, _ in self.inputs.values():
                 self.brain.stimulate(ids, 0, fly=col)
@@ -327,6 +327,8 @@ def walls(*args):
     swap, force = os.environ.get('PLAY_LOOM_SWAP') == '1', os.environ.get('PLAY_LOOM_FORCE') == '1'
     # PLAY_LOOM_FORCE=1: the probe. No eyes, flat floor, no wall: cols 0/1 get a full left/right loom from HOLD on, 2/3 none.
     # Same gate. PASS = play's brain + decoder turn away from a one-sided loom; a FAIL here is the brain, a FAIL only in walls is the sensor.
+    # SEED in force mode seeds the brain (71 + SEED): the blind twins differed by 20 deg under W alone, so the probe is paired over seeds
+    # (tools/play_probe.sh: 3 seeds, PASS = every seed's see - blind delta has the right sign and the median is beyond 10 deg).
     yaws = (3 * np.pi / 4, 5 * np.pi / 4) * 2
 
     def q0(d):
@@ -335,7 +337,7 @@ def walls(*args):
         q[:, 3:7] = [(np.cos(y / 2), 0, 0, np.sin(y / 2)) for y in yaws]
         return q
 
-    brain = Brain(4, km)
+    brain = Brain(4, km, seed=71 + seed if force else 71)
     d, m, eng = setup(4, seed=None if force else seed, q0=q0)
     gaits = [fl.Gait(m, d, fl.K) for _ in range(4)]
     eyes = [] if force else [Eyes(m, km['loom']) for _ in range(2)]
