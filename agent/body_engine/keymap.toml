@@ -40,8 +40,9 @@ max_hz = 200
 targets = ["LC4", "LPLC2"]
 hz = 150                               # at drive 1
 near = 6.0                             # mm: depth pixels nearer than this count as looming surface
-base = 0.25                            # near share below this: no drive (open ground, far stones about 0.04)
-span = 0.25                            # near share above base that gives drive 1 (wall 2.5 mm ahead: 0.34 both eyes)
+base = 0.05                            # near share rise over its low-pass below this: no drive
+span = 0.15                            # rise above base that gives drive 1 (wall 2.5 mm ahead: share 0.34 both eyes)
+tau = 0.3                              # s: low-pass of the near share; a surface that stays put fades in about tau
 
 [threat]                               # by hand: looming on both eyes (fly_link's LC4 + LPLC2 drive)
 targets = ["LC4", "LPLC2"]

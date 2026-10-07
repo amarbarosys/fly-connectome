@@ -128,8 +128,9 @@ class Brain:
 class Eyes:
     """Engineered PROXIMITY sensor per eye, not visual looming (body.xml l/r_eye_cam, fovy 157): a 32x24 depth render with
     the fly's own body and the ground hidden; the share of each eye nearer than km[loom].near mm, above `base`, over `span`.
-    A stationary near wall gives a sustained drive; nothing here tells approaching from receding (that needs image
-    expansion over time). Output (2,) in [0, 1], left eye first, drives that side's [loom] targets (LC4 + LPLC2)."""
+    The drive is the share above its own low-pass over `tau` s: a surface closing in drives it, one that stays put fades
+    (a sustained drive held a fly pressed into a wall, own DNs flooding, legs shaking). Still proximity change, not
+    image expansion. Output (2,) in [0, 1], left eye first, drives that side's [loom] targets (LC4 + LPLC2)."""
     def __init__(self, m, loom):
         import copy
         import mujoco
@@ -140,6 +141,7 @@ class Eyes:
         self.cams = [mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_CAMERA, f'fly/{s}_eye_cam_camera') for s in 'lr']
         self.r = mujoco.Renderer(m, 24, 32)
         self.r.enable_depth_rendering()
+        self.slow = None  # near share low-passed over tau: a surface that stays put stops driving (an adapting sensor)
 
     def __call__(self, q):
         self.d.qpos[:] = q
@@ -150,7 +152,9 @@ class Eyes:
             self.r.update_scene(self.d, camera=c)
             near[e] = (self.r.render() < self.loom['near']).mean()
         self.prev = near  # last frame's shares, for inspection
-        return np.clip((near - self.loom['base']) / self.loom['span'], 0, 1)
+        a = EYE_EVERY * fl.K * fl.DT / self.loom['tau']
+        self.slow = near.copy() if self.slow is None else self.slow + a * (near - self.slow)
+        return np.clip((near - self.slow - self.loom['base']) / self.loom['span'], 0, 1)
 
 
 def setup(F, render=0, out='/dev/null', seed=None, q0=None):
