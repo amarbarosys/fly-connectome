@@ -3,7 +3,7 @@ Shiu brain (agent/body_engine/keymap.toml), the brain's descending neurons drive
 gait, and the brain's own drives can outvote the player.
 
   gpu-wait run --priority 90 --vram 4 --timeout 3600 -- .venv/bin/python -m agent.body_engine.play          (interactive)
-  gpu-wait run --priority 60 --vram 4 --timeout 1200 -- .venv/bin/python -m agent.body_engine.play check
+  gpu-wait run --priority 60 --vram 4 --timeout 1200 -- .venv/bin/python -m agent.body_engine.play check               (check world [SEED]: on the seeded terrain)
 
 Input: the terminal in kitty keyboard mode (press / release events; ghostty, kitty, foot) and SGR mouse motion; frames go
 to mpv. Every key and the mouse are stim entries registered once at start (rate 0); per control step only the probability
@@ -13,7 +13,7 @@ fires a looming threat (LC4 + LPLC2, both eyes) every few sim seconds or on `t`.
 spikes split into the player's DNs (key targets) and the brain's own DNs; OVERRIDE when own > player while a key is held.
 Engine HUD bars show energy / health / stamina in the frame.
 
-check (headless, one engine F = 5, one brain with 5 columns, 1 s each): idle stands; W walks > 1 body length, tilt < 20;
+check (headless, one engine F = 5, one brain with 5 columns, 1 s each): idle stands upright (tilt < 90); W walks > 1 body length, tilt < 20;
 A and D turn opposite ways beyond 10 deg; W with the threat from 0.5 s: own share rises over player share; stamina under W
 below idle; neural cost per step with and without a stim write.
 """
@@ -109,8 +109,13 @@ class Brain:
         return side, split
 
 
-def setup(F, render=0, out='/dev/null'):
-    d, m, _ = fl.prepare(OUT / 'fly')
+def setup(F, render=0, out='/dev/null', seed=None):
+    """seed: the fly on live.py's seeded terrain (live.WORLD, 0.1 mm bumps and cones), dropped from the flat standing pose."""
+    if seed is None:
+        d, m, _ = fl.prepare(OUT / 'fly')
+    else:
+        mjcf = live.terrain(fl.MJCF, live.WORLD[:5] + (seed,) + live.WORLD[6:])[0]
+        d, m, _ = fl.prepare(OUT / f'fly-world{seed}', mjcf=mjcf, flat=fl.MJCF)
     if not (d / 'mf.base').exists():
         (d / 'mf.bin').rename(d / 'mf.base')
     gc.set_rules(d, 0.0, WORK_RATE)
@@ -161,10 +166,12 @@ def loop(brain, eng, gaits, rates_at, steps, on_step=None):
     return np.array(tr), ref, cost
 
 
-def check():
+def check(*args):
+    """check [world [SEED]]: the same gates on the flat floor or the seeded terrain."""
+    seed = next((int(x) for x in args[1:] if x.isdigit()), 1) if args[:1] == ('world',) else None
     km = tomllib.loads(KEYMAP.read_text())
     brain = Brain(len(NAMES), km)
-    d, m, eng = setup(len(NAMES))
+    d, m, eng = setup(len(NAMES), seed=seed)
     gaits = [fl.Gait(m, d, fl.K) for _ in NAMES]
     ix = {k: brain.names.index(k) for k in ('w', 'a', 'd', 'threat')}
     half, wins = fl.STEPS // 2, []
@@ -190,7 +197,7 @@ def check():
     yaw = {n: float(res[n]['yaw_deg'][-1]) for n in NAMES}
     n = fl.STEPS + fl.WINDOW
     gates = {
-        'idle stands': abs(fwd['idle']) < 0.25,
+        'idle stands': abs(fwd['idle']) < 0.25 and res['idle']['tilt_max'] < 90,  # upright: an upside-down fly (172 deg) also stays put
         'w walks': fwd['w'] > 1 and res['w']['tilt_max'] < 20,
         'a/d turn': yaw['a'] * yaw['d'] < 0 and min(abs(yaw['a']), abs(yaw['d'])) > 10,
         'threat overrides': during[1] > during[0] and during[1] / max(during.sum(), 1) > before[1] / max(before.sum(), 1),
@@ -201,7 +208,7 @@ def check():
            'game rows end (energy, health, stamina, dead)': {k: game[c].tolist() for c, k in enumerate(NAMES)},
            'drive ref (DN Hz, W held)': ref.tolist(), 'ms per control step': {k: 1e3 * v / n for k, v in cost.items()},
            'engine COST ms/frame': engine_cost, 'work_rate': WORK_RATE, 'gates': gates}
-    (OUT / 'check.json').write_text(json.dumps(out, indent=1, default=float) + '\n')
+    (OUT / ('check.json' if seed is None else f'check-world{seed}.json')).write_text(json.dumps(out, indent=1, default=float) + '\n')
     for k, v in out.items():
         print(k, json.dumps(v, default=float))
     print(f'A turns {"left" if yaw["a"] > 0 else "right"} (yaw {yaw["a"]:+.1f} deg), D {yaw["d"]:+.1f} deg')
@@ -214,7 +221,9 @@ def check():
 KEY = re.compile(rb'\x1b\[(\d+)(?::\d+)*(?:;\d+(?::(\d))?)?u|\x1b\[<(\d+);(\d+);(\d+)[Mm]|([ -~])')
 
 
-def play():
+def play(*args):
+    """play [world [SEED]]: flat floor, or the seeded terrain (seed 1 by default)."""
+    seed = next((int(x) for x in args[1:] if x.isdigit()), 1) if args[:1] == ('world',) else None
     km = tomllib.loads(KEYMAP.read_text())
     brain = Brain(1, km)
     fifo = OUT / 'frames.fifo'
@@ -224,7 +233,7 @@ def play():
     mpv = subprocess.Popen(['mpv', '--demuxer=rawvideo', f'--demuxer-rawvideo-w={sc.W}', f'--demuxer-rawvideo-h={sc.H}',
                             '--demuxer-rawvideo-mp-format=rgba', '--profile=low-latency', '--untimed', '--title=fly', str(fifo)],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    d, m, eng = setup(1, render=4, out=fifo)
+    d, m, eng = setup(1, render=4, out=fifo, seed=seed)
     gaits = [fl.Gait(m, d, fl.K)]
     th = km['threat']
     every, dur = round(th['every_s'] / (fl.K * fl.DT)), round(th['dur_s'] / (fl.K * fl.DT))
@@ -287,4 +296,5 @@ def play():
 
 
 if __name__ == '__main__':
-    {'check': check, 'play': play}[sys.argv[1] if len(sys.argv) > 1 else 'play']()
+    a = sys.argv[1:] or ['play']
+    check(*a[1:]) if a[0] == 'check' else play(*a[a[0] == 'play':])

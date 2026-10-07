@@ -55,6 +55,18 @@ def world_camera(out, m, fovy):
     return [*map(str, eye), *map(str, look), str(fovy)]
 
 
+def lift(m, q):
+    """in place: every free root of qpos q raised so its animal's bodies sit 0.05 mm above the terrain under them."""
+    t = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_NUMERIC, 'terrain')
+    d = mujoco.MjData(m)
+    d.qpos[:] = q
+    mujoco.mj_kinematics(m, d)
+    for a, j in zip(roots(m), np.flatnonzero(m.jnt_type == mujoco.mjtJoint.mjJNT_FREE)):
+        b = np.flatnonzero(m.body_rootid == m.body_rootid[m.jnt_bodyid[j]])  # this animal's bodies: the ground under
+        h = height_grad(d.xpos[b, 0], d.xpos[b, 1], m.numeric_data[m.numeric_adr[t]:m.numeric_adr[t] + 16])[0]
+        q[a + 2] += float(h.max()) + 0.05  # them, not the highest within 4 mm (a 0.57 mm drop on a 0.1 ramp)
+
+
 def prepare(out=OUT, pairs=FEET, mjcf=MJCF, dist=DIST, flat=None, convex=False):
     """Engine + mesh files for one fly standing still: state from model.standing, servos holding its joint angles,
     adhesion on. Returns the camera args (eye, target, fovy) and the model. flat: on terrain, stand on this flat-floor
@@ -69,14 +81,7 @@ def prepare(out=OUT, pairs=FEET, mjcf=MJCF, dist=DIST, flat=None, convex=False):
     q, v = standing(load(flat or mjcf), 2)  # shipped noslip 5: with noslip 0 the settling rollout collapses onto the belly
     q, v = q[:1], v[:1]
     if flat:  # every free root (fly, spider) lifted above its own ground
-        t = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_NUMERIC, 'terrain')
-        d = mujoco.MjData(m)
-        d.qpos[:] = q[0]
-        mujoco.mj_kinematics(m, d)
-        for a, j in zip(roots(m), np.flatnonzero(m.jnt_type == mujoco.mjtJoint.mjJNT_FREE)):
-            b = np.flatnonzero(m.body_rootid == m.body_rootid[m.jnt_bodyid[j]])  # this animal's bodies: the ground under
-            h = height_grad(d.xpos[b, 0], d.xpos[b, 1], m.numeric_data[m.numeric_adr[t]:m.numeric_adr[t] + 16])[0]
-            q[0, a + 2] += float(h.max()) + 0.05  # them, not the highest within 4 mm (a 0.57 mm drop on a 0.1 ramp)
+        lift(m, q[0])
     u = np.where(m.actuator_trntype == mujoco.mjtTrn.mjTRN_BODY, 1.0, q[0][m.jnt_qposadr[np.minimum(m.actuator_trnid[:, 0], m.njnt - 1)]])
     q.astype(np.float32).T.copy().tofile(out / 'qpos.bin')
     v.astype(np.float32).T.copy().tofile(out / 'qvel.bin')
