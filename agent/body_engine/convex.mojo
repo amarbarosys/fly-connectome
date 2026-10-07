@@ -3,7 +3,10 @@
 
 3.9 collides every convex pair that is not a primitive case with this NATIVE GJK + EPA (mjc_ccd), not libccd / MPR
 (mjDSBL_NATIVECCD off): ellipsoid-mesh returns one contact, box-mesh up to 4 (5 with a margin) from the multicontact
-step inside mjc_ccd.
+step inside mjc_ccd. Primitive pairs (sphere, capsule, ellipsoid, cylinder: the flight model) run the same mjc_ccd with its
+sphere/capsule core trick (GJK on the point or segment, the radius folded into the margin, EPA only when the cores meet) and
+one contact each (multiccd off); capsule-capsule, sphere-capsule and sphere-cylinder are the analytic primitives
+(engine_collision_primitive.c), ported below in the same scalar type.
 
 Scalar type: float32 as the engine, or float64 with -DCCD64=1 (the CPU build that must match MuJoCo's doubles).
 Mesh data is the engine's hull tables (model.py feet): hull vertices in the geom frame, per-vertex first edge, edge
@@ -33,6 +36,9 @@ comptime ELLIPSOID = 0
 comptime MESH = 1
 comptime BOX = 2
 comptime PRISM = 3  # one heightfield cell triangle as a prism (mjc_ConvexHField): 6 vertices in the hfield frame
+comptime SPHERE = 4  # size0 radius; mjc_ccd shrinks it to its centre (core) with the radius folded into the margin
+comptime CAPSULE = 5  # size0 radius, size1 half-length along z; core = the segment
+comptime CYLINDER = 6  # size0 radius, size1 half-height along z
 
 
 @always_inline
@@ -72,6 +78,7 @@ def normalize3(a: V) -> V:
 struct Shape[o: MutOrigin](Copyable):
     """mjCCDObj for the geom kinds ported so far: ellipsoid, hull mesh (hill climb), box."""
     var kind: Int
+    var core: Bool  # sphere or capsule shrunk to its centre or segment (mjc_ccd's special handling)
     var pos: V
     var r0: V  # rotation matrix rows (mat[0..2], mat[3..5], mat[6..8])
     var r1: V
@@ -87,6 +94,7 @@ struct Shape[o: MutOrigin](Copyable):
 
     def __init__(out self, verts: Pointer[Float32, Self.o], first: Pointer[Int32, Self.o], edges: Pointer[Int32, Self.o]):
         self.kind = 0
+        self.core = False
         self.pos = V(0)
         self.r0 = V(1, 0, 0, 0)
         self.r1 = V(0, 1, 0, 0)
@@ -131,7 +139,16 @@ struct Shape[o: MutOrigin](Copyable):
                     ibest = istart + i
                     best = tmp
             return self.prism[ibest]
+        if self.kind == SPHERE:  # mjc_sphereSupport (:238), mjc_pointSupport for the core; dir is unit
+            return self.pos if self.core else self.pos + d * self.size[0]
         var ld = self.local(d)
+        if self.kind == CAPSULE:  # mjc_capsuleSupport (:270), mjc_lineSupport for the core
+            var end = V(0, 0, self.size[1] if ld[2] >= 0 else -self.size[1], 0)
+            return self.world(end if self.core else ld * self.size[0] + end)
+        if self.kind == CYLINDER:  # mjc_cylinderSupport (:288)
+            var n2 = ld[0] * ld[0] + ld[1] * ld[1]
+            var scl = self.size[0] / sqrt(n2) if n2 >= MINVAL2 else S(0)
+            return self.world(V(scl * ld[0], scl * ld[1], self.size[1] if ld[2] >= 0 else -self.size[1], 0))
         if self.kind == ELLIPSOID:
             var ls = V(ld[0] * self.size[0], ld[1] * self.size[1], ld[2] * self.size[2], 0)
             var n2 = dot(ls, ls)
@@ -1212,7 +1229,42 @@ def penetration(mut o1: Sp, mut o2: Sp, margin: S, tol: S, max_contacts: Int) ->
     var st = Status()
     st.tolerance = tol
     st.max_contacts = max_contacts
-    var d = ccd(st, o1, o2)
+    var d: S = 0
+    var round1 = o1.kind == SPHERE or o1.kind == CAPSULE
+    var round2 = o2.kind == SPHERE or o2.kind == CAPSULE
+    var cored = False
+    if round1 or round2:  # mjc_ccd (engine_collision_gjk.c:2233): GJK on the cores (point, segment) with the radius and half the
+        # margin as a distance cutoff; apart: the witness points inflated back (inflate, :2192); cores penetrating: full shapes
+        var fm1 = o1.size[0] + S(0.5) * margin if round1 else S(0)
+        var fm2 = o2.size[0] + S(0.5) * margin if round2 else S(0)
+        o1.core = round1
+        o2.core = round2
+        if round1:
+            o1.margin = 0
+        if round2:
+            o2.margin = 0
+        st.dist_cutoff = fm1 + fm2
+        st.x1 = o1.center()
+        st.x2 = o2.center()
+        st.gjk_iterations = 0
+        st.epa_iterations = 0
+        st.epa_status = -1
+        gjk(st, o1, o2)
+        st.dist_cutoff = 0
+        o1.core = False
+        o2.core = False
+        o1.margin = margin
+        o2.margin = margin
+        if st.dist > st.tolerance:
+            var nrm = normalize3(st.x2 - st.x1)
+            st.x1 = st.x1 + nrm * fm1
+            st.x2 = st.x2 - nrm * fm2
+            d = st.dist - (fm1 + fm2)
+            if d > 0:
+                d = BIG
+            cored = True
+    if not cored:
+        d = ccd(st, o1, o2)
     comptime if CCD_DEBUG:
         print('ccd: gjk_it', st.gjk_iterations, 'nsimplex', st.nsimplex, 'dist', d, 'epa_status', st.epa_status, 'epa_it', st.epa_iterations)
     var c = Con()
@@ -1273,7 +1325,102 @@ def tilt(axis: V, sgn: S) -> Array[S, 9]:
     return m^
 
 
-def collide(mut o1: Sp, mut o2: Sp, margin: S, tol: S, rbound: S) -> ConSet:
+@always_inline
+def clip1(x: S) -> S:
+    return S(1) if x > 1 else (S(-1) if x < -1 else x)
+
+
+@always_inline
+def raw_sphere_sphere(mut cs: ConSet, margin: S, pos1: V, ax1: V, r1: S, pos2: V, ax2: V, r2: S):
+    """mjraw_SphereSphere (engine_collision_primitive.c:262): one contact on the centre line appended to cs, none beyond the margin."""
+    var dif = pos1 - pos2
+    var cd2 = dot(dif, dif)
+    var mind = margin + r1 + r2
+    if cd2 > mind * mind or cs.n >= 5:
+        return
+    var dist = sqrt(cd2) - r1 - r2
+    var normal = pos2 - pos1
+    var len = norm(normal)
+    if len < MINVAL:
+        normal = cross(ax1, ax2)
+        normal = normalize3(normal)
+    else:
+        normal = normal / len
+    cs.dist[cs.n] = dist
+    cs.normal[cs.n] = normal
+    cs.pos[cs.n] = (pos1 + normal * (r1 + dist / 2))
+    cs.n += 1
+
+
+def primitive_pair(kind: Int, pos1: V, ax1: V, sz1: V, pos2: V, ax2: V, sz2: V, margin: S) -> ConSet:
+    """The analytic primitive pairs: mjraw_CapsuleCapsule (engine_collision_primitive.c:425, kind 5: closest points of the two
+    segments, two contacts when parallel), mjraw_SphereCapsule (:313, kind 6), mjc_SphereCylinder (:345, kind 7: side, cap or
+    corner). Contacts as the convex set (dist, pos, normal from geom1 to geom2)."""
+    var cs = ConSet()
+    if kind == 5:
+        var a1 = ax1 * sz1[1]; var a2 = ax2 * sz2[1]
+        var dif = pos1 - pos2
+        var ma = dot(a1, a1); var mb = -dot(a1, a2); var mc = dot(a2, a2)
+        var u = -dot(a1, dif); var v = dot(a2, dif)
+        var det = ma * mc - mb * mb
+        if abs(det) >= MINVAL:
+            var x1 = (mc * u - mb * v) / det; var x2 = (ma * v - mb * u) / det
+            if x1 > 1:
+                x1 = 1; x2 = (v - mb) / mc
+            elif x1 < -1:
+                x1 = -1; x2 = (v + mb) / mc
+            if x2 > 1:
+                x2 = 1; x1 = clip1((u - mb) / ma)
+            elif x2 < -1:
+                x2 = -1; x1 = clip1((u + mb) / ma)
+            raw_sphere_sphere(cs, margin, pos1 + a1 * x1, ax1, sz1[0], pos2 + a2 * x2, ax2, sz2[0])
+        else:  # parallel: both ends of each segment against the other
+            var x2 = clip1((v - mb) / mc)
+            raw_sphere_sphere(cs, margin, pos1 + a1, ax1, sz1[0], pos2 + a2 * x2, ax2, sz2[0])
+            x2 = clip1((v + mb) / mc)
+            raw_sphere_sphere(cs, margin, pos1 - a1, ax1, sz1[0], pos2 + a2 * x2, ax2, sz2[0])
+            if cs.n < 2:
+                var x1 = clip1((u - mb) / ma)
+                raw_sphere_sphere(cs, margin, pos1 + a1 * x1, ax1, sz1[0], pos2 + a2, ax2, sz2[0])
+            if cs.n < 2:
+                var x1 = clip1((u + mb) / ma)
+                raw_sphere_sphere(cs, margin, pos1 + a1 * x1, ax1, sz1[0], pos2 - a2, ax2, sz2[0])
+    elif kind == 6:
+        var vec = pos1 - pos2
+        var x = min(sz2[1], max(-sz2[1], dot(ax2, vec)))
+        raw_sphere_sphere(cs, margin, pos1, ax1, sz1[0], pos2 + ax2 * x, ax2, sz2[0])
+    else:  # kind 7
+        var radius = sz2[0]; var height = sz2[1]
+        var vec = pos1 - pos2
+        var x = dot(ax2, vec)
+        var a_proj = ax2 * x
+        var p_proj = vec - a_proj
+        var pp2 = dot(p_proj, p_proj)
+        var side = abs(x) < height
+        var cap = pp2 < radius * radius
+        if side and cap:  # sphere centre inside the cylinder: the nearer exit
+            if height - abs(x) < radius - sqrt(pp2):
+                side = False
+            else:
+                cap = False
+        if side:
+            raw_sphere_sphere(cs, margin, pos1, ax1, sz1[0], a_proj + pos2, ax2, sz2[0])
+        elif cap:  # mjraw_PlaneSphere on the cap, normal flipped (plane < sphere < cylinder in the type order)
+            var n = ax2 if x > 0 else -ax2
+            var pos_cap = pos2 + ax2 * (height if x > 0 else -height)
+            var cdist = dot(pos1 - pos_cap, n)
+            if cdist <= margin + sz1[0]:
+                var dist = cdist - sz1[0]
+                cs.dist[0] = dist
+                cs.normal[0] = (-n)
+                cs.pos[0] = (pos1 + n * (-dist / 2 - sz1[0]))
+                cs.n = 1
+        else:  # corner: a point sphere on the rim
+            var rim = p_proj * (radius / sqrt(pp2)) + ax2 * (height if x > 0 else -height) + pos2
+            raw_sphere_sphere(cs, margin, pos1, ax1, sz1[0], rim, ax2, S(0))
+    return cs^
+
+def collide(mut o1: Sp, mut o2: Sp, margin: S, tol: S, rbound: S, multi: Bool = True) -> ConSet:
     """mjc_Convex (engine_collision_convex.c:857) for a pair with margin > 0, where maxContacts is 1: the first contact,
     then (not for sphere/ellipsoid) the perturbation search of :874-927: both geoms rotated by -+1e-3 rad about the two
     tangent axes of the first contact, around its point, a new contact kept when it is farther than 1e-3 rbound (rbound =
@@ -1290,7 +1437,7 @@ def collide(mut o1: Sp, mut o2: Sp, margin: S, tol: S, rbound: S) -> ConSet:
         cs.dist[0] = c0.dist
         cs.pos[0] = c0.pos
         cs.normal[0] = c0.normal
-        if o1.kind != ELLIPSOID and o2.kind != ELLIPSOID:
+        if multi and o1.kind != ELLIPSOID and o2.kind != ELLIPSOID and o1.kind != SPHERE and o2.kind != SPHERE:  # mjc_Convex :870
             var p1 = o1.pos
             var q1 = (o1.r0, o1.r1, o1.r2)
             var p2 = o2.pos

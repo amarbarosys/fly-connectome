@@ -5,7 +5,7 @@ from std.sys import argv
 from std.memory import UnsafePointer
 from convex import *
 
-comptime CW = 40  # case: kind1 kind2, size1 3, pos1 3, mat1 9, pos2 3, mat2 9, hull, margin, tol, rbound
+comptime CW = 40  # case: kind1 kind2, size1 3, pos1 3, mat1 9, pos2 3, mat2 9, hull, margin, tol, rbound, size2 3 (33), multi (36), analytic kind (37: 5 capsule-capsule, 6 sphere-capsule, 7 sphere-cylinder, else collide)
 comptime OW = 36  # out: ncon, then 5 x (dist, pos 3, normal 3)
 
 
@@ -59,8 +59,9 @@ def main() raises:
             continue
         var b = c * CW
         var h = Int(cases[b + 29])
-        var pv = hverts.unsafe_ptr().unsafe_mut_cast[True]().unsafe_origin_cast[MutAnyOrigin]() + 3 * Int(hmeta[3 * h])
-        var pf = hfirst.unsafe_ptr().unsafe_mut_cast[True]().unsafe_origin_cast[MutAnyOrigin]() + Int(hmeta[3 * h + 1])
+        var mesh = Int(cases[b + 1]) == MESH
+        var pv = hverts.unsafe_ptr().unsafe_mut_cast[True]().unsafe_origin_cast[MutAnyOrigin]() + (3 * Int(hmeta[3 * h]) if mesh else 0)
+        var pf = hfirst.unsafe_ptr().unsafe_mut_cast[True]().unsafe_origin_cast[MutAnyOrigin]() + (Int(hmeta[3 * h + 1]) if mesh else 0)
         var pe = hedges.unsafe_ptr().unsafe_mut_cast[True]().unsafe_origin_cast[MutAnyOrigin]()  # first[] holds absolute edge addresses
         var o1 = Sp(pv, pf, pe)
         var o2 = Sp(pv, pf, pe)
@@ -75,7 +76,13 @@ def main() raises:
         o2.r0 = v3(cases, b + 20)
         o2.r1 = v3(cases, b + 23)
         o2.r2 = v3(cases, b + 26)
-        var cs = collide(o1, o2, S(cases[b + 30]), S(cases[b + 31]), S(cases[b + 32]))
+        o2.size = v3(cases, b + 33)
+        var ak = Int(cases[b + 37])
+        var cs: ConSet
+        if ak >= 5:
+            cs = primitive_pair(ak, o1.pos, V(o1.r0[2], o1.r1[2], o1.r2[2], 0), o1.size, o2.pos, V(o2.r0[2], o2.r1[2], o2.r2[2], 0), o2.size, S(cases[b + 30]))
+        else:
+            cs = collide(o1, o2, S(cases[b + 30]), S(cases[b + 31]), S(cases[b + 32]), cases[b + 36] != 0)
         var r = c * OW
         out[r] = Float64(cs.n)
         for i in range(cs.n):

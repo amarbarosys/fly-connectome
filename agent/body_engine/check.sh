@@ -271,6 +271,42 @@ if [ "$stage" = tendon_limit ]; then  # tendon limit rows (mj_instantiateLimit, 
   [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
   echo "PASS all tendon_limit checks"; exit 0
 fi
+if [ "$stage" = flight_contacts ]; then  # the Flybody flight model's own contacts: 842 automatic capsule/ellipsoid/cylinder/sphere body-body pairs
+  # (model.with_auto_pairs: the same pairs and mixed parameters as explicit pairs; tools/auto_pairs_check.py proves them against MuJoCo's dynamic
+  # pairs; multiccd off, so one contact per pair, two for parallel capsules), condim 1 (frictionless rows), noslip 5, pyramidal. Narrowphase
+  # (convex_check, float64): capsule-capsule, sphere-capsule, sphere-cylinder analytic (exact), the rest GJK + EPA with the sphere/capsule core
+  # trick (dist 1e-9, normal 1.5e-4: both sides stop at the 1e-6 ccd tolerance; cases with a centre inside the other geom are left out, EPA's
+  # answer there is tolerance-arbitrary on both sides), and every contact MuJoCo reports on 64 near-rest states. Engine vs mj_step: random
+  # airborne states (RANDOM_STATES=1, qvel up to 100, ~26 contacts each, default bar) and near-rest states (NEAR_STATES=1, the model's own
+  # resting overlaps, ~10 contacts each, bar 3e-3: six states flip the active set of a contact carrying < 0.3 % of the max force, median 9e-7;
+  # qacc_euler 2.3e-3 on the card). Both draws reject states with a geom centre inside the other geom (model.reject_degenerate: EPA is
+  # tolerance-arbitrary there, so MuJoCo, the CPU build and the card disagree at 1e-2).
+  R=~/Projects/science/fly-connectome; FL=${FLIGHT:-$R/.work/flight-body}; S=agent/body_engine/smooth.mojo; C=agent/body_engine/convex.mojo; mkdir -p $X/fc
+  [ -f $FL/flight.xml ] || $R/.work/neural-flies/flight-venv/bin/python agent/body_engine/models/flight_export.py $FL
+  PYTHONPATH=. $M tools/auto_pairs_check.py $FL/flight.xml $X/fc/flight_pairs.xml 64 || { echo "FAIL auto_pairs oracle"; fail=$((fail+1)); }
+  FC=$X/fc/flight_pairs.xml
+  for kind in capsule-cylinder capsule-ellipsoid ellipsoid-ellipsoid ellipsoid-cylinder sphere-ellipsoid capsule-capsule sphere-capsule sphere-cylinder; do
+    FLIGHT_PAIRS=$FC $M -m agent.body_engine.convex_check $kind 1500 f64 1e-9 1 || { echo "FAIL narrowphase $kind"; fail=$((fail+1)); }
+  done
+  FLIGHT_PAIRS=$FC $M -m agent.body_engine.convex_check flight 64 f64 || { echo "FAIL narrowphase on flight poses"; fail=$((fail+1)); }
+  CONVEX=1 RANDOM_STATES=1 VSCALE=${VSCALE:-100} $M -m agent.body_engine.model check $FC $X/fc/random actuated 64 || { echo "FAIL flight contacts random states"; fail=$((fail+1)); }
+  CONVEX=1 NEAR_STATES=1 REL=${FC_NEAR_REL:-3e-3} $M -m agent.body_engine.model check $FC $X/fc/near actuated 64 || { echo "FAIL flight contacts near states"; fail=$((fail+1)); }
+  # the gate must fail with: the capsule support's end flipped (engine, random states), the frictionless normal row given the pyramid's row (engine),
+  # the row threshold moved to margin + gap (the pre-3.9 convention; near states, one contact per state goes missing), the sphere-cylinder
+  # cap normal unflipped (narrowphase), the sphere-capsule clamp dropped (narrowphase)
+  ~/iTools/bin/mutant-check $C 's/var end = V(0, 0, self.size\[1\] if ld\[2\] >= 0 else -self.size\[1\], 0)/var end = V(0, 0, -self.size[1] if ld[2] >= 0 else self.size[1], 0)/' -- \
+    env CONVEX=1 RANDOM_STATES=1 VSCALE=${VSCALE:-100} $M -m agent.body_engine.model check $FC $X/mutant actuated 64 || fail=$((fail+1))
+  ~/iTools/bin/mutant-check $S 's/            res\[jadr \* F + f\] = jn$/            res[jadr * F + f] = jn + f0 * j1/' -- \
+    env CONVEX=1 RANDOM_STATES=1 VSCALE=${VSCALE:-100} $M -m agent.body_engine.model check $FC $X/mutant actuated 64 || fail=$((fail+1))
+  ~/iTools/bin/mutant-check $S 's/    if dist >= imargin:  # mj_setContact/    if dist >= imargin + gap:  # mj_setContact/' -- \
+    env CONVEX=1 NEAR_STATES=1 REL=${FC_NEAR_REL:-3e-3} $M -m agent.body_engine.model check $FC $X/mutant actuated 64 || fail=$((fail+1))
+  ~/iTools/bin/mutant-check $C 's/cs.normal\[0\] = (-n)/cs.normal[0] = n/' -- \
+    env FLIGHT_PAIRS=$FC $M -m agent.body_engine.convex_check sphere-cylinder 600 f64 1e-9 3 || fail=$((fail+1))
+  ~/iTools/bin/mutant-check $C 's/var x = min(sz2\[1\], max(-sz2\[1\], dot(ax2, vec)))/var x = dot(ax2, vec)/' -- \
+    env FLIGHT_PAIRS=$FC $M -m agent.body_engine.convex_check sphere-capsule 600 f64 1e-9 3 || fail=$((fail+1))
+  [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
+  echo "PASS all flight_contacts checks"; exit 0
+fi
 if [ "$stage" = sleep ]; then  # sleep (mj_sleep in mj_advance, mj_wake; mjENBL_SLEEP): the fly with sleeping enabled at a tolerance that puts
   # about half of the standing states to sleep within K=20 steps (servos held at the current angle, HOLD=1; MuJoCo zeroes qvel and freezes qpos
   # at the mjMINAWAKE-th quiet check), vs 20 chained mj_step: the asleep sets must agree exactly, the awake states within the K-step bar

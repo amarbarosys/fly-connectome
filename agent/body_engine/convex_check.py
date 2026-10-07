@@ -5,7 +5,9 @@ separated, shallow, touching and deep), MuJoCo's contact for exactly that pair a
 count, dist, pos, normal. The CPU driver convex_test.mojo is built float64 (parity with MuJoCo's doubles, bar 1e-9)
 or float32 (the engine; bar measured, stated by the caller).
 
-usage: python -m agent.body_engine.convex_check KIND N [f64|f32] [BAR] [SEED]   KIND: ellipsoid | box
+usage: python -m agent.body_engine.convex_check KIND N [f64|f32] [BAR] [SEED]   KIND: ellipsoid | box (vs mesh, the fly), or a primitive pair of
+the flight twin (FLIGHT_PAIRS, model.with_auto_pairs): capsule-cylinder, capsule-ellipsoid, ellipsoid-ellipsoid, ellipsoid-cylinder, sphere-ellipsoid
+(GJK + EPA, one contact, multiccd off), capsule-capsule, sphere-capsule, sphere-cylinder (analytic)
 """
 import subprocess, sys, os
 import numpy as np
@@ -13,6 +15,10 @@ import mujoco
 from pathlib import Path
 
 BODY = '.work/agent/gpu-body-port/body-v2/body.xml'
+FLIGHT_PAIRS = os.environ.get('FLIGHT_PAIRS', '.work/agent/body_engine/fc/flight_pairs.xml')
+NAMES = {'sphere': mujoco.mjtGeom.mjGEOM_SPHERE, 'capsule': mujoco.mjtGeom.mjGEOM_CAPSULE, 'ellipsoid': mujoco.mjtGeom.mjGEOM_ELLIPSOID,
+         'cylinder': mujoco.mjtGeom.mjGEOM_CYLINDER}
+ANALYTIC = {'capsule-capsule': 5, 'sphere-capsule': 6, 'sphere-cylinder': 7}
 CW, OW = 40, 36
 G = mujoco.mjtGeom
 # float32 bars (measured: `floor` = MuJoCo f64 vs MuJoCo on float32-rounded poses gives dist 2e-7, pos 3e-4, normal 2e-3 max)
@@ -39,6 +45,23 @@ def hull_tables(m, meshes):
             np.array(meta, np.int32), index)
 
 
+def degenerate(m, g1, g2, row):
+    """One geom's centre inside the other: the penetration direction is tolerance-arbitrary (EPA stops on any of many equally deep
+    faces; MuJoCo's own answer depends on its iteration order), so such cases are counted and left out of the error statistics."""
+    for a, b, pa, pb, mb in ((g1, g2, row[5:8], row[17:20], row[20:29]), (g2, g1, row[17:20], row[5:8], row[8:17])):
+        p = mb.reshape(3, 3).T @ (pa - pb)
+        sz, ty = m.geom_size[b], m.geom_type[b]
+        if ty == G.mjGEOM_SPHERE and np.linalg.norm(p) < sz[0]:
+            return True
+        if ty == G.mjGEOM_ELLIPSOID and ((p / sz) ** 2).sum() < 1:
+            return True
+        if ty == G.mjGEOM_CAPSULE and np.linalg.norm(p - np.array([0, 0, np.clip(p[2], -sz[1], sz[1])])) < sz[0]:
+            return True
+        if ty == G.mjGEOM_CYLINDER and abs(p[2]) < sz[1] and np.hypot(p[0], p[1]) < sz[0]:
+            return True
+    return False
+
+
 def randrot(rng):
     q = rng.normal(size=4)
     q /= np.linalg.norm(q)
@@ -48,12 +71,20 @@ def randrot(rng):
 
 
 def run(kind, n, prec='f64', bar=1e-9, seed=0, mutant=None, verbose=True):
-    m = mujoco.MjModel.from_xml_path(BODY)
+    from agent.body_engine.model import pair_geoms, SHAPE_KIND
+    prim = '-' in kind
+    m = mujoco.MjModel.from_xml_path(FLIGHT_PAIRS if prim else BODY)
     d = mujoco.MjData(m)
     mujoco.mj_forward(m, d)
-    want = G.mjGEOM_BOX if kind == 'box' else G.mjGEOM_ELLIPSOID
-    sel = [i for i in range(m.npair) if m.geom_type[m.pair_geom1[i]] == want and m.geom_type[m.pair_geom2[i]] == G.mjGEOM_MESH]
-    meshes = sorted({int(m.geom_dataid[m.pair_geom2[i]]) for i in sel})
+    if prim:
+        ta, tb = (NAMES[x] for x in kind.split('-'))
+        sel = [i for i in range(m.npair) if tuple(m.geom_type[g] for g in pair_geoms(m, i)) == (ta, tb)]
+    else:
+        want = G.mjGEOM_BOX if kind == 'box' else G.mjGEOM_ELLIPSOID
+        sel = [i for i in range(m.npair) if m.geom_type[m.pair_geom1[i]] == want and m.geom_type[m.pair_geom2[i]] == G.mjGEOM_MESH]
+    if not sel:
+        print(f'FAIL convex {kind}: no such pairs'); return False
+    meshes = sorted({int(m.geom_dataid[m.pair_geom2[i]]) for i in sel if m.geom_type[m.pair_geom2[i]] == G.mjGEOM_MESH})
     hv, hf, he, hm, hidx = hull_tables(m, meshes)
     rng = np.random.default_rng(seed)
     work = Path('.work/agent/body_engine/convex') / f'{kind}-{prec}'
@@ -62,7 +93,7 @@ def run(kind, n, prec='f64', bar=1e-9, seed=0, mutant=None, verbose=True):
     pairs = []
     for c in range(n):
         i = sel[rng.integers(len(sel))]
-        g1, g2 = int(m.pair_geom1[i]), int(m.pair_geom2[i])
+        g1, g2 = pair_geoms(m, i)
         pairs.append((i, g1, g2))
         r = m.geom_rbound[g1] + m.geom_rbound[g2]
         dirn = rng.normal(size=3)
@@ -75,14 +106,17 @@ def run(kind, n, prec='f64', bar=1e-9, seed=0, mutant=None, verbose=True):
         else:
             pos1 = pos2 + dirn * r * rng.uniform(0.0, 0.9)
         row = cases[c]
-        row[0] = 0 if kind == 'ellipsoid' else 2
-        row[1] = 1
+        row[0] = SHAPE_KIND[G(m.geom_type[g1])] if prim else (0 if kind == 'ellipsoid' else 2)
+        row[1] = SHAPE_KIND[G(m.geom_type[g2])] if prim else 1
         row[2:5] = m.geom_size[g1]
+        row[33:36] = m.geom_size[g2]
+        row[36] = 0 if prim else 1
+        row[37] = ANALYTIC.get(kind, 0)
         row[5:8] = pos1
         row[8:17] = mat1
         row[17:20] = pos2
         row[20:29] = mat2
-        row[29] = hidx[int(m.geom_dataid[g2])]
+        row[29] = hidx[int(m.geom_dataid[g2])] if not prim else 0
         row[30] = m.pair_margin[i] + m.pair_gap[i]
         row[31] = m.opt.ccd_tolerance
         row[32] = min(m.geom_rbound[g1], m.geom_rbound[g2])
@@ -106,11 +140,15 @@ def run(kind, n, prec='f64', bar=1e-9, seed=0, mutant=None, verbose=True):
     errs = []
     counts = {}
     first_bad = []
+    ndeg = 0
     for c in range(n):
         i, g1, g2 = pairs[c]
         cs = oracle(m, d, g1, g2, cases[c])
         contact_cases += bool(cs)
         mine = int(out[c, 0])
+        if prim and cs and degenerate(m, g1, g2, cases[c]):
+            ndeg += 1
+            continue
         counts[(len(cs), mine)] = counts.get((len(cs), mine), 0) + 1
         if len(cs) != mine:
             bad['ncon'] += 1
@@ -130,7 +168,12 @@ def run(kind, n, prec='f64', bar=1e-9, seed=0, mutant=None, verbose=True):
                         first_bad.append((c, key, k, e))
     deep = np.array([e[:3] for e in errs if e[3] > F32['shallow']]) if errs else np.zeros((1, 3))  # force-significant contacts
     errs = [e[:3] for e in errs]
-    if prec == 'f64':  # exact except path flips: a comparison decided by 1e-16 changes where EPA stops, within its 1e-6 tolerance
+    if prec == 'f64' and prim and kind not in ANALYTIC:  # the sphere/capsule core trick: GJK on the cores stops at its 1e-6 tolerance on both sides, the
+        # inflated witness points inherit it (measured worst: dist 1e-9, pos 7e-7, normal 1.5e-4 on 1500 cases per kind)
+        a = np.array(errs) if errs else np.zeros((1, 3))
+        bad = {'ncon': bad['ncon'], 'dist': int(a[:, 0].max() > 1e-8), 'pos': int(a[:, 1].max() > 1e-5), 'normal': int(a[:, 2].max() > 1e-3)}
+        print(f'  f64 (cored GJK): max dist {a[:, 0].max():.1e} pos {a[:, 1].max():.1e} normal {a[:, 2].max():.1e} (bars 1e-8, 1e-5, 1e-3)')
+    elif prec == 'f64':  # exact except path flips: a comparison decided by 1e-16 changes where EPA stops, within its 1e-6 tolerance
         a = np.array(errs) if errs else np.zeros((1, 3))
         over = float((a > bar).mean())
         bad = {'ncon': bad['ncon'], 'dist': int(over > F64['frac'] or a[:, 0].max() > F64['max']),
@@ -146,6 +189,8 @@ def run(kind, n, prec='f64', bar=1e-9, seed=0, mutant=None, verbose=True):
               f"above the bars (pos {F32['pos_bar']:g}, normal {F32['normal_bar']:g}): {100 * (a[:, 1] > F32['pos_bar']).mean():.3f} % / {100 * (a[:, 2] > F32['normal_bar']).mean():.3f} % (bar {100 * F32['frac']:.1f} %); "
               f"count mismatches {counts_bad} of {n} cases (bar {100 * F32['count_frac']:.0f} %)")
     ok = sum(bad.values()) == 0 and contact_cases > 0
+    if ndeg:
+        print(f'  {ndeg} degenerate cases (a centre inside the other geom) left out')
     if verbose:
         print(f"{'PASS' if ok else 'FAIL'} convex {kind} {prec}: {n} cases, {contact_cases} with a contact, bar {bar:g}; "
               f"worst dist {worst['dist']:.2e} pos {worst['pos']:.2e} normal {worst['normal']:.2e}; mismatches {bad}; contacts oracle/engine {dict(sorted(counts.items()))}")
@@ -253,7 +298,57 @@ def arena_poses(count, prec='f32'):
     return nbad == 0
 
 
+def flight_poses(count, prec='f32', seed=0):
+    """Every contact MuJoCo reports on `count` near-rest states of the flight twin (model.nearby), as a narrowphase case at the geoms'
+    world poses: the per-contact dist/pos/normal error of the engine's kinds on the poses the whole-engine gate meets."""
+    from agent.body_engine.model import load, nearby, pair_geoms, SHAPE_KIND
+    m = load(FLIGHT_PAIRS)
+    d = mujoco.MjData(m)
+    q, v = nearby(m, count, seed)
+    rows, want, kinds = [], [], []
+    for n in range(count):
+        d.qpos[:], d.qvel[:] = q[n], v[n]
+        mujoco.mj_forward(m, d)
+        for c in d.contact[:d.ncon]:
+            i = [j for j in range(m.npair) if set(pair_geoms(m, j)) == {int(c.geom1), int(c.geom2)}][0]
+            g1, g2 = pair_geoms(m, i)
+            row = np.zeros(CW)
+            row[0], row[1] = SHAPE_KIND[G(m.geom_type[g1])], SHAPE_KIND[G(m.geom_type[g2])]
+            row[2:5], row[33:36] = m.geom_size[g1], m.geom_size[g2]
+            row[5:8], row[8:17] = d.geom_xpos[g1], d.geom_xmat[g1]
+            row[17:20], row[20:29] = d.geom_xpos[g2], d.geom_xmat[g2]
+            row[30], row[31], row[32] = m.pair_margin[i] + m.pair_gap[i], m.opt.ccd_tolerance, min(m.geom_rbound[g1], m.geom_rbound[g2])
+            name = G(m.geom_type[g1]).name[7:].lower() + '-' + G(m.geom_type[g2]).name[7:].lower()
+            row[37] = ANALYTIC.get(name, 0)
+            rows.append(row); want.append((float(c.dist), c.pos.copy(), c.frame[:3].copy())); kinds.append(name)
+    work = Path('.work/agent/body_engine/convex') / f'flight-{prec}'
+    work.mkdir(parents=True, exist_ok=True)
+    np.array(rows).tofile(work / 'cases.f64')
+    for nm in ('hverts.f32', 'hfirst.i32', 'hedges.i32', 'hmeta.i32'):
+        (work / nm).write_bytes(b'')
+    exe = work / 'ct'
+    p = subprocess.run(['/home/<user>/iTools/bin/mojo-cached', 'build', *(['-DCCD64=1'] if prec == 'f64' else []), 'agent/body_engine/convex_test.mojo', '-o', str(exe)], capture_output=True, text=True)
+    if p.returncode or subprocess.run([str(exe), str(work) + '/']).returncode:
+        print('FAIL build/run convex_test:', p.stderr[-1500:]); return False
+    out = np.fromfile(work / 'out.f64').reshape(len(rows), OW)
+    by = {}
+    for k, (row, (cd, cp, cn), name) in enumerate(zip(rows, want, kinds)):
+        e = by.setdefault(name, [])
+        if int(out[k, 0]) < 1:
+            e.append((abs(cd), 1.0, 2.0)); continue
+        e.append((abs(out[k, 1] - cd), np.abs(out[k, 2:5] - cp).max(), np.abs(out[k, 5:8] - cn).max()))
+    print(f'flight poses {prec}: {len(rows)} contacts on {count} near states')
+    for name, e in sorted(by.items()):
+        a = np.array(e)
+        print(f'  {name:20s} n {len(a):4d}  missed {int((a[:, 1] == 1.0).sum())}  max dist {a[:, 0].max():.1e} pos {a[:, 1].max():.1e} normal {a[:, 2].max():.1e}  p50 dist {np.median(a[:, 0]):.1e}')
+    return True
+
+
+
+
 if __name__ == '__main__':
+    if sys.argv[1] == 'flight':
+        sys.exit(0 if flight_poses(int(sys.argv[2]), sys.argv[3] if len(sys.argv) > 3 else 'f32') else 1)
     if sys.argv[1] == 'arena':
         sys.exit(0 if arena_poses(int(sys.argv[2]), sys.argv[3] if len(sys.argv) > 3 else 'f32') else 1)
     if sys.argv[1] == 'floor':

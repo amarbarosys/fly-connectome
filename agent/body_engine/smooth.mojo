@@ -31,7 +31,7 @@ from max.gpu.sync import barrier
 from max.gpu.host import DeviceContext
 from layout import TileTensor, TensorLayout, row_major
 from world import NP, PW, height_grad
-from convex import Sp, collide, collide_hfield, Height, ELLIPSOID, MESH, BOX, T as CT, S as CS, V as CVEC  # convex.mojo's scalar type (float64 with -DCCD64=1, which the export sets)
+from convex import Sp, ConSet, collide, collide_hfield, primitive_pair, Height, ELLIPSOID, MESH, BOX, T as CT, S as CS, V as CVEC  # convex.mojo's scalar type (float64 with -DCCD64=1, which the export sets)
 import game_state as game
 
 comptime NB = get_defined_int["NBODY"]()
@@ -110,7 +110,7 @@ comptime NEQCH = get_defined_int["NEQCH", 0]()
 comptime NEQJ = get_defined_int["NEQJ", 0]()  # Jacobian entries: rows x chain length, summed
 comptime EQH = 12
 comptime EQF = 31
-comptime CEQH = NI2 + (NCP if NCV > 0 else 0)  # the convex block (kinds per pair) sits between the tendon and equality blocks
+comptime CEQH = NI2 + (4 * NCP if NCV > 0 else 0)  # the convex block (kind, two shape kinds, condim per pair) sits between the tendon and equality blocks
 comptime CEQC = CEQH + EQH * NEQ
 comptime CEQM = CEQC + NEQCH
 # mocap bodies (model.py mocap_block, after the equality block): body_mocapid per body; each animal's mocap pose (pos 3,
@@ -141,7 +141,9 @@ comptime NMID = get_defined_int["NMID", 0]()
 comptime CMID = DPAIR + NV * NV if IMPL else CIMP
 comptime MPAIR = CMID + 3 * NMID  # implicitfast (model.py mpair_block): (k, p) -> M lower entry or -1, NV x NV
 comptime NI = MPAIR + (NV * NV if get_defined_int["MPAIR", 0]() == 1 else 0)
-comptime CKIND = NI2
+comptime CKIND = NI2  # NCV: per pair 0 plane/sphere/tangent, 1 ellipsoid-mesh, 2 box-mesh, 3 exact heightfield, 4 primitive pair (GJK + EPA), 5 capsule-capsule, 6 sphere-capsule, 7 sphere-cylinder
+comptime CGT = CKIND + NCP  # NCV: per pair the convex.mojo shape kinds of geom1 and geom2
+comptime CCND = CKIND + 3 * NCP  # NCV: per pair condim (1: one frictionless row, 3: the pyramid)
 # mf.bin: body_pos, body_quat, jnt_pos, jnt_axis, qpos0, body_ipos, body_iquat, geom_pos, geom_quat
 comptime BPOS = 0
 comptime BQUAT = 3 * NB
@@ -174,8 +176,8 @@ comptime FLF = NFL1  # fluid floats: density, viscosity, wind 3, then per ellips
 comptime TNF = FLF + (5 + 15 * NFLROW if NFLUID else 0)  # tendon floats: wrap coefs, then stiffness, damping, lengthspring 2 per tendon
 comptime CSPF = TNF + NWRAP + 4 * NTEN
 comptime NFL2 = CSPF + (11 * NWRAP if SPATIAL else 0)
-comptime CCV = NFL2  # NCV: opt.ccd_tolerance, heightfield size 0-3 and origin z (HFEXACT), then per pair geom1's size (3)
-comptime CEQF = NFL2 + (6 + 3 * NCP if NCV > 0 else 0)  # per equality: anchors 0 and 1, quaternions 0 and 1, torquescale, solref, solimp, invweight 2, joint data 5, qpos0 2
+comptime CCV = NFL2  # NCV: opt.ccd_tolerance, heightfield size 0-3 and origin z (HFEXACT), then per pair geom1's size (3), then per pair geom2's size (3)
+comptime CEQF = NFL2 + (6 + 6 * NCP if NCV > 0 else 0)  # per equality: anchors 0 and 1, quaternions 0 and 1, torquescale, solref, solimp, invweight 2, joint data 5, qpos0 2
 comptime CGF = CEQF + EQF * NEQ
 comptime GAME = get_defined_int["GAME", 0]() == 1 and STAGE >= 7  # game layer per step (docs/plans/GAME_LAYER.md): energy, health, stamina, dead
 comptime SLEEP = get_defined_int["SLEEP", 0]() == 1  # mj_sleep (model.py sleep_block): opt.sleep_tolerance, then dof_length per dof (the velocity weights)
@@ -1255,7 +1257,14 @@ def emit_contact(mi: TI, mf: TF, qvel: TV, res: TO, f: Int, p: Int, count: Int, 
     var pf = CPF + 14 * p
     var margin = mf[pf]; var gap = mf[pf + 1]; var f0 = mf[pf + 2]; var f1 = mf[pf + 3]
     var slot = sbase(mi, res, f, p) + count
+    var imargin = margin  # MuJoCo 3.9 mj_collideGeoms: the narrowphase sees margin + gap, the row (includemargin) is the margin itself
+    if dist >= imargin:  # mj_setContact (engine_collision_driver.c:1780): a contact in the gap band carries no row
+        res[(OVALID + slot) * F + f] = 0
+        return
     res[(OVALID + slot) * F + f] = Float32(p + 1) if ELL else Float32(1)  # elliptic: the pair index + 1, for the cone's mu and friction
+    var frictionless = False  # condim 1 (mjCNSTR_CONTACT_FRICTIONLESS): one normal row, the pyramid's other three rows empty
+    comptime if NCV > 0:
+        frictionless = mi[CCND + p] == 1
     # mj_jacDifPair over the chain: jacp = cdof_lin + cdof_ang x (pos - subtree_com[root]), signed (geom2's body
     # minus geom1's; a dof of both cancels exactly); rows to the contact frame
     var off = cpos - com
@@ -1270,15 +1279,20 @@ def emit_contact(mi: TI, mf: TF, qvel: TV, res: TO, f: Int, p: Int, count: Int, 
             res[(jadr + nch) * F + f] = j1
             res[(jadr + 2 * nch) * F + f] = j2
         else:
-            res[jadr * F + f] = jn + f0 * j1
-            res[(jadr + nch) * F + f] = jn - f0 * j1
-            res[(jadr + 2 * nch) * F + f] = jn + f1 * j2
-            res[(jadr + 3 * nch) * F + f] = jn - f1 * j2
+            if frictionless:
+                res[jadr * F + f] = jn
+                res[(jadr + nch) * F + f] = 0
+                res[(jadr + 2 * nch) * F + f] = 0
+                res[(jadr + 3 * nch) * F + f] = 0
+            else:
+                res[jadr * F + f] = jn + f0 * j1
+                res[(jadr + nch) * F + f] = jn - f0 * j1
+                res[(jadr + 2 * nch) * F + f] = jn + f1 * j2
+                res[(jadr + 3 * nch) * F + f] = jn - f1 * j2
     # getsolparam, getimpedance, makeImpedance, referenceConstraint
     var ref0 = max(mf[pf + 4], 2 * h); var ref1 = mf[pf + 5]
     var s0 = min(Float32(0.9999), max(Float32(1e-4), mf[pf + 6])); var s1 = min(Float32(0.9999), max(Float32(1e-4), mf[pf + 7]))
     var s2 = max(Float32(0), mf[pf + 8]); var s3 = min(Float32(0.9999), max(Float32(1e-4), mf[pf + 9])); var s4 = max(Float32(1), mf[pf + 10])
-    var imargin = margin - gap
     var imp = impedance(s0, s1, s2, s3, s4, dist - imargin)
     var tran = mf[pf + 11]
     var K = 1 / max(Float32(1e-15), s1 * s1 * ref0 * ref0 * ref1 * ref1)
@@ -1291,12 +1305,17 @@ def emit_contact(mi: TI, mf: TF, qvel: TV, res: TO, f: Int, p: Int, count: Int, 
         res[(OD + 4 * slot + 1) * F + f] = 1 / R1
         res[(OD + 4 * slot + 2) * F + f] = 1 / R2
     else:
-        var R0 = max(Float32(1e-15), (1 - imp) * (tran + f0 * f0 * tran) / imp)
-        var R1 = R0 / max(Float32(1e-15), impratio)
-        var mu = f0 * sqrt(R1 / R0)
-        var D = 1 / (2 * mu * mu * R0)
-        for k in range(4):
-            res[(OD + 4 * slot + k) * F + f] = D
+        if frictionless:  # mj_diagApprox: tran alone; R = (1 - imp) tran / imp
+            res[(OD + 4 * slot) * F + f] = 1 / max(Float32(1e-15), (1 - imp) * tran / imp)
+            for k in range(1, 4):
+                res[(OD + 4 * slot + k) * F + f] = 0
+        else:
+            var R0 = max(Float32(1e-15), (1 - imp) * (tran + f0 * f0 * tran) / imp)
+            var R1 = R0 / max(Float32(1e-15), impratio)
+            var mu = f0 * sqrt(R1 / R0)
+            var D = 1 / (2 * mu * mu * R0)
+            for k in range(4):
+                res[(OD + 4 * slot + k) * F + f] = D
     for k in range(NR):
         var row = 4 * slot + k
         var vel: Float32 = 0
@@ -1305,7 +1324,7 @@ def emit_contact(mi: TI, mf: TF, qvel: TV, res: TO, f: Int, p: Int, count: Int, 
         comptime if ELL:
             res[(OAREF + row) * F + f] = -B * vel - (K * imp * (dist - imargin) if k == 0 else Float32(0))
         else:
-            res[(OAREF + row) * F + f] = -B * vel - K * imp * (dist - imargin)
+            res[(OAREF + row) * F + f] = 0 if frictionless and k > 0 else -B * vel - K * imp * (dist - imargin)
 
 
 
@@ -1403,7 +1422,7 @@ def convex_pair(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int, p: Int, kin
         pos1 = pos1 - origin(mi, qpos, f, b)
     var far = False
     var d12 = pos2 - pos1
-    if kind == 1:
+    if kind == 1 or kind >= 4:
         far = sqrt((d12 * d12).reduce_add()) > rb1 + rb2 + margin
     else:  # distance from the mesh centre to the box (in the box frame), against the mesh's bounding radius
         var r1 = rows3(q1)
@@ -1414,18 +1433,28 @@ def convex_pair(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int, p: Int, kin
     var count = 0
     res[(OSD + 3 * p + 1) * F + f] = 0  # no slots unless the pair takes some below
     if not far:
-        var s1 = Sp(mf.ptr.unsafe_offset(CVERT + 3 * voff), mi.ptr.unsafe_offset(CFIRST + eoff), mi.ptr.unsafe_offset(CEDGE))
-        var s2 = Sp(mf.ptr.unsafe_offset(CVERT + 3 * voff), mi.ptr.unsafe_offset(CFIRST + eoff), mi.ptr.unsafe_offset(CEDGE))
-        s1.kind = BOX if kind == 2 else ELLIPSOID
-        s2.kind = MESH
-        s1.size = m3(mf, CCV + 6 + 3 * p).cast[CT]()
-        s1.pos = pos1.cast[CT]()
-        var a = rows3(q1)
-        s1.r0 = a[0].cast[CT](); s1.r1 = a[1].cast[CT](); s1.r2 = a[2].cast[CT]()
-        s2.pos = pos2.cast[CT]()
-        var c = rows3(q2)
-        s2.r0 = c[0].cast[CT](); s2.r1 = c[1].cast[CT](); s2.r2 = c[2].cast[CT]()
-        var cs = collide(s1, s2, margin.cast[CT](), mf[CCV].cast[CT](), min(rb1, rb2).cast[CT]())
+        var cs = ConSet()
+        if kind >= 5:  # analytic pairs (engine_collision_primitive.c): mjraw_CapsuleCapsule, mjraw_SphereCapsule, mjc_SphereCylinder
+            var a = rows3(q1); var c = rows3(q2)
+            cs = primitive_pair(kind, pos1.cast[CT](), V3(a[0][2], a[1][2], a[2][2], 0).cast[CT](), m3(mf, CCV + 6 + 3 * p).cast[CT](),
+                                pos2.cast[CT](), V3(c[0][2], c[1][2], c[2][2], 0).cast[CT](), m3(mf, CCV + 6 + 3 * NCP + 3 * p).cast[CT](), margin.cast[CT]())
+        else:
+            var s1 = Sp(mf.ptr.unsafe_offset(CVERT + 3 * voff), mi.ptr.unsafe_offset(CFIRST + eoff), mi.ptr.unsafe_offset(CEDGE))
+            var s2 = Sp(mf.ptr.unsafe_offset(CVERT + 3 * voff), mi.ptr.unsafe_offset(CFIRST + eoff), mi.ptr.unsafe_offset(CEDGE))
+            if kind == 4:  # two primitives (sphere, capsule, ellipsoid, cylinder): mjc_Convex with one contact (multiccd off in the gate body)
+                s1.kind = Int(mi[CGT + 2 * p]); s2.kind = Int(mi[CGT + 2 * p + 1])
+                s2.size = m3(mf, CCV + 6 + 3 * NCP + 3 * p).cast[CT]()
+            else:
+                s1.kind = BOX if kind == 2 else ELLIPSOID
+                s2.kind = MESH
+            s1.size = m3(mf, CCV + 6 + 3 * p).cast[CT]()
+            s1.pos = pos1.cast[CT]()
+            var a = rows3(q1)
+            s1.r0 = a[0].cast[CT](); s1.r1 = a[1].cast[CT](); s1.r2 = a[2].cast[CT]()
+            s2.pos = pos2.cast[CT]()
+            var c = rows3(q2)
+            s2.r0 = c[0].cast[CT](); s2.r1 = c[1].cast[CT](); s2.r2 = c[2].cast[CT]()
+            cs = collide(s1, s2, margin.cast[CT](), mf[CCV].cast[CT](), min(rb1, rb2).cast[CT](), kind != 4)
         var com = V3(get(res, f, OSC + 3 * Int(mi[ROOT + b])), get(res, f, OSC + 3 * Int(mi[ROOT + b]) + 1), get(res, f, OSC + 3 * Int(mi[ROOT + b]) + 2), 0)
         var take = pool_alloc(mi, res, f, p, min(cs.n, Int(mi[CPH + 11 * p + 9])))
         while count < take:
@@ -1454,7 +1483,7 @@ def contacts(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int):
         var nvert = Int(mi[CPH + 11 * p + 3]); var voff = Int(mi[CPH + 11 * p + 4]); var eoff = Int(mi[CPH + 11 * p + 5])
         var nch = Int(mi[CPH + 11 * p + 6]); var choff = Int(mi[CPH + 11 * p + 7])
         var pf = CPF + 14 * p
-        var margin = mf[pf]; var gap = mf[pf + 1]; var f0 = mf[pf + 2]; var f1 = mf[pf + 3]
+        var margin = mf[pf] + mf[pf + 1]; var f0 = mf[pf + 2]; var f1 = mf[pf + 3]  # the narrowphase margin is margin + gap (mj_collideGeoms); emit_contact keeps the row within the margin
         var b1 = body(res, f, Int(mi[GBODY + g1]))
         var q1 = mul(b1[1], m4(mf, GQUAT + 4 * g1))
         var pos1 = V3(get(res, f, OG + 3 * g1), get(res, f, OG + 3 * g1 + 1), get(res, f, OG + 3 * g1 + 2), 0)
@@ -2686,6 +2715,9 @@ def noslip(mi: TI, mf: TF, res: TO, f: Int):
         var improvement: Float32 = imp0 if it == 0 else 0
         for ip in range(Int(get(res, f, OPA))):
             var p = Int(get(res, f, OPA + 1 + ip))
+            comptime if NCV > 0:  # a condim-1 pair has no friction rows
+                if mi[CCND + p] == 1:
+                    continue
             var nch = Int(mi[CPH + 11 * p + 6]); var choff = Int(mi[CPH + 11 * p + 7])
             for sl in range(nslot(mi, res, f, p)):
                 if get(res, f, OVALID + sbase(mi, res, f, p) + sl) == 0:
@@ -2730,6 +2762,9 @@ def noslip(mi: TI, mf: TF, res: TO, f: Int):
         res[(OW + v) * F + f] = 0  # M^-1 of it (qacc_smooth + M^-1 J'f cancels ~140x in float32: qacc_smooth >> qacc)
     for ip in range(Int(get(res, f, OPA))):
         var p = Int(get(res, f, OPA + 1 + ip))
+        comptime if NCV > 0:  # a condim-1 pair has no friction rows
+            if mi[CCND + p] == 1:
+                continue
         var nch = Int(mi[CPH + 11 * p + 6]); var choff = Int(mi[CPH + 11 * p + 7])
         for sl in range(nslot(mi, res, f, p)):
             if get(res, f, OVALID + sbase(mi, res, f, p) + sl) == 0:

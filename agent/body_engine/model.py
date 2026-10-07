@@ -53,6 +53,27 @@ STAGES['contact'] = (6, 'mj_step', STAGES['step'][2] + ('ncon', 'qacc', 'qfrc_co
 # or no bias, no activation dynamics), random controls, actuators on.
 STAGES['actuated'] = (7, 'mj_step', STAGES['contact'][2] + ('actuator_force', 'qfrc_actuator'))
 CONVEX_POOL = 48  # box and ellipsoid contacts one animal can hold at once (the fly at a wall: a few parts x 1-5 contacts)
+PRIM_POOL = 96  # primitive-pair contacts one animal can hold at once (the flight model's 842 body-body pairs: 26 per random state, 54 max)
+PRIM = {mujoco.mjtGeom.mjGEOM_SPHERE, mujoco.mjtGeom.mjGEOM_CAPSULE, mujoco.mjtGeom.mjGEOM_ELLIPSOID, mujoco.mjtGeom.mjGEOM_CYLINDER}  # primitive pairs (convex.mojo kinds 4-7)
+SHAPE_KIND = {mujoco.mjtGeom.mjGEOM_ELLIPSOID: 0, mujoco.mjtGeom.mjGEOM_MESH: 1, mujoco.mjtGeom.mjGEOM_BOX: 2, mujoco.mjtGeom.mjGEOM_SPHERE: 4,
+              mujoco.mjtGeom.mjGEOM_CAPSULE: 5, mujoco.mjtGeom.mjGEOM_CYLINDER: 6}  # convex.mojo shape kinds
+
+
+def pair_geoms(m, i):
+    """Explicit pair i's geoms in mj_collideGeoms' order (geom1 the lower type; the compiler keeps the pair element's own order), the
+    order every contact of the pair and the engine's pair table use (normal from geom1 to geom2, the Jacobian signed geom2 minus geom1)."""
+    g1, g2 = int(m.pair_geom1[i]), int(m.pair_geom2[i])
+    return (g1, g2) if m.geom_type[g1] <= m.geom_type[g2] else (g2, g1)
+
+
+def prim_pair(m, i):
+    """The convex.mojo kind of explicit pair i when both geoms are primitives (geom1 the lower type, as mj_collideGeoms orders them):
+    5 capsule-capsule, 6 sphere-capsule, 7 sphere-cylinder (analytic), 4 the rest (GJK + EPA); 0 otherwise (sphere-sphere has its own path)."""
+    G = mujoco.mjtGeom
+    t1, t2 = (G(m.geom_type[g]) for g in pair_geoms(m, i))
+    if t1 not in PRIM or t2 not in PRIM or (t1 == t2 == G.mjGEOM_SPHERE):
+        return 0
+    return {(G.mjGEOM_CAPSULE, G.mjGEOM_CAPSULE): 5, (G.mjGEOM_SPHERE, G.mjGEOM_CAPSULE): 6, (G.mjGEOM_SPHERE, G.mjGEOM_CYLINDER): 7}.get((t1, t2), 4)
 HF_POOL = 192  # exact heightfield contacts one animal can hold at once (bumpy terrain: ~80 on average, 55 pairs x up to 16)
 HF_SLOTS = 16  # contacts kept per heightfield pair with exact heightfield contact (check.sh terrain_exact reports MuJoCo's maximum)
 STAGES['sptendon_act'] = (7, 'mj_step', STAGES['actuated'][2] + ('ten_length', 'ten_velocity', 'ten_J'))  # the actuated path on spatial tendons (tendon servo, tendon passive)
@@ -338,7 +359,7 @@ def load(mjcf):
         if not (m.jnt_type[m.dof_jntid[d]] == mujoco.mjtJoint.mjJNT_FREE and m.tree_dofnum[m.dof_treeid[d]] == 6 and m.body_subtreemass[b] == m.body_mass[b]):
             raise SystemExit('FAIL export: simple dofs other than a standalone free body are not ported')
     if (m.nflex or m.opt.integrator not in INTEGRATORS or m.opt.solver not in SOLVERS or m.actuator_damping.any()
-            or m.dof_dampingpoly.any() or m.jnt_stiffnesspoly.any() or m.opt.disableflags):
+            or m.dof_dampingpoly.any() or m.jnt_stiffnesspoly.any() or m.opt.disableflags & ~int(mujoco.mjtDisableBit.mjDSBL_MULTICCD)):  # multiccd off only changes contact counts (with_auto_pairs)
         raise SystemExit('FAIL export: only Euler/implicitfast, linear joint springs and dof dampers are ported (no flex, '
                          'actuator damping, polynomial springs or dampers, disable flags)')
     if m.opt.cone == mujoco.mjtCone.mjCONE_ELLIPTIC and m.opt.integrator != mujoco.mjtIntegrator.mjINT_EULER:
@@ -434,9 +455,11 @@ def pairs(m, regex, convex=False):
     G = mujoco.mjtGeom
     ported = {(G.mjGEOM_PLANE, G.mjGEOM_MESH), (G.mjGEOM_HFIELD, G.mjGEOM_MESH), (G.mjGEOM_SPHERE, G.mjGEOM_SPHERE)}
     if convex:
-        ported |= {(G.mjGEOM_BOX, G.mjGEOM_MESH), (G.mjGEOM_ELLIPSOID, G.mjGEOM_MESH)}
-    kind = lambda i: (G(m.geom_type[m.pair_geom1[i]]), G(m.geom_type[m.pair_geom2[i]]))
-    sel = [i for i in range(m.npair) if re.search(regex, mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_GEOM, m.pair_geom2[i]))]
+        ported |= {(G.mjGEOM_BOX, G.mjGEOM_MESH), (G.mjGEOM_ELLIPSOID, G.mjGEOM_MESH)} | {(a, b) for a in PRIM for b in PRIM if int(a) <= int(b)}
+    kind = lambda i: tuple(G(m.geom_type[g]) for g in pair_geoms(m, i))
+    if os.environ.get('KINDS'):  # diagnostics: export only these pair kinds, e.g. KINDS=capsule-cylinder,sphere-capsule
+        ported = {k for k in ported if '-'.join(g.name[7:].lower() for g in k) in os.environ['KINDS'].split(',')}
+    sel = [i for i in range(m.npair) if re.search(regex, mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_GEOM, pair_geoms(m, i)[1]))]
     return [i for i in sel if kind(i) in ported], Counter('-'.join(g.name[7:].lower() for g in kind(i)) for i in sel if kind(i) not in ported)
 
 
@@ -489,8 +512,10 @@ def feet(m, regex, couple=(), hrows=None, convex=False, hfexact=False):
     sel, drop = pairs(m, regex, convex)
     if drop:
         print(f'export: {sum(drop.values())} pairs of unported kinds NOT exported: {dict(drop)}')
-    if any(m.pair_dim[i] != 3 or m.pair_solimp[i][4] != int(m.pair_solimp[i][4]) for i in sel):
-        raise SystemExit('FAIL export: only condim 3 contacts with a whole solimp power are ported')
+    if any(m.pair_dim[i] not in (1, 3) or m.pair_solimp[i][4] != int(m.pair_solimp[i][4]) for i in sel):
+        raise SystemExit('FAIL export: only condim 1 and 3 contacts with a whole solimp power are ported')
+    if not convex and any(m.pair_dim[i] == 1 for i in sel):
+        raise SystemExit('FAIL export: condim 1 pairs ride the convex block (CONVEX=1, check.sh flight_contacts)')
 
     def anc(b):
         c = set()
@@ -498,17 +523,17 @@ def feet(m, regex, couple=(), hrows=None, convex=False, hfexact=False):
             c |= set(range(m.body_dofadr[b], m.body_dofadr[b] + m.body_dofnum[b]))
             b = m.body_parentid[b]
         return c
-    two = [(anc(m.geom_bodyid[m.pair_geom1[i]]), anc(m.geom_bodyid[m.pair_geom2[i]])) for i in sel]
-    if any(m.body_rootid[m.geom_bodyid[m.pair_geom1[i]]] not in (0, m.body_rootid[m.geom_bodyid[m.pair_geom2[i]]]) for i in sel):
+    two = [(anc(m.geom_bodyid[pair_geoms(m, i)[0]]), anc(m.geom_bodyid[pair_geoms(m, i)[1]])) for i in sel]
+    if any(m.body_rootid[m.geom_bodyid[pair_geoms(m, i)[0]]] not in (0, m.body_rootid[m.geom_bodyid[pair_geoms(m, i)[1]]]) for i in sel):
         raise SystemExit('FAIL export: a pair across two animals (Jacobian about one root only)')
     hrow = hpattern(m, [a ^ b for a, b in two] + list(couple))
     if hrows is not None:
         hrows.append(hrow)
     head, first, edges, chains, signs, fl, verts, hulls = [], [], [], [], [], [], [], {}
     nslot = nje = poolch = 0
-    pool = [0, 0]  # per kind (convex, exact heightfield): slots its pairs could take in one step
+    pool = [0, 0, 0]  # per kind (convex, exact heightfield, primitive pairs): slots its pairs could take in one step
     for i, (a1, a2) in zip(sel, two):
-        g1, g2 = m.pair_geom1[i], m.pair_geom2[i]
+        g1, g2 = pair_geoms(m, i)
         b = m.geom_bodyid[g2]
         chain = hrow[max(a1 ^ a2)]
         nv = 0
@@ -525,14 +550,17 @@ def feet(m, regex, couple=(), hrows=None, convex=False, hfexact=False):
                 first += list(len(edges) + edgeadr)
                 edges += list(local)
                 verts += list(m.mesh_vert[m.mesh_vertadr[mesh] + gid].ravel())
+        prim = prim_pair(m, i) if convex else 0
         ns = (5 if m.geom_type[g1] == mujoco.mjtGeom.mjGEOM_BOX else 1) if m.geom_type[g1] in (mujoco.mjtGeom.mjGEOM_BOX, mujoco.mjtGeom.mjGEOM_ELLIPSOID) else (3 if nv else 1)
+        if prim:
+            ns = 2 if prim == 5 else 1  # mj_maxContact: capsule-capsule 2 (both ends when parallel), one otherwise (multiccd off)
         if hfexact and m.geom_type[g1] == mujoco.mjtGeom.mjGEOM_HFIELD:
             ns = HF_SLOTS  # one contact per cell-triangle prism under the mesh (MuJoCo keeps up to 50)
         G = mujoco.mjtGeom
-        pooled = (convex and m.geom_type[g1] in (G.mjGEOM_BOX, G.mjGEOM_ELLIPSOID)) or (hfexact and m.geom_type[g1] == G.mjGEOM_HFIELD)
+        pooled = (convex and m.geom_type[g1] in (G.mjGEOM_BOX, G.mjGEOM_ELLIPSOID) and m.geom_type[g2] == G.mjGEOM_MESH) or (hfexact and m.geom_type[g1] == G.mjGEOM_HFIELD) or bool(prim)
         if pooled:  # convex.mojo pairs take slots from the animal's pool each step: no static slots, the record's ns is the cap
             head += [g1, g2, b, nv, *(hulls[m.geom_dataid[g2]] if nv else (0, 0)), len(chain), len(chains), 0, ns, 0]
-            pool[m.geom_type[g1] == G.mjGEOM_HFIELD] += ns
+            pool[2 if prim else m.geom_type[g1] == G.mjGEOM_HFIELD] += ns
             poolch = max(poolch, len(chain))
         else:
             head += [g1, g2, b, nv, *(hulls[m.geom_dataid[g2]] if nv else (0, 0)), len(chain), len(chains), nslot, ns, nje]
@@ -547,7 +575,7 @@ def feet(m, regex, couple=(), hrows=None, convex=False, hfexact=False):
     mtoh = [hadr[v] + hrow[v].index(m.M_colind[a]) for v in range(m.nv) for a in range(m.M_rowadr[v], m.M_rowadr[v] + m.M_rownnz[v])]
     ints = np.array(head + first + edges + chains + signs + hadr + hnnz + hcol + mtoh + [m.opt.iterations, m.opt.ls_iterations, m.opt.noslip_iterations])
     floats = fl + verts + [m.opt.impratio, m.opt.tolerance, m.opt.ls_tolerance, m.opt.noslip_tolerance, m.stat.meaninertia]
-    npool = min(pool[0], CONVEX_POOL) + min(pool[1], HF_POOL)  # the pool is shared per animal; pairs beyond it drop contacts (the gates' ncon shows it)
+    npool = min(pool[0], CONVEX_POOL) + min(pool[1], HF_POOL) + min(pool[2], PRIM_POOL)  # the pool is shared per animal; pairs beyond it drop contacts (the gates' ncon shows it)
     jpool = npool * 4 * poolch
     sizes = {'NCP': len(sel), 'NHV': len(verts) // 3, 'NHE': len(edges), 'NCH': len(chains), 'NH': len(hcol), 'NSLOT': nslot + npool, 'NJE': nje + jpool}
     if npool:
@@ -765,6 +793,37 @@ def auto_pairs(m):
     return out
 
 
+def centre_inside(m, d, c):
+    """A contact where one geom's centre lies inside the other primitive geom: the penetration direction is tolerance-arbitrary (EPA stops on
+    any of many equally deep faces, so MuJoCo, the CPU build and the card disagree at 1e-2); such states are rejected from a contact gate."""
+    G = mujoco.mjtGeom
+    for a, b in ((c.geom1, c.geom2), (c.geom2, c.geom1)):
+        p = d.geom_xmat[b].reshape(3, 3).T @ (d.geom_xpos[a] - d.geom_xpos[b])
+        sz, ty = m.geom_size[b], m.geom_type[b]
+        if ((ty == G.mjGEOM_SPHERE and np.linalg.norm(p) < sz[0]) or (ty == G.mjGEOM_ELLIPSOID and ((p / sz) ** 2).sum() < 1)
+                or (ty == G.mjGEOM_CAPSULE and np.linalg.norm(p - np.array([0, 0, np.clip(p[2], -sz[1], sz[1])])) < sz[0])
+                or (ty == G.mjGEOM_CYLINDER and abs(p[2]) < sz[1] and np.hypot(p[0], p[1]) < sz[0])):
+            return True
+    return False
+
+
+def reject_degenerate(m, q, v, count):
+    """The first `count` of the candidate states (q, v) whose contacts have no centre inside the other geom (centre_inside), MuJoCo's
+    contacts deciding; prints how many were rejected. For the flight twin's random and near-rest draws (check.sh flight_contacts)."""
+    d, keep = mujoco.MjData(m), []
+    for n in range(len(q)):
+        d.qpos[:], d.qvel[:] = q[n], v[n]
+        mujoco.mj_forward(m, d)
+        if not any(centre_inside(m, d, c) for c in d.contact[:d.ncon]):
+            keep.append(n)
+        if len(keep) == count:
+            break
+    if len(keep) < count:
+        raise SystemExit(f'FAIL states: only {len(keep)} of {len(q)} candidates without a degenerate overlap, {count} needed')
+    print(f'states: {keep[-1] + 1 - count} of {keep[-1] + 1} candidates rejected for a degenerate overlap (a geom centre inside the other geom)')
+    return q[keep], v[keep]
+
+
 def with_auto_pairs(mjcf, out, cone='pyramidal', explicit=True):
     """mjcf with its automatic contact pairs written as explicit <pair> elements and every geom's contype/conaffinity zeroed (MuJoCo then
     collides exactly these pairs: auto_pairs), the cone set; mesh paths made absolute; written to `out`; returns the path. The flight
@@ -784,6 +843,7 @@ def with_auto_pairs(mjcf, out, cone='pyramidal', explicit=True):
         for g in spec.geoms:
             g.contype = g.conaffinity = 0
     spec.option.cone = getattr(mujoco.mjtCone, 'mjCONE_' + cone.upper())
+    spec.option.disableflags |= int(mujoco.mjtDisableBit.mjDSBL_MULTICCD)  # one contact per capsule/cylinder pair (EPA multicontact is not ported)
     Path(out).parent.mkdir(parents=True, exist_ok=True)
     Path(out).write_text(spec.to_xml())
     return str(out)
@@ -978,8 +1038,12 @@ def convex_block(m, regex, convex=True, hfexact=False):
     None without convex or exact heightfield pairs."""
     G = mujoco.mjtGeom
     sel, _ = pairs(m, regex, convex)
-    kind = [{G.mjGEOM_ELLIPSOID: 1, G.mjGEOM_BOX: 2}.get(m.geom_type[m.pair_geom1[i]], 0) if convex else 0 for i in sel]
-    hf = [i for i in sel if m.geom_type[m.pair_geom1[i]] == G.mjGEOM_HFIELD] if hfexact else []
+    kind = [(prim_pair(m, i) or {G.mjGEOM_ELLIPSOID: 1, G.mjGEOM_BOX: 2}.get(m.geom_type[pair_geoms(m, i)[0]], 0) if m.geom_type[pair_geoms(m, i)[1]] == G.mjGEOM_MESH else prim_pair(m, i)) if convex else 0 for i in sel]
+    if any(m.pair_dim[i] not in (1, 3) for i in sel):
+        raise SystemExit('FAIL export: pair condim 4 and 6 are not ported (1 and 3 are)')
+    if m.opt.cone == mujoco.mjtCone.mjCONE_ELLIPTIC and any(m.pair_dim[i] == 1 for i in sel):
+        raise SystemExit('FAIL export: condim 1 pairs are gated with the pyramidal cone only (check.sh flight_contacts)')
+    hf = [i for i in sel if m.geom_type[pair_geoms(m, i)[0]] == G.mjGEOM_HFIELD] if hfexact else []
     for i in hf:
         kind[sel.index(i)] = 3
     if not any(kind):
@@ -992,8 +1056,10 @@ def convex_block(m, regex, convex=True, hfexact=False):
             raise SystemExit('FAIL export: exact heightfield needs the hfield geom unrotated and centred at x = y = 0')
         head = [m.opt.ccd_tolerance, *m.hfield_size[h], m.geom_pos[g][2]]
         sizes |= {'HFEXACT': 1, 'HFNR': int(m.hfield_nrow[h]), 'HFNC': int(m.hfield_ncol[h]), 'HF_SLOTS': HF_SLOTS}
-    size = [m.geom_size[m.pair_geom1[i]] if k in (1, 2) else np.zeros(3) for i, k in zip(sel, kind)]
-    return np.array(kind), np.concatenate([head, *size]), sizes
+    size = [m.geom_size[pair_geoms(m, i)[0]] if k in (1, 2, 4, 5, 6, 7) else np.zeros(3) for i, k in zip(sel, kind)]
+    size2 = [m.geom_size[pair_geoms(m, i)[1]] if k in (4, 5, 6, 7) else np.zeros(3) for i, k in zip(sel, kind)]
+    shapes = [tuple(SHAPE_KIND.get(G(m.geom_type[g]), 0) for g in pair_geoms(m, i)) for i in sel]
+    return np.array(kind + [c for ab in shapes for c in ab] + [int(m.pair_dim[i]) for i in sel]), np.concatenate([head, *size, *size2]), sizes
 
 
 def meshes(mjcf, out, grid=0, world=None):
@@ -1160,9 +1226,12 @@ def check(mjcf, out, stage, count=64, k=0, oracle=None):
     m, out = export(mjcf, out, FEET if feet else None, stage in ('actuated', 'sptendon_act'), convex, hfexact), Path(out)
     number, fn, fields = STAGES[stage]
     ref = reference if m.opt.solver == mujoco.mjtSolver.mjSOL_NEWTON else reference_fresh  # see reference_fresh
-    near = stage in ('equality', 'mocap', 'tendon_limit') and os.environ.get('EQSPREAD') != 'far'
+    near = (stage in ('equality', 'mocap', 'tendon_limit') and os.environ.get('EQSPREAD') != 'far') or bool(os.environ.get('NEAR_STATES'))  # NEAR_STATES=1: nearby() poses for any stage (flight contacts at rest)
     far = not near
-    q, v = nearby(m, count) if near else standing(load(oracle) if oracle else m, count) if feet else (states(m, count), velocities(m, count, scale=VSCALE))
+    q, v = nearby(m, count) if near else standing(load(oracle) if oracle else m, count) if feet and not os.environ.get('RANDOM_STATES') else (states(m, count), velocities(m, count, scale=VSCALE))  # RANDOM_STATES=1: a contact body that flies (check.sh flight_contacts)
+    if feet and (os.environ.get('RANDOM_STATES') or os.environ.get('NEAR_STATES')):  # a body-body contact gate: no state with a degenerate overlap (reject_degenerate)
+        q4, v4 = nearby(m, 4 * count) if near else (states(m, 4 * count), velocities(m, 4 * count, scale=VSCALE))
+        q, v = reject_degenerate(m, q4, v4, count)
     if (convex and not os.environ.get('STONES')) or os.environ.get('ARENA_STATES'):  # STONES: the model already carries its stones (model.stones), the standing rollout meets them; ARENA_STATES: the same states without the convex pairs (isolates what the pairs add)
         q, v = arena(m, q, v)
     if os.environ.get('STATES'):  # saved states instead (e.g. grooming poses: legs on the head, .work/.../groom_states.npz)
@@ -1330,6 +1399,12 @@ def check(mjcf, out, stage, count=64, k=0, oracle=None):
         for f, g in zip(fields, got):
             e = np.abs(g - want[f].reshape(count, -1)).max(1) / max(np.abs(want[f]).max(), 1e-30)
             print(f'  DIAG {f} K={k}: median {np.median(e):.1e}, worst states ' + ', '.join(f'{n} {e[n]:.1e} (convex {nconv[n]}{", chaotic" if unst[n] else ""})' for n in np.argsort(-e)[:6]))
+            if f in ('qacc', 'qfrc_constraint'):  # the worst state's worst entries (dof index, engine, MuJoCo)
+                n = int(np.argmax(e)); w = want[f].reshape(count, -1)[n]; dd = np.abs(g[n] - w)
+                print(f'  DIAG {f} state {n} worst dofs: ' + ', '.join(f'{j} ({g[n][j]:.4g} vs {w[j]:.4g})' for j in np.argsort(-dd)[:6]))
+        if 'ncon' in fields:
+            i = fields.index('ncon'); off = [(n, int(want['ncon'].reshape(count)[n]), int(got[i][n, 0])) for n in range(count) if int(got[i][n, 0]) != int(want['ncon'].reshape(count)[n])]
+            print(f'  DIAG ncon mismatches {len(off)}/{count} (state, MuJoCo, engine): {off[:10]}')
     bad = []
     if k and 'unstable' in locals():
         print(f"{'PASS' if unstable.mean() <= 0.5 else 'FAIL'} chaotic states dropped {int(unstable.sum())}/{count} (MuJoCo itself moves by more than the bar over {k} steps under a 1e-6 relative start perturbation; at most half)")
