@@ -29,7 +29,11 @@ E1 fixation: 200 targets anywhere: body turn then saccade; fovea reaches the tar
    deg on a +-2.5 deg retina, so the target fell off at each sweep end; now +-2 deg, and E3's
    sweep threshold scaled from 4 to 3 deg after seeing that failure.
 E2 tracking: 100 targets moving 10-40 deg/s inside the tube range: median foveal error < 1 deg;
-   receptor positions shuffled must exceed 2 deg.
+   receptor positions shuffled must exceed 2 deg. Redesign 2026-10-07 (registered before its run,
+   bars unchanged): the retina re-placed the eye on the target every step and error was scored
+   one step early (gaze aims at t + DT), so intact read |v| x DT. Now the retinal position is
+   sampled every KC = 10 steps while tracking, pursuit velocity alone moves the eye between
+   samples, and error is |gaze - target| at the time the command applies.
 E3 modes: still target -> gaze sweeps >= 3 deg peak-to-peak across it with fovea crossing it;
    no target -> gaze never settles in scan or track mode.
 """
@@ -40,7 +44,7 @@ import numpy as np
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent))
 from spider_vision_test import EYES, build, respond, wrap  # noqa: E402
 
-DT, TUBE, SACC, SCAN_AMP, SCAN_HZ = 0.01, 29.0, 400.0, 2.0, 1.0
+DT, TUBE, SACC, SCAN_AMP, SCAN_HZ, KC = 0.01, 29.0, 400.0, 2.0, 1.0, 10
 BEARING_SD = 3.5  # secondary-eye bearing noise: spider_vision_test V1 measured 3.5 deg turn error
 N_REC, N_FOV, WIN, FOV = 1200, 200, 5.0, 1.0
 
@@ -52,24 +56,30 @@ def retina(rng, shuffle=False):
     return (pos, rng.permutation(pos)) if shuffle else (pos, pos)  # (true place, wiring the brain assumes)
 
 
-def sense(rec, gaze, target):
+def sense(rec, gaze, target, r):
+    """Response-weighted wired offset of the target; r is a preallocated receptor buffer."""
     true, wired = rec
     off = target - gaze
     if abs(off) > WIN / 2: return None
-    r = np.exp(-0.5 * ((true - off) / 0.15) ** 2)
-    return float((r * wired).sum() / r.sum()) if r.sum() > 1e-6 else None
+    np.subtract(true, off, out=r); r /= 0.15; np.square(r, out=r); r *= -0.5; np.exp(r, out=r)
+    total = r.sum()
+    return float(r @ wired / total) if total > 1e-6 else None
 
 
-def run(rec, target_fn, bearing_fn=None, steps=300, masked=False, rng=None):
-    """bearing_fn: target bearing reported by the secondary eyes each step (None = nothing seen)."""
-    gaze, prev_est, vel, phase, centre = 0.0, None, 0.0, 0.0, 0.0
-    modes, gazes = [], []
+def run(rec, target_fn, bearing_fn=None, steps=300, masked=False, rng=None, every=1):
+    """bearing_fn: target bearing reported by the secondary eyes each step (None = nothing seen).
+    every: retinal position sample period in steps while tracking; pursuit alone moves the eye between."""
+    gaze, prev_est, prev_t, vel, phase, centre = 0.0, None, 0.0, 0.0, 0.0, 0.0
+    modes, gazes, r = [], [], np.empty(N_REC)
     for k in range(steps):
+        if k % every and modes[-1:] == ["track"]:
+            gaze = float(np.clip(gaze + vel * DT, -TUBE, TUBE)); modes.append("track"); gazes.append(gaze)
+            continue
         tgt = target_fn(k * DT)
-        err = None if masked or tgt is None else sense(rec, gaze, tgt)
+        err = None if masked or tgt is None else sense(rec, gaze, tgt, r)
         est = None if err is None else gaze + err          # target position, eye movement cancelled
         if est is not None and prev_est is not None:
-            vel = 0.7 * vel + 0.3 * (est - prev_est) / DT
+            vel = 0.7 * vel + 0.3 * (est - prev_est) / (k * DT - prev_t)
         bearing = bearing_fn(k * DT) if bearing_fn else None
         if est is None and bearing is not None and not masked:
             mode = "saccade"; gaze += np.clip(bearing - gaze, -SACC * DT, SACC * DT); vel = 0.0
@@ -83,7 +93,7 @@ def run(rec, target_fn, bearing_fn=None, steps=300, masked=False, rng=None):
         else:
             mode = "drift"; gaze += rng.normal(0, 0.05) if rng is not None else 0.0
         gaze = float(np.clip(gaze, -TUBE, TUBE))
-        prev_est = est; modes.append(mode); gazes.append(gaze)
+        prev_est, prev_t = est, k * DT; modes.append(mode); gazes.append(gaze)
     return np.array(gazes), modes
 
 
@@ -117,11 +127,11 @@ def main():
         v = rng.uniform(10, 40) * rng.choice([-1, 1]); x0 = rng.uniform(-20, 20) - v * 0.5
         fn = lambda s, v=v, x0=x0: float(np.clip(x0 + v * s, -TUBE + 1, TUBE - 1))
         for r, acc in ((rec, e_ok), (bad, e_bad)):
-            g, _ = run(r, fn, bearing_fn=coarse(fn, rng), steps=100)
-            acc.append(np.median([abs(g[i] - fn(i * DT)) for i in range(30, 100)]))
+            g, _ = run(r, fn, bearing_fn=coarse(fn, rng), steps=100, every=KC)
+            acc.append(np.median([abs(g[i] - fn((i + 1) * DT)) for i in range(30, 100)]))
     m2, m2b = np.median(e_ok), np.median(e_bad)
     ok2 = m2 < 1 and m2b > 2
-    print(f"E2 tracking 10-40 deg/s: median foveal error {m2:.2f} deg vs shuffled retina {m2b:.2f} deg "
+    print(f"E2 tracking 10-40 deg/s, position every {KC} steps: median foveal error {m2:.2f} deg vs shuffled retina {m2b:.2f} deg "
           f"-> {'PASS' if ok2 else 'FAIL'}")
 
     g, modes = run(rec, lambda s: 8.0, bearing_fn=coarse(lambda s: 8.0, rng), steps=300)
