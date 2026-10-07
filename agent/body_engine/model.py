@@ -737,8 +737,27 @@ def implicit_block(m):
         while a > 0:
             anc[n] += m.body_dofnum[a]
             a = m.body_weldid[m.body_parentid[a]]
-    ints = np.concatenate([m.B_rownnz, m.B_rowadr, anc, m.B_colind, m.D_rowadr, m.D_diag, m.D_rownnz, m.D_colind, m.mapM2D])
+    ints = np.concatenate([m.B_rownnz, m.B_rowadr, anc, m.B_colind, m.D_rowadr, m.D_diag, m.D_rownnz, m.D_colind, m.mapM2D,
+                           pair_table(m.nv, m.D_rowadr, m.D_rownnz, m.D_colind)])
     return ints, np.zeros(0), {'NBB': m.nB, 'NDD': m.nD}
+
+
+def pair_table(nv, rowadr, rownnz, colind):
+    """(k, p) -> entry of a dof-dof sparse matrix in row k at column p, -1 if the pattern lacks it: nv x nv int32, so the velocity-derivative
+    blocks (tendon damping, fluid) land on their entries with one load instead of a scan of row k per dof pair (the scan was most of
+    50 ms per launch on the flight model's 130 fluid bodies)."""
+    t = -np.ones((nv, nv), np.int32)
+    for k in range(nv):
+        for c in range(rownnz[k]):
+            t[k, colind[rowadr[k] + c]] = rowadr[k] + c
+    return t.ravel()
+
+
+def mpair_block(m):
+    """implicitfast only, last block: pair_table of M's lower pattern (M_rowadr, M_rownnz, M_colind), the target of qH's velocity-derivative blocks."""
+    if m.opt.integrator != mujoco.mjtIntegrator.mjINT_IMPLICITFAST:
+        return None
+    return pair_table(m.nv, m.M_rowadr, m.M_rownnz, m.M_colind), np.zeros(0), {'MPAIR': 1}
 
 
 def mid_block(m):
@@ -794,7 +813,7 @@ def export(mjcf, out, regex=None, act=False, convex=False, hfexact=False):
     if eq:  # after the other lanes' blocks too: a model without equalities keeps its bytes
         block = eq_block(m, eq, hr[0])
         ints, floats, sizes = ints + [block[0]], floats + [block[1]], sizes | block[2]
-    for block in (mocap_block(m), gravcomp_block(m), implicit_block(m), mid_block(m)):  # after the equality block, in Mojo's order: CMOC follows CEQM, CGC follows CMOC, CIMP follows CGC, CMID follows the implicit block
+    for block in (mocap_block(m), gravcomp_block(m), implicit_block(m), mid_block(m), mpair_block(m)):  # after the equality block, in Mojo's order: CMOC follows CEQM, CGC follows CMOC, CIMP follows CGC, CMID follows the implicit block
         if block:
             ints, floats, sizes = ints + [block[0]], floats + [block[1]], sizes | block[2]
     np.concatenate(ints).astype(np.int32).tofile(out / 'mi.bin')

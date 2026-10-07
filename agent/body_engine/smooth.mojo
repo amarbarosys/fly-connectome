@@ -134,10 +134,12 @@ comptime DDG = DRA + NV
 comptime DRN = DDG + NV
 comptime DCOL = DRN + NV
 comptime M2D = DCOL + NDD
+comptime DPAIR = M2D + NDD  # (k, p) -> D entry or -1 (model.py pair_table), NV x NV
 # implicit midpoint of standalone free bodies (model.py mid_block, implicitfast, after the implicit block): per candidate body, dof address, aligned (ipos = 0)
 comptime NMID = get_defined_int["NMID", 0]()
-comptime CMID = M2D + NDD if IMPL else CIMP
-comptime NI = CMID + 3 * NMID
+comptime CMID = DPAIR + NV * NV if IMPL else CIMP
+comptime MPAIR = CMID + 3 * NMID  # implicitfast (model.py mpair_block): (k, p) -> M lower entry or -1, NV x NV
+comptime NI = MPAIR + (NV * NV if get_defined_int["MPAIR", 0]() == 1 else 0)
 comptime CKIND = NI2
 # mf.bin: body_pos, body_quat, jnt_pos, jnt_axis, qpos0, body_ipos, body_iquat, geom_pos, geom_quat
 comptime BPOS = 0
@@ -2787,7 +2789,7 @@ def jtbj(mi: TI, res: TO, f: Int, b: Int, p: V3, q: Q4, B: B66, h: Float32, diag
     pattern are dropped, as MuJoCo's sparse add drops them; on a tree every pair of chain dofs is in D. diag: B is diagonal (the
     inertia boxes, 130 of the flight model's 132 fluid bodies), 6 products per pair instead of 36. The chain's J columns are built
     once into the fluid wrench rows (OFLW, free once fluid() has folded them into qfrc_passive): rebuilding them per pair and the
-    36-term product cost 88 of 95 ms per launch on 64 flight animals."""
+    36-term product cost 88 of 95 ms per launch on 64 flight animals; the row scan for the (k, p) entry most of the next 43 (DPAIR / MPAIR tables)."""
     var r = Int(mi[ROOT + b])
     var dif = p - V3(get(res, f, OSC + 3 * r), get(res, f, OSC + 3 * r + 1), get(res, f, OSC + 3 * r + 2), 0)
     var qi = Q4(q[0], -q[1], -q[2], -q[3])
@@ -2815,15 +2817,13 @@ def jtbj(mi: TI, res: TO, f: Int, b: Int, p: V3, q: Q4, B: B66, h: Float32, diag
                         u += B[i * 6 + j] * jp[j]
                     val += jk[i] * u
             comptime if IMPL:
-                for c in range(Int(mi[DRN + k])):
-                    var e = Int(mi[DRA + k]) + c
-                    if Int(mi[DCOL + e]) == pp:
-                        res[(OQLU + e) * F + f] -= h * val
+                var e = Int(mi[DPAIR + k * NV + pp])
+                if e >= 0:
+                    res[(OQLU + e) * F + f] -= h * val
             else:
-                for c in range(Int(mi[MNNZ + k])):
-                    var e = Int(mi[MADR + k]) + c
-                    if Int(mi[MCOL + e]) == pp:
-                        res[(OQH + e) * F + f] -= h * val
+                var e = Int(mi[MPAIR + k * NV + pp])
+                if e >= 0:
+                    res[(OQH + e) * F + f] -= h * val
 
 
 def ellipsoid_deriv(mi: TI, mf: TF, res: TO, f: Int, row: Int, h: Float32, sym: Bool):
@@ -3005,9 +3005,10 @@ def implicit_factor(mi: TI, mf: TF, qvel: TV, res: TO, f: Int):
             var jk = ten_j(mi, mf, res, f, t, k)
             if jk == 0:
                 continue
-            for c in range(Int(mi[DRN + k])):
-                var e = Int(mi[DRA + k]) + c
-                res[(OQLU + e) * F + f] += h * damp * jk * ten_j(mi, mf, res, f, t, Int(mi[DCOL + e]))
+            for pp in range(NV):
+                var e = Int(mi[DPAIR + k * NV + pp])
+                if e >= 0:
+                    res[(OQLU + e) * F + f] += h * damp * jk * ten_j(mi, mf, res, f, t, pp)
     comptime if NFLUID:  # mjd_passive_vel fluid terms
         fluid_deriv(mi, mf, res, f, h, False)
     comptime if STAGE >= 7:  # as implicitfast: moment' bias_vel moment per joint actuator, skipped where forcerange clamps
@@ -3285,9 +3286,10 @@ def euler(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int):
                     var jk = ten_j(mi, mf, res, f, t, k)
                     if jk == 0:
                         continue
-                    for c in range(Int(mi[MNNZ + k])):
-                        var e = Int(mi[MADR + k]) + c
-                        res[(OQH + e) * F + f] += h * damp * jk * ten_j(mi, mf, res, f, t, Int(mi[MCOL + e]))
+                    for pp in range(NV):
+                        var e = Int(mi[MPAIR + k * NV + pp])
+                        if e >= 0:
+                            res[(OQH + e) * F + f] += h * damp * jk * ten_j(mi, mf, res, f, t, pp)
         comptime if INTEGRATOR == 3 and NFLUID:  # mjd_passive_vel fluid terms, B symmetrized (mj_implicitSkip implicitfast)
             fluid_deriv(mi, mf, res, f, h, True)
         comptime if INTEGRATOR == 3 and STAGE >= 7:
