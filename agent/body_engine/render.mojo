@@ -53,6 +53,7 @@ comptime LRP = row_major[NTRI]()
 comptime LPOSE = row_major[PROWS * F]()
 comptime NCAM = 16 + NP  # eye 3, target 3, fovy, focal, ..., [10] grid spacing; [16:] world.mojo terrain params
 comptime LCAM = row_major[NCAM]()
+comptime SOIL = get_defined_int["SOIL", 0]() == 1  # play: soil and moss on the terrain instead of the grey checker (gates keep the checker)
 comptime TERRAIN = get_defined_int["TERRAIN", 0]()  # 1: the ground is world.mojo's terrain (cam[16:24]), not z = 0
 comptime TVIS = TileTensor[DType.uint64, type_of(LVIS), MutAnyOrigin]
 comptime TIMG = TileTensor[DType.uint32, type_of(LVIS), MutAnyOrigin]
@@ -94,6 +95,8 @@ def vertex(pi: TPI, pf: TPF, rv: TRV, rt: TRT, pose: TPOSE, cam: TCAM, f: Int, p
                    Float32(rv[3 * vi + 2]) * pf[o + 12] + pf[o + 9], 0)
     var inbody = rot(Q4(pf[o + 3], pf[o + 4], pf[o + 5], pf[o + 6]), local) + V3(pf[o], pf[o + 1], pf[o + 2], 0)
     var b = Int(pi[5 * p]) - 1
+    if b < 0:  # a world-body part (stone, wall, plant, food marker): fixed, its part pose is already in world mm
+        return inbody
     var bq = Q4(pose[(OXQ + 4 * b) * F + f], pose[(OXQ + 4 * b + 1) * F + f], pose[(OXQ + 4 * b + 2) * F + f], pose[(OXQ + 4 * b + 3) * F + f])
     var bp = V3(pose[(3 * b) * F + f], pose[(3 * b + 1) * F + f], pose[(3 * b + 2) * F + f], 0)
     var w = rot(bq, inbody) + bp
@@ -168,6 +171,35 @@ def terrain(cam: TCAM) -> PW:
     for k in range(NP):
         p[k] = cam[16 + k]
     return p
+
+
+@always_inline
+def hash2(x: Int, y: Int) -> Float32:
+    var h = UInt32(x * 374761393 + y * 668265263)
+    h = (h ^ (h >> 13)) * 1274126177
+    return Float32(h ^ (h >> 16)) / 4294967295.0
+
+
+@always_inline
+def vnoise(x: Float32, y: Float32) -> Float32:
+    """value noise in 0..1, one cell per unit."""
+    var ix, iy = Int(x + 1e4) - 10000, Int(y + 1e4) - 10000
+    var fx, fy = x - Float32(ix), y - Float32(iy)
+    fx = fx * fx * (3 - 2 * fx); fy = fy * fy * (3 - 2 * fy)
+    var a = hash2(ix, iy) + (hash2(ix + 1, iy) - hash2(ix, iy)) * fx
+    var b = hash2(ix, iy + 1) + (hash2(ix + 1, iy + 1) - hash2(ix, iy + 1)) * fx
+    return a + (b - a) * fy
+
+
+@always_inline
+def soil(x: Float32, y: Float32) -> V3:
+    """soil (brown, grain at 0.3 mm) with moss patches (green, 6 mm blobs)."""
+    var grain = 0.55 * vnoise(x * 3.3, y * 3.3) + 0.3 * vnoise(x * 11, y * 11) + 0.15 * vnoise(x * 37, y * 37)
+    var moss = vnoise(x * 0.17 + 31, y * 0.17 + 7) * 0.7 + vnoise(x * 0.6, y * 0.6) * 0.3
+    var m = min(max((moss - 0.5) * 5, Float32(0)), Float32(1))
+    var dirt = V3(0.36, 0.26, 0.17, 0) * (0.7 + 0.6 * grain)
+    var green = V3(0.24, 0.40, 0.15, 0) * (0.75 + 0.5 * vnoise(x * 6, y * 6))
+    return dirt * (1 - m) + green * m
 
 
 def ground(cam: TCAM, eye: V3, ray: V3) -> Float32:
@@ -252,7 +284,8 @@ def shade(vis: TVIS, img: TIMG, pi: TPI, pf: TPF, rv: TRV, rt: TRT, rp: TRP, pos
         var lit = (Float32(0.35) + Float32(0.65) * dot(n, V3(0.3, 0.2, 0.93, 0))) / (Float32(0.35) + Float32(0.65) * Float32(0.93))
         var check = (Int(hit[0] + 1e4) + Int(hit[1] + 1e4)) % 2
         var fade = Float32(1) / (1 + 0.02 * sqrt(dot(hit - c[0], hit - c[0])))
-        rgb = V3(0.55, 0.57, 0.6, 0) * (Float32(0.8) if check == 0 else Float32(1.0)) * lit * fade + V3(0.6, 0.65, 0.72, 0) * (1 - fade)
+        var base = soil(hit[0], hit[1]) if SOIL else V3(0.55, 0.57, 0.6, 0) * (Float32(0.8) if check == 0 else Float32(1.0))
+        rgb = base * lit * fade + V3(0.6, 0.65, 0.72, 0) * (1 - fade)
     elif not TERRAIN and ray[2] < 0:
         var hit = c[0] + ray * (-c[0][2] / ray[2])
         var check = (Int(hit[0] + 1e4) + Int(hit[1] + 1e4)) % 2

@@ -118,15 +118,25 @@ class Brain:
 
 def setup(F, render=0, out='/dev/null', seed=None):
     """seed: the fly on live.py's seeded terrain (live.WORLD, 0.1 mm bumps and cones), dropped from the flat standing pose."""
+    flags = ['-DGAME=1', '-DHUD=1', '-DFOLLOW=1'] + (['-DCPU=1'] if CPU else [])
     if seed is None:
         d, m, _ = fl.prepare(OUT / 'fly')
-    else:
-        mjcf = live.terrain(fl.MJCF, live.WORLD[:5] + (seed,) + live.WORLD[6:])[0]
-        d, m, _ = fl.prepare(OUT / f'fly-world{seed}', mjcf=mjcf, flat=fl.MJCF)
+    else:  # terrain + the world's walls, stones, grass, flowers and two plume sources (agent/body_engine/assets.py), smelled at the antennae
+        from agent.body_engine import assets
+        from agent.body_engine.world_check import sites_of
+        params = live.WORLD[:5] + (seed,) + live.WORLD[6:]
+        mjcf = live.terrain(fl.MJCF, params)[0]
+        w = live.load(mjcf)
+        stones = [(*w.geom_pos[g][:2], float(w.geom_size[g][:2].max())) for g in range(w.ngeom) if w.geom_type[g] == 4 and w.geom_bodyid[g] == 0]
+        parts, src = assets.scene(params, seed, stones)
+        d, m, _ = fl.prepare(OUT / f'fly-world{seed}', mjcf=mjcf, flat=fl.MJCF, world=parts)
+        src.tofile(d / 'src.bin')
+        np.array([[b, *p] for b, p in sites_of(m)], np.float32).tofile(d / 'sites.bin')
+        flags += ['-DWORLD=1', '-DNSITE=2', '-DSOIL=1']
     if not (d / 'mf.base').exists():
         (d / 'mf.bin').rename(d / 'mf.base')
     gc.set_rules(d, 0.0, WORK_RATE)
-    eng = fl.Engine(d, fl.K, 'play', 0, F=F, flags=('-DGAME=1', '-DHUD=1', '-DFOLLOW=1') + (('-DCPU=1',) if CPU else ()), out=out, render=render)
+    eng = fl.Engine(d, fl.K, 'play', 0, F=F, flags=tuple(flags), out=out, render=render)
     return d, m, eng
 
 

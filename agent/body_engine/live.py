@@ -67,7 +67,7 @@ def lift(m, q):
         q[a + 2] += float(h.max()) + 0.05  # them, not the highest within 4 mm (a 0.57 mm drop on a 0.1 ramp)
 
 
-def prepare(out=OUT, pairs=FEET, mjcf=MJCF, dist=DIST, flat=None, convex=False):
+def prepare(out=OUT, pairs=FEET, mjcf=MJCF, dist=DIST, flat=None, convex=False, world=None):
     """Engine + mesh files for one fly standing still: state from model.standing, servos holding its joint angles,
     adhesion on. Returns the camera args (eye, target, fovy) and the model. flat: on terrain, stand on this flat-floor
     MJCF instead and lift the animal 0.05 mm above the highest ground within 4 mm of it (MuJoCo's own rollout on the
@@ -77,7 +77,7 @@ def prepare(out=OUT, pairs=FEET, mjcf=MJCF, dist=DIST, flat=None, convex=False):
     m = load(mjcf)
     m.opt.noslip_iterations = 0  # normal friction: noslip 5 makes the standing fly tremble, in MuJoCo too (Brain 2026-10-05)
     m = export(m, out, pairs, True, convex=convex)
-    meshes(mjcf, out)
+    meshes(mjcf, out, world=world)  # world: the world's walls, stones and assets drawn too (model.meshes)
     q, v = standing(load(flat or mjcf), 2)  # shipped noslip 5: with noslip 0 the settling rollout collapses onto the belly
     q, v = q[:1], v[:1]
     if flat:  # every free root (fly, spider) lifted above its own ground

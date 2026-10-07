@@ -831,14 +831,32 @@ def convex_block(m, regex, convex=True, hfexact=False):
     return np.array(kind), np.concatenate([head, *size]), sizes
 
 
-def meshes(mjcf, out, grid=0):
+def meshes(mjcf, out, grid=0, world=None):
     """Renderer tables (docs/plans/RENDERER.md) for every mesh geom: rmi.bin int32 per part (body, vertex offset,
     vertex count, triangle offset, triangle count), rmf.bin float32 per part (local pos 3, local quat 4, box
     offset 3, box scale 3, bounding sphere centre 3 and radius 1, rgba 4), rv.bin int16 vertices quantised to the
-    part's box, rt.bin uint16 triangles local to the part, rp.bin uint8 part per triangle. Returns the decode error relative to part size."""
+    part's box, rt.bin uint16 triangles local to the part, rp.bin uint8 part per triangle. Returns the decode error relative to part size.
+    world: also draw the world body's box and ellipsoid geoms (walls, stones) and these extra world parts, a list of
+    (vertices (n, 3) world mm, faces (m, 3), rgba) (agent/body_engine/assets.py); body 0 parts are drawn fixed (render.vertex)."""
     m, out = load(mjcf), Path(out)
     out.mkdir(parents=True, exist_ok=True)
     ints, floats, verts, tris, part, worst = [], [], [], [], [], 0.0
+
+    def add(body, pos, quat, v, f, rgba, name):
+        nonlocal worst
+        if len(v) > 65535 or len(ints) // 5 >= 255:
+            raise SystemExit(f'FAIL meshes: {name}: over 65,535 vertices (uint16 triangles) or 255 parts (uint8 part ids)')
+        lo, hi = v.min(0), v.max(0)
+        scale = np.maximum(hi - lo, 1e-12) / 65535
+        qv = np.round((v - lo) / scale - 32768).astype(np.int16)
+        worst = max(worst, float(np.abs((qv.astype(np.float64) + 32768) * scale + lo - v).max() / (hi - lo).max()))
+        centre = (lo + hi) / 2
+        ints.extend([body, len(verts), len(v), len(tris), len(f)])
+        floats.extend([*pos, *quat, *(lo + 32768 * scale), *scale, *centre, np.linalg.norm(v - centre, axis=1).max(), *rgba])
+        verts.extend(qv)
+        tris.extend(np.asarray(f).astype(np.uint16))
+        part.extend([len(ints) // 5 - 1] * len(f))
+
     for g in np.flatnonzero(m.geom_type == mujoco.mjtGeom.mjGEOM_MESH):
         k = m.geom_dataid[g]
         v = m.mesh_vert[m.mesh_vertadr[k]:m.mesh_vertadr[k] + m.mesh_vertnum[k]].astype(np.float64)
@@ -850,19 +868,16 @@ def meshes(mjcf, out, grid=0):
             v = np.array([np.bincount(inv, v[:, a]) for a in range(3)]).T / np.bincount(inv)[:, None]
             f = inv[f]
             f = np.unique(f[(f[:, 0] != f[:, 1]) & (f[:, 1] != f[:, 2]) & (f[:, 0] != f[:, 2])], axis=0)
-        if len(v) > 65535 or len(ints) // 5 >= 255:
-            raise SystemExit(f'FAIL meshes: geom {g}: over 65,535 vertices (uint16 triangles) or 255 parts (uint8 part ids)')
-        lo, hi = v.min(0), v.max(0)
-        scale = np.maximum(hi - lo, 1e-12) / 65535
-        qv = np.round((v - lo) / scale - 32768).astype(np.int16)
-        worst = max(worst, float(np.abs((qv.astype(np.float64) + 32768) * scale + lo - v).max() / (hi - lo).max()))
         rgba = m.mat_rgba[m.geom_matid[g]] if m.geom_matid[g] >= 0 else m.geom_rgba[g]
-        centre = (lo + hi) / 2
-        ints += [m.geom_bodyid[g], len(verts), len(v), len(tris), len(f)]
-        floats += [*m.geom_pos[g], *m.geom_quat[g], *(lo + 32768 * scale), *scale, *centre, np.linalg.norm(v - centre, axis=1).max(), *rgba]
-        verts += list(qv)
-        tris += list(f.astype(np.uint16))
-        part += [len(ints) // 5 - 1] * len(f)
+        add(m.geom_bodyid[g], m.geom_pos[g], m.geom_quat[g], v, f, rgba, f'geom {g}')
+    if world is not None:
+        from agent.body_engine.assets import primitive
+        for g in np.flatnonzero((m.geom_bodyid == 0) & np.isin(m.geom_type, (mujoco.mjtGeom.mjGEOM_BOX, mujoco.mjtGeom.mjGEOM_ELLIPSOID))):
+            v, f = primitive(int(m.geom_type[g] == mujoco.mjtGeom.mjGEOM_BOX), m.geom_size[g])
+            rgba = m.mat_rgba[m.geom_matid[g]] if m.geom_matid[g] >= 0 else m.geom_rgba[g]
+            add(0, m.geom_pos[g], m.geom_quat[g], v, f, rgba, mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_GEOM, g))
+        for i, (v, f, rgba) in enumerate(world):
+            add(0, (0, 0, 0), (1, 0, 0, 0), np.asarray(v, float), f, rgba, f'world part {i}')
     np.array(ints, np.int32).tofile(out / 'rmi.bin')
     np.array(floats, np.float32).tofile(out / 'rmf.bin')
     np.array(verts, np.int16).tofile(out / 'rv.bin')
