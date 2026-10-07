@@ -730,6 +730,65 @@ def with_sleep(mjcf, out, tolerance):
     return str(out)
 
 
+def auto_pairs(m):
+    """MuJoCo's automatic contact pairs of a model as explicit pair data (mj_collision's static filters, engine_collision_driver.c: same
+    body, the parent filter on weld bodies, the exclude list, the contype/conaffinity bitmask; mj_contactParam's mixing: priority, else
+    condim max, solref and solimp by solmix, friction max per component; margin and gap are the geoms' sums). geom1 has the lower
+    type, as mj_collideGeoms orders a contact. The broadphase (bounding boxes) is dynamic and stays with the engine (bounding spheres)."""
+    coll = [g for g in range(m.ngeom) if m.geom_contype[g] or m.geom_conaffinity[g]]
+    excl = {(int(a), int(b)) for a, b in zip(m.exclude_signature >> 16, m.exclude_signature & 0xFFFF)}
+    out = []
+    for i, ga in enumerate(coll):
+        for gb in coll[i + 1:]:
+            g1, g2 = (ga, gb) if (m.geom_type[ga], ga) <= (m.geom_type[gb], gb) else (gb, ga)
+            b1, b2 = int(m.geom_bodyid[g1]), int(m.geom_bodyid[g2])
+            w1, w2 = int(m.body_weldid[b1]), int(m.body_weldid[b2])
+            if b1 == b2 or w1 == w2 or (min(w1, w2), max(w1, w2)) in excl or (min(b1, b2), max(b1, b2)) in excl:
+                continue
+            if m.body_weldid[m.body_parentid[w1]] == w2 or m.body_weldid[m.body_parentid[w2]] == w1:
+                continue
+            if not ((m.geom_contype[g1] & m.geom_conaffinity[g2]) or (m.geom_contype[g2] & m.geom_conaffinity[g1])):
+                continue
+            p1, p2 = m.geom_priority[g1], m.geom_priority[g2]
+            if p1 != p2:
+                a = g1 if p1 > p2 else g2
+                condim, solref, solimp, fri = int(m.geom_condim[a]), m.geom_solref[a], m.geom_solimp[a], m.geom_friction[a]
+            else:
+                s1, s2 = m.geom_solmix[g1], m.geom_solmix[g2]
+                mix = s1 / (s1 + s2) if s1 >= 1e-15 and s2 >= 1e-15 else 0.5 if s1 < 1e-15 and s2 < 1e-15 else 0.0 if s1 < 1e-15 else 1.0
+                condim = int(max(m.geom_condim[g1], m.geom_condim[g2]))
+                solref = mix * m.geom_solref[g1] + (1 - mix) * m.geom_solref[g2] if m.geom_solref[g1][0] > 0 and m.geom_solref[g2][0] > 0 else np.minimum(m.geom_solref[g1], m.geom_solref[g2])
+                solimp = mix * m.geom_solimp[g1] + (1 - mix) * m.geom_solimp[g2]
+                fri = np.maximum(m.geom_friction[g1], m.geom_friction[g2])
+            out.append(dict(geom1=int(g1), geom2=int(g2), condim=condim, solref=solref, solimp=solimp, friction=[fri[0], fri[0], fri[1], fri[2], fri[2]],
+                            margin=float(m.geom_margin[g1] + m.geom_margin[g2]), gap=float(m.geom_gap[g1] + m.geom_gap[g2])))
+    return out
+
+
+def with_auto_pairs(mjcf, out, cone='pyramidal', explicit=True):
+    """mjcf with its automatic contact pairs written as explicit <pair> elements and every geom's contype/conaffinity zeroed (MuJoCo then
+    collides exactly these pairs: auto_pairs), the cone set; mesh paths made absolute; written to `out`; returns the path. The flight
+    model's gate body (check.sh flight_contacts); tools/auto_pairs_check.py proves the pair set and the mixed parameters against MuJoCo's
+    own dynamic pairs."""
+    spec = mujoco.MjSpec.from_file(str(mjcf))
+    base = Path(mjcf).parent / (spec.meshdir or '')
+    for mesh in spec.meshes:
+        mesh.file = str((base / mesh.file).resolve()) if mesh.file else mesh.file
+    spec.meshdir = ''
+    m0 = spec.compile()
+    name = lambda g: mujoco.mj_id2name(m0, mujoco.mjtObj.mjOBJ_GEOM, g)
+    if explicit:  # explicit=False: the same model through the same writer (poses rounded alike), dynamic pairs kept, for tools/auto_pairs_check.py
+        for p in auto_pairs(m0):
+            pr = spec.add_pair(geomname1=name(p['geom1']), geomname2=name(p['geom2']), condim=p['condim'], margin=p['margin'], gap=p['gap'])
+            pr.solref, pr.solimp, pr.friction = list(p['solref']), list(p['solimp']), p['friction']
+        for g in spec.geoms:
+            g.contype = g.conaffinity = 0
+    spec.option.cone = getattr(mujoco.mjtCone, 'mjCONE_' + cone.upper())
+    Path(out).parent.mkdir(parents=True, exist_ok=True)
+    Path(out).write_text(spec.to_xml())
+    return str(out)
+
+
 def with_gravcomp(mjcf, out):
     """mjcf with body_gravcomp 1.0, 0.5, 0.0, 0.8 on its bodies in turn (MjSpec, mesh paths made absolute: combine() does the
     same), written to `out`; the gate body of check.sh gravcomp for the fly and the spider. Returns the path."""
