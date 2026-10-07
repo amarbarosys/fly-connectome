@@ -29,7 +29,7 @@ from std.time import perf_counter_ns
 from max.gpu import block_idx, block_dim, thread_idx
 from max.gpu.sync import barrier
 from max.gpu.host import DeviceContext
-from layout import TileTensor, row_major
+from layout import TileTensor, TensorLayout, row_major
 from world import NP, PW, height_grad
 from convex import Sp, collide, collide_hfield, Height, ELLIPSOID, MESH, BOX, T as CT, S as CS, V as CVEC  # convex.mojo's scalar type (float64 with -DCCD64=1, which the export sets)
 import game_state as game
@@ -42,7 +42,8 @@ comptime NV = get_defined_int["NV"]()
 comptime NC = get_defined_int["NC"]()
 comptime F = get_defined_int["FLIES"]()
 comptime STAGE = get_defined_int["STAGE", 1]()
-comptime WAVE = get_defined_int["WAVE", 0]() == 1  # one animal per 32-lane wave (live): serial code runs on every lane
+comptime CPU = get_defined_int["CPU", 0]() == 1  # host build: the same step per animal in a loop, no device (one interactive animal: GPU latency, not throughput)
+comptime WAVE = get_defined_int["WAVE", 0]() == 1 and not CPU  # one animal per 32-lane wave (live): serial code runs on every lane
 comptime LN = 32 if WAVE else 1  # alike; loops written range(lane(), n, LN) split over lanes, sync() before others read
 comptime BLOCK = 32 if WAVE else 64
 comptime GRID = F if WAVE else (F + 63) // 64
@@ -3201,6 +3202,11 @@ def smooth(mi: TI, mf: TF, qpos: TQ, qvel: TV, ctrl: TU, res: TO):
     var f = block_idx.x if WAVE else block_idx.x * block_dim.x + thread_idx.x
     if f >= F:
         return
+    smooth_at(mi, mf, qpos, qvel, ctrl, res, f)
+
+
+def smooth_at(mi: TI, mf: TF, qpos: TQ, qvel: TV, ctrl: TU, res: TO, f: Int):
+    """K steps of animal f: the kernel's body, also the CPU build's per-animal call."""
     for _ in range(max(K, 1)):
         comptime if INTEGRATOR == 1:  # RK4: four forward passes, X_1..3 held in qpos/qvel, X0 back after the last
             for rks in range(4):
@@ -3446,8 +3452,48 @@ def load(path: String, size: Int) raises -> List[UInt8]:
     return raw^
 
 
+def host[T: DType, L: TensorLayout](mut a: List[UInt8], layout: L) -> TileTensor[T, L, MutAnyOrigin]:
+    return TileTensor[T, L, MutAnyOrigin](ptr=a.unsafe_ptr().unsafe_bitcast[Scalar[T]]().unsafe_origin_cast[MutAnyOrigin](), layout=layout)
+
+
+def main_cpu(dir: String) raises:
+    """-DCPU=1: main's run on the host (same files in, same smooth.bin / state.bin out, same timing line)."""
+    var mi = load(dir + "mi.bin", NI)
+    var mf = load(dir + "mf.bin", NFL)
+    var qp = load(dir + "qpos.bin", NQ * F)
+    var qv = load(dir + "qvel.bin", NV * F)
+    var uv = load(dir + "ctrl.bin", NUC * F) if NUC > 0 else List[UInt8](length=4 * F, fill=0)
+    var ob = List[UInt8](length=4 * NROW * F, fill=0)
+    var ti = host[DType.int32](mi, LI); var tf = host[DType.float32](mf, LF); var tq = host[DType.float32](qp, LQ)
+    var tv = host[DType.float32](qv, LV); var tu = host[DType.float32](uv, LU); var to = host[DType.float32](ob, LO)
+    for f in range(F):
+        smooth_at(ti, tf, tq, tv, tu, to, f)
+    comptime if K > 0:
+        with open(dir + "state.bin", "w") as file:
+            file.write_bytes(Span(unsafe_ptr=qp.unsafe_ptr(), length=NQ * F * 4))
+            file.write_bytes(Span(unsafe_ptr=qv.unsafe_ptr(), length=NV * F * 4))
+        comptime if 10 % K == 0:
+            for _ in range(10 // K - 1):
+                for f in range(F):
+                    smooth_at(ti, tf, tq, tv, tu, to, f)
+            with open(dir + "state10.bin", "w") as file:
+                file.write_bytes(Span(unsafe_ptr=qp.unsafe_ptr(), length=NQ * F * 4))
+                file.write_bytes(Span(unsafe_ptr=qv.unsafe_ptr(), length=NV * F * 4))
+    var t0 = perf_counter_ns()
+    for _ in range(100):
+        for f in range(F):
+            smooth_at(ti, tf, tq, tv, tu, to, f)
+    var us = Float64(perf_counter_ns() - t0) / 100 / 1000
+    with open(dir + "smooth.bin", "w") as file:
+        file.write_bytes(Span(unsafe_ptr=ob.unsafe_ptr(), length=NOUTX * F * 4))
+    print(F, "animals, stage", STAGE, ", K", max(K, 1), ":", us, "us per launch,", Float64(F * max(K, 1)) / us * 1e6, "animal-steps/s (CPU)")
+
+
 def main() raises:
     var dir = String(argv()[1])
+    comptime if CPU:
+        main_cpu(dir)
+        return
     # no MAX pool: every buffer is made once, so VRAM is exactly the buffers plus the HIP runtime; a caller wins
     _ = external_call["setenv", Int32]("MODULAR_DEVICE_CONTEXT_MEMORY_MANAGER_SIZE_PERCENT".unsafe_ptr(), "0".unsafe_ptr(), Int32(0))
     var ctx = DeviceContext(0)

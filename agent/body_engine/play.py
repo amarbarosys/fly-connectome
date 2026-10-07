@@ -2,7 +2,7 @@
 Shiu brain (agent/body_engine/keymap.toml), the brain's descending neurons drive the body through fly_link's readout and
 gait, and the brain's own drives can outvote the player.
 
-  gpu-wait run --priority 90 --vram 4 --timeout 3600 -- .venv/bin/python -m agent.body_engine.play          (interactive)
+  agent/body_engine/play.sh [world [SEED]]          (interactive: owns the terminal, runs the job through gpu-wait)
   gpu-wait run --priority 60 --vram 4 --timeout 1200 -- .venv/bin/python -m agent.body_engine.play check               (check world [SEED]: on the seeded terrain)
 
 Input: the terminal in kitty keyboard mode (press / release events; ghostty, kitty, foot) and SGR mouse motion; frames go
@@ -37,6 +37,8 @@ from agent.body_engine import fly_link as fl, game_check as gc, live, spectate_c
 KEYMAP = Path(__file__).with_name('keymap.toml')
 PRESETS = fl.OUT.parents[2] / 'shiu/presets'
 OUT = fl.OUT.parent / 'play'
+RENDER = int(os.environ.get('PLAY_RENDER', 16))  # control steps per frame: 16 = 62.5 fps of sim time (4 drew 250 fps, 0.31x real time)
+CPU = os.environ.get('PLAY_CPU', '1') == '1'  # physics on the host (smooth.mojo -DCPU=1): one fly, 53 us per 0.1 ms step vs 4.4 ms on one GPU wave
 WORK_RATE = float(os.environ.get("PLAY_WORK_RATE", 2e-6))  # stamina + energy per unit of actuator work: W walking does about 7.3e3 per sim second (check 2), so about 70 s to exhaustion; see docs/plans/PLAY.md
 NAMES = ('idle', 'w', 'a', 'd', 'w+threat')
 
@@ -101,7 +103,12 @@ class Brain:
 
     def advance(self, k):
         """Cumulative spikes: (cols, 2 sides) all DNs, (cols, 2) player DNs / own DNs."""
-        cum = self.brain.advance(k).astype(np.int64)
+        self.brain.advance_start(k)
+        return self.collect()
+
+    def collect(self):
+        """advance's result once the worker answers (after brain.advance_start)."""
+        cum = self.brain.advance_wait().astype(np.int64)
         side = np.zeros((self.cols, 2), np.int64)
         np.add.at(side, (self.colof, self.side), cum)
         split = np.zeros((self.cols, 2), np.int64)
@@ -119,7 +126,7 @@ def setup(F, render=0, out='/dev/null', seed=None):
     if not (d / 'mf.base').exists():
         (d / 'mf.bin').rename(d / 'mf.base')
     gc.set_rules(d, 0.0, WORK_RATE)
-    eng = fl.Engine(d, fl.K, 'play', 0, F=F, flags=('-DGAME=1', '-DHUD=1', '-DFOLLOW=1'), out=out, render=render)
+    eng = fl.Engine(d, fl.K, 'play', 0, F=F, flags=('-DGAME=1', '-DHUD=1', '-DFOLLOW=1') + (('-DCPU=1',) if CPU else ()), out=out, render=render)
     return d, m, eng
 
 
@@ -131,21 +138,40 @@ def loop(brain, eng, gaits, rates_at, steps, on_step=None):
     cum, split, held = deque([zero], fl.WINDOW + 1), deque([zero], fl.WINDOW + 1), gaits[0].held  # one window of history, fixed size
     ref, tr, cost = None, [], {'neural': 0.0, 'write': 0.0}
     game = np.ones((brain.cols, 4), np.float32)
-    i = 0
-    while steps == 0 or i < steps + fl.WINDOW:
+    i, pend = 0, None
+
+    def take(k, win, drive):  # step k's body state; game rows feed rates_at one step late (stamina, slow)
+        nonlocal game
+        q = eng.recv()
+        game = eng.game
+        if k >= fl.WINDOW:
+            tr.append(q if brain.cols > 1 else q[None])
+            if on_step:
+                on_step(k - fl.WINDOW, win, game, drive)
+
+    def rates(i):
         if i < fl.WINDOW:
             r = np.zeros((brain.cols, len(brain.names)), np.float32)
             r[:, j] = brain.hz[j]
-        else:
-            r = rates_at(i - fl.WINDOW, game)
-            if r is None:
-                break
+            return r
+        return rates_at(i - fl.WINDOW, game)
+
+    def start(i):  # brain step i on the worker, running while the host does step i-1's gait and body
+        r = rates(i)
+        if r is None:
+            return False
         t = time.perf_counter()
         brain.set(r)
         cost['write'] += time.perf_counter() - t
+        brain.brain.advance_start(fl.K)
+        return True
+
+    going = start(0)
+    while going:
         t = time.perf_counter()
-        s, sp = brain.advance(fl.K)
+        s, sp = brain.collect()
         cost['neural'] += time.perf_counter() - t
+        going = not (steps and i + 1 >= steps + fl.WINDOW) and start(i + 1)  # next brain step runs during this step's gait + body
         cum.append(s)
         split.append(sp)
         w = min(i + 1, fl.WINDOW)
@@ -154,15 +180,13 @@ def loop(brain, eng, gaits, rates_at, steps, on_step=None):
             ref = np.maximum(rate.mean(0), 1.0)
         drive = np.clip(rate / ref, 0, 1) if i >= fl.WINDOW else np.zeros_like(rate, float)
         ctrl = np.stack([g.ctrl(dv) for g, dv in zip(gaits, drive)]) if i >= fl.WINDOW else np.tile(held, (brain.cols, 1))
+        if pend is not None:  # the body's previous step ran while the brain advanced (the brain never reads the body)
+            take(*pend)
         eng.send(ctrl)
-        q = eng.recv()
-        game = eng.game
-        if i >= fl.WINDOW:
-            tr.append(q if brain.cols > 1 else q[None])
-            win = split[-1] - split[0]
-            if on_step:
-                on_step(i - fl.WINDOW, win, game, drive)
+        pend = (i, split[-1] - split[0], drive)
         i += 1
+    if pend is not None:
+        take(*pend)
     return np.array(tr), ref, cost
 
 
@@ -233,16 +257,20 @@ def play(*args):
     mpv = subprocess.Popen(['mpv', '--demuxer=rawvideo', f'--demuxer-rawvideo-w={sc.W}', f'--demuxer-rawvideo-h={sc.H}',
                             '--demuxer-rawvideo-mp-format=rgba', '--profile=low-latency', '--untimed', '--title=fly', str(fifo)],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    d, m, eng = setup(1, render=4, out=fifo, seed=seed)
+    d, m, eng = setup(1, render=RENDER, out=fifo, seed=seed)
     gaits = [fl.Gait(m, d, fl.K)]
     th = km['threat']
     every, dur = round(th['every_s'] / (fl.K * fl.DT)), round(th['dur_s'] / (fl.K * fl.DT))
     names = {'space': ' '} | {k: k for k in km['keys']}
     held, tap, mouse, lastx, threat_until = set(), {}, 0.0, None, -1
-    fd, old = sys.stdin.fileno(), termios.tcgetattr(sys.stdin.fileno())
-    tty.setraw(fd)
-    sys.stdout.write('\x1b[>11u\x1b[?1003h\x1b[?1006h')  # kitty keys with press/release, SGR mouse motion
-    sys.stdout.flush()
+    io = os.environ.get('PLAY_IO')  # gpu-wait jobs have no terminal: play.sh owns it and relays keys / HUD through two fifos here
+    if io:
+        fd, old, out = os.open(Path(io) / 'keys', os.O_RDWR), None, open(Path(io) / 'hud', 'w')
+    else:
+        fd, old, out = sys.stdin.fileno(), termios.tcgetattr(sys.stdin.fileno()), sys.stdout
+        tty.setraw(fd)
+    out.write('\x1b[>11u\x1b[?1003h\x1b[?1006h')  # kitty keys with press/release, SGR mouse motion
+    out.flush()
 
     def rates_at(i, game):
         nonlocal mouse, lastx, threat_until
@@ -275,21 +303,35 @@ def play(*args):
         r[0, brain.names.index('threat')] = brain.hz[brain.names.index('threat')] * (i < threat_until)
         return r
 
+    tick = fl.K * fl.DT  # one control step of sim time; the clock holds play to it, a slow step is not made up (Minecraft's tick)
+    clock, start = [None], [time.perf_counter()]
+
     def hud(i, win, game, drive):
+        now = time.perf_counter()
+        if i == 0:
+            start[0] = now
+        if clock[0] is None or now - (clock[0] + i * tick) > 0.1:  # start, or more than 0.1 s behind: drop the debt
+            clock[0] = now - i * tick
+        wait = clock[0] + (i + 1) * tick - now
+        if wait > 0:
+            time.sleep(wait)
         if i % 20:
             return
         p, o = win[0]
         keys = held | {k for k, t in tap.items() if t > i}
         flag = ' OVERRIDE' if keys and o > p else ''
-        sys.stdout.write(f'\r\x1b[2Kplayer {p:5d} own {o:5d} | drive L {drive[0, 0]:.2f} R {drive[0, 1]:.2f} | E {game[0, 0]:.2f} '
+        speed = (i + 1) * tick / max(time.perf_counter() - start[0], 1e-9)
+        out.write(f'\r\x1b[2K{speed:4.2f}x real time | player {p:5d} own {o:5d} | drive L {drive[0, 0]:.2f} R {drive[0, 1]:.2f} | E {game[0, 0]:.2f} '
                          f'S {game[0, 2]:.2f}{" DEAD" if game[0, 3] else ""} | {"".join(sorted(keys))}{" THREAT" if i < threat_until else ""}{flag}')
-        sys.stdout.flush()
+        out.flush()
 
     try:
         loop(brain, eng, gaits, rates_at, 0, hud)
     finally:
-        sys.stdout.write('\x1b[<u\x1b[?1003l\x1b[?1006l\r\n')
-        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        out.write('\x1b[<u\x1b[?1003l\x1b[?1006l\r\n')
+        out.flush()
+        if old is not None:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
         brain.brain.close()
         eng.close()
         mpv.terminate()

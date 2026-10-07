@@ -378,9 +378,18 @@ class ShiuLive(ShiuGPU):
         steps = int(steps)
         if steps <= 0:
             raise ValueError("advance steps must be positive")
-        np.asarray([steps], np.int32).tofile(self.work / 'advance.bin')
-        self._command('advance')
-        self.continuous_t += steps
+        self.advance_start(steps)
+        return self.advance_wait()
+
+    def advance_start(self, steps):
+        """advance without waiting: the worker runs while the caller works; advance_wait() collects the counts."""
+        np.asarray([int(steps)], np.int32).tofile(self.work / 'advance.bin')
+        self.proc.stdin.write('advance\n')
+        self.proc.stdin.flush()
+        self.continuous_t += int(steps)
+
+    def advance_wait(self):
+        self._ok()
         return np.fromfile(self.work / 'gather.bin', np.int32)[:len(self.readout)].copy()
 
     def snapshot(self):

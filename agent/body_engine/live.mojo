@@ -78,6 +78,7 @@ def read_all(fd: Int, p: Pointer[UInt8, MutUntrackedOrigin], n: Int) -> Bool:
 
 
 def main() raises:
+    comptime assert not (eng.CPU and EYES), "CPU build: the eye kernels read the device state, which a CPU step only refreshes per frame"
     var a = argv()
     var dir = String(a[1])
     var frames = Int(String(a[2]))
@@ -102,6 +103,11 @@ def main() raises:
     ctx.enqueue_copy(v_b, qv.unsafe_ptr().unsafe_bitcast[Float32]())
     ctx.enqueue_copy(u_b, uv.unsafe_ptr().unsafe_bitcast[Float32]())
     var step = ctx.compile_function[eng.smooth]()
+    # -DCPU=1: the step runs on the host over these (one interactive animal: GPU latency is 4.4 ms per 0.1 ms step, host 53 us);
+    # the device copies are refreshed after each step, so render, packets and HUD read them unchanged
+    var ob = List[UInt8](length=4 * eng.NROW * eng.F, fill=0)
+    var hi = eng.host[DType.int32](mi, eng.LI); var hf = eng.host[DType.float32](mf, eng.LF); var hq = eng.host[DType.float32](qp, eng.LQ)
+    var hv = eng.host[DType.float32](qv, eng.LV); var hu = eng.host[DType.float32](uv, eng.LU); var ho = eng.host[DType.float32](ob, eng.LO)
     # renderer: render.main's buffers, the pose tensor over the engine's output
     var pi_h = ren.load(dir + "rmi.bin", 20 * ren.NPART)
     var pf_h = ren.load(dir + "rmf.bin", 4 * ren.PFS * ren.NPART)
@@ -232,6 +238,9 @@ def main() raises:
             if not read_all(0, ctrl_h.unsafe_ptr().unsafe_bitcast[UInt8](), max(eng.NU, 1) * eng.F * 4):
                 return  # brain gone
             ctx.enqueue_copy(u_b, ctrl_h)
+            comptime if eng.CPU:
+                for k in range(eng.NU * eng.F):
+                    uv.unsafe_ptr().unsafe_bitcast[Float32]()[k] = ctrl_h[k]
             comptime if GAZE:
                 if not read_all(0, gaze_h.unsafe_ptr().unsafe_bitcast[UInt8](), eng.F * 4):
                     return
@@ -243,8 +252,12 @@ def main() raises:
             ctx.synchronize()
             ms[0] += Float64(perf_counter_ns() - tp)
             tp = perf_counter_ns()
-        ctx.enqueue_function(step, TileTensor(mi_b, eng.LI), TileTensor(mf_b, eng.LF), TileTensor(q_b, eng.LQ), TileTensor(v_b, eng.LV),
-            TileTensor(u_b, eng.LU), TileTensor(o_b, eng.LO), grid_dim=eng.GRID, block_dim=eng.BLOCK)
+        comptime if eng.CPU:
+            for f in range(eng.F):
+                eng.smooth_at(hi, hf, hq, hv, hu, ho, f)
+        else:
+            ctx.enqueue_function(step, TileTensor(mi_b, eng.LI), TileTensor(mf_b, eng.LF), TileTensor(q_b, eng.LQ), TileTensor(v_b, eng.LV),
+                TileTensor(u_b, eng.LU), TileTensor(o_b, eng.LO), grid_dim=eng.GRID, block_dim=eng.BLOCK)
         comptime if PROFILE > 0:
             ctx.synchronize()
             ms[1] += Float64(perf_counter_ns() - tp)
@@ -263,6 +276,9 @@ def main() raises:
         var draw = render_every > 0 and fr % render_every == 0 if BRAIN > 0 else True
         comptime if WORLD > 0:  # the plume at the odor sites of this step's pose: the HUD text, the trace and a brain's sense packet read it
             ctx.enqueue_function(ksn, tplume, tpose, tsite, tsrc, grid_dim=1, block_dim=64)
+        comptime if eng.CPU:  # the device rows only for a frame (pose, game rows); packets read the host arrays below
+            if draw:
+                ctx.enqueue_copy(o_b, ob.unsafe_ptr().unsafe_bitcast[Float32]())
         if draw:
             comptime if FOLLOW > 0:
                 ctx.enqueue_function(kf, tcam, tpose, troot, grid_dim=1, block_dim=1)
@@ -282,18 +298,33 @@ def main() raises:
         var send = False
         comptime if BRAIN > 0:
             send = packet_every > 0 and fr % packet_every == 0 or fr + 1 == frames
-            if send:
-                ctx.enqueue_copy(pkt_u, u_b)
-                ctx.enqueue_copy(pkt_q, q_b)
-                ctx.enqueue_copy(pkt_v, v_b)
-                comptime if EYEROW:
-                    ctx.enqueue_copy(pkt_r, row_b)
-                elif EYES:
-                    ctx.enqueue_copy(pkt_r, ret_b)
-                comptime if NVALID > 0:
-                    ctx.enqueue_copy(pkt_s, o_b.create_sub_buffer[DType.float32](eng.OVALID * eng.F, NVALID * eng.F))
-                comptime if eng.GAME:
-                    ctx.enqueue_copy(pkt_g, o_b.create_sub_buffer[DType.float32](eng.OGAME * eng.F, 4 * eng.F))
+            comptime if eng.CPU:
+                if send:
+                    var o = ob.unsafe_ptr().unsafe_bitcast[Float32]()
+                    for k in range(eng.NU * eng.F):
+                        pkt_u[k] = uv.unsafe_ptr().unsafe_bitcast[Float32]()[k]
+                    for k in range(eng.NQ * eng.F):
+                        pkt_q[k] = qp.unsafe_ptr().unsafe_bitcast[Float32]()[k]
+                    for k in range(eng.NV * eng.F):
+                        pkt_v[k] = qv.unsafe_ptr().unsafe_bitcast[Float32]()[k]
+                    for k in range(NVALID * eng.F):
+                        pkt_s[k] = o[eng.OVALID * eng.F + k]
+                    comptime if eng.GAME:
+                        for k in range(4 * eng.F):
+                            pkt_g[k] = o[eng.OGAME * eng.F + k]
+            else:
+                if send:
+                    ctx.enqueue_copy(pkt_u, u_b)
+                    ctx.enqueue_copy(pkt_q, q_b)
+                    ctx.enqueue_copy(pkt_v, v_b)
+                    comptime if EYEROW:
+                        ctx.enqueue_copy(pkt_r, row_b)
+                    elif EYES:
+                        ctx.enqueue_copy(pkt_r, ret_b)
+                    comptime if NVALID > 0:
+                        ctx.enqueue_copy(pkt_s, o_b.create_sub_buffer[DType.float32](eng.OVALID * eng.F, NVALID * eng.F))
+                    comptime if eng.GAME:
+                        ctx.enqueue_copy(pkt_g, o_b.create_sub_buffer[DType.float32](eng.OGAME * eng.F, 4 * eng.F))
         ctx.synchronize()
         comptime if PROFILE > 0:
             ms[3] += Float64(perf_counter_ns() - tp)

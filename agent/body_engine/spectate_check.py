@@ -64,7 +64,7 @@ def build(d, tag, flags, k=K, src=None, brain=2, flies=1):
     b = d / f'{tag}_k{k}_{W}x{H}_{h}'
     if not b.is_file():
         nb = int([f for f in sz if f.startswith('-DNBODY=')][0][8:])
-        subprocess.run([MOJO, 'build', '-I', str(ENGINE), *sz, f'-DFLIES={flies}', '-DSTAGE=7', f'-DK={k}', '-DWAVE=1', f'-DW={W}', f'-DH={H}', f'-DPROWS={7 * (nb - 1)}',
+        subprocess.run([MOJO, 'build', '-I', str(ENGINE), *sz, f'-DFLIES={flies}', '-DSTAGE=7', f'-DK={k}', f"-DWAVE={0 if '-DCPU=1' in flags else 1}", f'-DW={W}', f'-DH={H}', f'-DPROWS={7 * (nb - 1)}',
                         '-DBOX_MM=0', f'-DBRAIN={brain}', *flags, str(src), '-o', str(b)], check=True, capture_output=True)
     return b
 
