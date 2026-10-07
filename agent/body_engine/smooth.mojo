@@ -2740,6 +2740,237 @@ def rne_vel_col(mi: TI, res: TO, f: Int, badr: Int, j: Int):
     add6(res, f, ODCV + 6 * (badr + Int(mi[MNNZ + j]) - 1), get6(res, f, OCD + 6 * j))
 
 
+comptime B66 = SIMD[DType.float32, 64]  # 6 x 6 force-by-velocity block of mjd_passive_vel, B[i * 6 + j] = d force_i / d velocity_j (ang 0..2, lin 3..5)
+
+
+@always_inline
+def skew(x: V3) -> Tuple[V3, V3, V3]:
+    """Rows of [x]x, so that [x]x y = cross(x, y): d cross(a, b) / d b = skew(a), d cross(a, b) / d a = -skew(b) (mjd_cross)."""
+    return (V3(0, -x[2], x[1], 0), V3(x[2], 0, -x[0], 0), V3(-x[1], x[0], 0, 0))
+
+
+@always_inline
+def badd(mut B: B66, fq: Int, vq: Int, d: Tuple[V3, V3, V3], scale: Float32 = 1, colscale: V3 = V3(1, 1, 1, 0)):
+    """MuJoCo addToQuadrant(B, D, col_quad = fq, row_quad = vq): B[3 fq + i][3 vq + j] += scale colscale[j] D[i][j]."""
+    for j in range(3):
+        B[(3 * fq) * 6 + 3 * vq + j] += scale * colscale[j] * d[0][j]
+        B[(3 * fq + 1) * 6 + 3 * vq + j] += scale * colscale[j] * d[1][j]
+        B[(3 * fq + 2) * 6 + 3 * vq + j] += scale * colscale[j] * d[2][j]
+
+
+@always_inline
+def on_chain(mi: TI, b: Int, v: Int) -> Bool:
+    """Dof v moves body b: its body is b or an ancestor of b."""
+    var bb = b
+    while bb > 0:
+        if Int(mi[DBODY + v]) == bb:
+            return True
+        bb = Int(mi[PARENT + bb])
+    return False
+
+
+@always_inline
+def jcol(res: TO, f: Int, v: Int, dif: V3, qi: Q4) -> S6:
+    """Column v of the 6D Jacobian of the frame (p, q) fixed to a body, in that frame (mj_jacGeom / mj_jacBodyCom rotated by the frame,
+    as mjd_*Fluid build it): cdof about the root's subtree_com carried to p, rotated into the frame; local_wrench's rule on one dof."""
+    var cd = get6(res, f, OCD + 6 * v)
+    var ang = V3(cd[0], cd[1], cd[2], 0)
+    var lin = V3(cd[3], cd[4], cd[5], 0) - cross(dif, ang)
+    var la = rot(qi, ang)
+    var ll = rot(qi, lin)
+    return S6(la[0], la[1], la[2], ll[0], ll[1], ll[2], 0, 0)
+
+
+def jtbj(mi: TI, res: TO, f: Int, b: Int, p: V3, q: Q4, B: B66, h: Float32, diag: Bool):
+    """qDeriv += J' B J (MuJoCo addJTBJ) for the frame (p, q) on body b, folded into the factor as -h qDeriv: onto qLU over D's pattern
+    (full implicit) or onto qH over M's lower pattern (implicitfast, mapD2M; B symmetrized by the caller). Entries outside the
+    pattern are dropped, as MuJoCo's sparse add drops them; on a tree every pair of chain dofs is in D. diag: B is diagonal (the
+    inertia boxes, 130 of the flight model's 132 fluid bodies), 6 products per pair instead of 36. The chain's J columns are built
+    once into the fluid wrench rows (OFLW, free once fluid() has folded them into qfrc_passive): rebuilding them per pair and the
+    36-term product cost 88 of 95 ms per launch on 64 flight animals."""
+    var r = Int(mi[ROOT + b])
+    var dif = p - V3(get(res, f, OSC + 3 * r), get(res, f, OSC + 3 * r + 1), get(res, f, OSC + 3 * r + 2), 0)
+    var qi = Q4(q[0], -q[1], -q[2], -q[3])
+    var chain = SIMD[DType.int32, 64](0)  # the body's dofs (mj_bodyChain), collected once
+    var n = 0
+    for v in range(NV):
+        if n < 64 and n < NB and on_chain(mi, b, v):
+            chain[n] = Int32(v)
+            put6(res, f, OFLW + 6 * n, jcol(res, f, v, dif, qi))
+            n += 1
+    for ki in range(n):
+        var k = Int(chain[ki])
+        var jk = get6(res, f, OFLW + 6 * ki)
+        for pi in range(n):
+            var pp = Int(chain[pi])
+            var jp = get6(res, f, OFLW + 6 * pi)
+            var val: Float32 = 0
+            if diag:
+                for i in range(6):
+                    val += jk[i] * B[i * 7] * jp[i]
+            else:
+                for i in range(6):
+                    var u: Float32 = 0
+                    for j in range(6):
+                        u += B[i * 6 + j] * jp[j]
+                    val += jk[i] * u
+            comptime if IMPL:
+                for c in range(Int(mi[DRN + k])):
+                    var e = Int(mi[DRA + k]) + c
+                    if Int(mi[DCOL + e]) == pp:
+                        res[(OQLU + e) * F + f] -= h * val
+            else:
+                for c in range(Int(mi[MNNZ + k])):
+                    var e = Int(mi[MADR + k]) + c
+                    if Int(mi[MCOL + e]) == pp:
+                        res[(OQH + e) * F + f] -= h * val
+
+
+def ellipsoid_deriv(mi: TI, mf: TF, res: TO, f: Int, row: Int, h: Float32, sym: Bool):
+    """MuJoCo mjd_ellipsoidFluid for one geom (engine_derivative.c:1618): B = d(local wrench) / d(local velocity) from mjd_magnus_force,
+    mjd_kutta_lift, mjd_viscous_drag, mjd_viscous_torque and mjd_addedMassForces, the same prologue as ellipsoid()."""
+    var rho = mf[FLF]
+    var mu = mf[FLF + 1]
+    var c = FLF + 5 + 15 * row
+    var s = m3(mf, c)
+    var coef = mf[c + 3]
+    if coef == 0:
+        return
+    var blunt = mf[c + 4]
+    var slender = mf[c + 5]
+    var angd = mf[c + 6]
+    var kutta = mf[c + 7]
+    var magnus = mf[c + 8]
+    var vm = m3(mf, c + 9)
+    var vi = m3(mf, c + 12)
+    var b = Int(mi[FLI + 2 * row])
+    var g = Int(mi[FLI + 2 * row + 1])
+    var bd = body(res, f, b)
+    var q = mul(bd[1], m4(mf, GQUAT + 4 * g))
+    var p = V3(get(res, f, OG + 3 * g), get(res, f, OG + 3 * g + 1), get(res, f, OG + 3 * g + 2), 0)
+    var lv = local_wrench(mi, mf, res, f, b, p, q)
+    var w = V3(lv[0], lv[1], lv[2], 0)
+    var v = V3(lv[3], lv[4], lv[5], 0)
+    var B = B66(0)
+    var pi: Float32 = 3.14159265358979
+    # mjd_magnus_force: force += mc cross(w, v)
+    var mc = magnus * rho * 4.0 / 3.0 * pi * s[0] * s[1] * s[2]
+    var sk = skew(v * mc)
+    badd(B, 1, 0, (-sk[0], -sk[1], -sk[2]))
+    badd(B, 1, 1, skew(w * mc))
+    # mjd_kutta_lift
+    var a = pow2(s[1] * s[2]); var bb = pow2(s[2] * s[0]); var cc = pow2(s[0] * s[1])
+    var aa = a * a; var bb2 = bb * bb; var cc2 = cc * cc
+    var x = v[0]; var y = v[1]; var z = v[2]
+    var xx = x * x; var yy = y * y; var zz = z * z; var xy = x * y; var yz = y * z; var xz = x * z
+    var pden = aa * xx + bb2 * yy + cc2 * zz
+    var pnum = a * xx + bb * yy + cc * zz
+    var norm2 = xx + yy + zz
+    var dfden = pi * kutta * rho / max(Float32(1e-15), sqrt(pden * pnum * norm2))
+    var dfx = yy * (a - bb) + zz * (a - cc)
+    var dfy = xx * (bb - a) + zz * (bb - cc)
+    var dfz = xx * (cc - a) + yy * (cc - bb)
+    var pterm = pnum / max(Float32(1e-15), pden)
+    var cterm = pnum / max(Float32(1e-15), norm2)
+    var inner = V3(aa * pterm - a + cterm, bb2 * pterm - bb + cterm, cc2 * pterm - cc + cterm, 0)
+    var d0 = V3(a - a, bb - a, cc - a, 0) * (2 * pnum) + inner * dfx
+    var d1 = V3(a - bb, bb - bb, cc - bb, 0) * (2 * pnum) + inner * dfy
+    var d2 = V3(a - cc, bb - cc, cc - cc, 0) * (2 * pnum) + inner * dfz
+    d0 = d0 * V3(xx, xy, xz, 0); d1 = d1 * V3(xy, yy, yz, 0); d2 = d2 * V3(xz, yz, zz, 0)
+    d0[0] -= dfx * pnum; d1[1] -= dfy * pnum; d2[2] -= dfz * pnum
+    badd(B, 1, 1, (d0, d1, d2), dfden)
+    # mjd_viscous_drag
+    var dmax = max(max(s[0], s[1]), s[2])
+    var dmin = min(min(s[0], s[1]), s[2])
+    var dmid = s[0] + s[1] + s[2] - dmax - dmin
+    var dsph = 2.0 / 3.0 * (s[0] + s[1] + s[2])
+    var amax = pi * dmax * dmid
+    var dacoef = pi / max(Float32(1e-15), sqrt(pnum * pnum * pnum * pden))
+    var aproj = pi * sqrt(pden / max(Float32(1e-15), pnum))
+    var nrm = sqrt(norm2)
+    var invn = 1 / max(Float32(1e-15), nrm)
+    var lincoef = mu * 3 * pi * dsph
+    var quad = rho * (aproj * blunt + slender * (amax - aproj))
+    var apc = rho * nrm * (blunt - slender)
+    var dap = V3(apc * dacoef * a * x * (bb * yy * (a - bb) + cc * zz * (a - cc)), apc * dacoef * bb * y * (a * xx * (bb - a) + cc * zz * (bb - cc)),
+                 apc * dacoef * cc * z * (a * xx * (cc - a) + bb * yy * (cc - bb)), 0)
+    var e0 = V3(xx + norm2, xy, xz, 0) * (-quad * invn) - dap * x
+    var e1 = V3(xy, yy + norm2, yz, 0) * (-quad * invn) - dap * y
+    var e2 = V3(xz, yz, zz + norm2, 0) * (-quad * invn) - dap * z
+    e0[0] -= lincoef; e1[1] -= lincoef; e2[2] -= lincoef
+    badd(B, 1, 1, (e0, e1, e2))
+    # mjd_viscous_torque
+    var imax = 8.0 / 15.0 * pi * dmid * pow4(dmax)
+    var momc = V3(0)
+    for k in range(3):
+        var ii = 8.0 / 15.0 * pi * s[k] * pow4(max(s[(k + 1) % 3], s[(k + 2) % 3]))
+        momc[k] = angd * ii + slender * (imax - ii)
+    var momv = w * momc
+    var dens = rho / max(Float32(1e-15), sqrt((momv * momv).reduce_add()))
+    var msq = w * momc * momc * (-dens)
+    var diag = (w * msq).reduce_add() - mu * pi * dsph * dsph * dsph
+    var t0 = msq * w[0]; var t1 = msq * w[1]; var t2 = msq * w[2]
+    t0[0] += diag; t1[1] += diag; t2[2] += diag
+    badd(B, 0, 0, (t0, t1, t2))
+    # mjd_addedMassForces
+    var vam = vi * w * rho
+    var vlm = vm * v * rho
+    sk = skew(w)
+    badd(B, 0, 0, skew(vam))
+    badd(B, 0, 0, (-sk[0], -sk[1], -sk[2]), 1, vi * rho)
+    sk = skew(v)
+    badd(B, 0, 1, skew(vlm))
+    badd(B, 0, 1, (-sk[0], -sk[1], -sk[2]), 1, vm * rho)
+    sk = skew(w)
+    badd(B, 1, 0, skew(vlm))
+    badd(B, 1, 1, (-sk[0], -sk[1], -sk[2]), 1, vm * rho)
+    B = B * coef
+    if sym:  # implicitfast: mju_symmetrize(B)
+        var Bt = B66(0)
+        for i in range(6):
+            for j in range(6):
+                Bt[i * 6 + j] = 0.5 * (B[i * 6 + j] + B[j * 6 + i])
+        B = Bt
+    jtbj(mi, res, f, b, p, q, B, h, False)
+
+
+def box_deriv(mi: TI, mf: TF, res: TO, f: Int, b: Int, h: Float32, sym: Bool):
+    """MuJoCo mjd_inertiaBoxFluid (engine_derivative.c:1724): diagonal B, the same prologue as inertia_box()."""
+    var rho = mf[FLF]
+    var mu = mf[FLF + 1]
+    var m = mf[MASS + b]
+    var I = m3(mf, INERTIA + 3 * b)
+    var bx = V3(sqrt(max(Float32(1e-15), I[1] + I[2] - I[0]) / m * 6), sqrt(max(Float32(1e-15), I[0] + I[2] - I[1]) / m * 6),
+                sqrt(max(Float32(1e-15), I[0] + I[1] - I[2]) / m * 6), 0)
+    var bd = body(res, f, b)
+    var p = V3(get(res, f, OXI + 3 * (b - 1)), get(res, f, OXI + 3 * (b - 1) + 1), get(res, f, OXI + 3 * (b - 1) + 2), 0)
+    var q = mul(bd[1], m4(mf, IQUAT + 4 * b))
+    var lv = local_wrench(mi, mf, res, f, b, p, q)
+    var B = B66(0)
+    var pi: Float32 = 3.14159265358979
+    if mu > 0:
+        var diam = (bx[0] + bx[1] + bx[2]) / 3
+        for k in range(3):
+            B[k * 7] = -pi * diam * diam * diam * mu
+            B[(3 + k) * 7] = -3 * pi * diam * mu
+    if rho > 0:
+        B[0] -= rho * bx[0] * (pow4(bx[1]) + pow4(bx[2])) * 2 * abs(lv[0]) / 64
+        B[7] -= rho * bx[1] * (pow4(bx[0]) + pow4(bx[2])) * 2 * abs(lv[1]) / 64
+        B[14] -= rho * bx[2] * (pow4(bx[0]) + pow4(bx[1])) * 2 * abs(lv[2]) / 64
+        B[21] -= rho * bx[1] * bx[2] * abs(lv[3])
+        B[28] -= rho * bx[0] * bx[2] * abs(lv[4])
+        B[35] -= rho * bx[0] * bx[1] * abs(lv[5])
+    jtbj(mi, res, f, b, p, q, B, h, True)
+
+
+def fluid_deriv(mi: TI, mf: TF, res: TO, f: Int, h: Float32, sym: Bool):
+    """mjd_passive_vel's fluid terms (engine_derivative.c:1890): the ellipsoid rows, then the inertia-box bodies, into the implicit factor."""
+    for r in range(NFLROW):
+        ellipsoid_deriv(mi, mf, res, f, r, h, sym)
+    for k in range(NFLBOX):
+        box_deriv(mi, mf, res, f, Int(mi[FLI + 2 * NFLROW + k]), h, sym)
+
+
 @always_inline
 def ten_j(mi: TI, mf: TF, res: TO, f: Int, t: Int, v: Int) -> Float32:
     """Tendon t's moment on dof v: the dense row spatial() wrote (OTJ), else the fixed tendon's wrap coef on that dof (0 if none)."""
@@ -2777,6 +3008,8 @@ def implicit_factor(mi: TI, mf: TF, qvel: TV, res: TO, f: Int):
             for c in range(Int(mi[DRN + k])):
                 var e = Int(mi[DRA + k]) + c
                 res[(OQLU + e) * F + f] += h * damp * jk * ten_j(mi, mf, res, f, t, Int(mi[DCOL + e]))
+    comptime if NFLUID:  # mjd_passive_vel fluid terms
+        fluid_deriv(mi, mf, res, f, h, False)
     comptime if STAGE >= 7:  # as implicitfast: moment' bias_vel moment per joint actuator, skipped where forcerange clamps
         for u in range(NU):
             var a = CACT + 5 * u
@@ -3055,6 +3288,8 @@ def euler(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int):
                     for c in range(Int(mi[MNNZ + k])):
                         var e = Int(mi[MADR + k]) + c
                         res[(OQH + e) * F + f] += h * damp * jk * ten_j(mi, mf, res, f, t, Int(mi[MCOL + e]))
+        comptime if INTEGRATOR == 3 and NFLUID:  # mjd_passive_vel fluid terms, B symmetrized (mj_implicitSkip implicitfast)
+            fluid_deriv(mi, mf, res, f, h, True)
         comptime if INTEGRATOR == 3 and STAGE >= 7:
             # mj_implicitSkip (engine_forward.c:1864) implicitfast: qH = M - h qDeriv. The dof damping above is -qDeriv of mjd_passive_vel;
             # mjd_actuator_vel adds moment' bias_vel moment per joint actuator (diagonal: gear^2 biasprm[2]), skipped where forcerange clamps

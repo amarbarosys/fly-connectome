@@ -240,6 +240,8 @@ def override(m):
         elif key == 'kv':
             joint = (m.actuator_trntype == mujoco.mjtTrn.mjTRN_JOINT) & (m.actuator_biastype == mujoco.mjtBias.mjBIAS_AFFINE)
             m.actuator_biasprm[joint, 2] = -float(val)
+        elif key == 'cone':  # mjtCone value: the flight model ships elliptic, gated under Euler only; its fluid-derivative gate runs it pyramidal
+            m.opt.cone = int(val)
         elif key == 'dt':  # timestep: explicit RK4 damps dofs explicitly, h B / M reaches 5.9 on the fly at h 1e-4 (stable below 2.8)
             m.opt.timestep = float(val)
         elif key == 'kp':  # servo stiffness scale: explicit RK4 at the shipped kp (h 1e-4, light limbs) is unstable in MuJoCo itself
@@ -342,9 +344,6 @@ def load(mjcf):
     if m.tendon_limited.any() or m.tendon_frictionloss.any() \
             or m.tendon_stiffnesspoly.any() or m.tendon_dampingpoly.any() or m.tendon_actfrclimited.any():
         raise SystemExit('FAIL export: only unlimited tendons without friction loss, with linear spring and damper, are ported')
-    if m.opt.integrator in (mujoco.mjtIntegrator.mjINT_IMPLICIT, mujoco.mjtIntegrator.mjINT_IMPLICITFAST):
-        if m.opt.density or m.opt.viscosity:  # mjd_passive_vel fluid terms of qDeriv: not ported (tendon damping is: check.sh implicit)
-            raise SystemExit('FAIL export: implicit and implicitfast need the fluid velocity derivatives (mjd_passive_vel), not ported')
     return m
 
 
