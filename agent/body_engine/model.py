@@ -871,12 +871,15 @@ def meshes(mjcf, out, grid=0, world=None):
         rgba = m.mat_rgba[m.geom_matid[g]] if m.geom_matid[g] >= 0 else m.geom_rgba[g]
         add(m.geom_bodyid[g], m.geom_pos[g], m.geom_quat[g], v, f, rgba, f'geom {g}')
     if world is not None:
-        from agent.body_engine.assets import primitive
+        from agent.body_engine.assets import primitive, split
         for g in np.flatnonzero((m.geom_bodyid == 0) & np.isin(m.geom_type, (mujoco.mjtGeom.mjGEOM_BOX, mujoco.mjtGeom.mjGEOM_ELLIPSOID))):
-            v, f = primitive(int(m.geom_type[g] == mujoco.mjtGeom.mjGEOM_BOX), m.geom_size[g])
             rgba = m.mat_rgba[m.geom_matid[g]] if m.geom_matid[g] >= 0 else m.geom_rgba[g]
+            if rgba[3] == 0:  # invisible (the lid): nothing to draw, and split it alone overflows a part's 65,535 vertices
+                continue
+            v, f = split(*primitive(int(m.geom_type[g] == mujoco.mjtGeom.mjGEOM_BOX), m.geom_size[g]))
             add(0, m.geom_pos[g], m.geom_quat[g], v, f, rgba, mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_GEOM, g))
         for i, (v, f, rgba) in enumerate(world):
+            v, f = split(v, f)
             add(0, (0, 0, 0), (1, 0, 0, 0), np.asarray(v, float), f, rgba, f'world part {i}')
     np.array(ints, np.int32).tofile(out / 'rmi.bin')
     np.array(floats, np.float32).tofile(out / 'rmf.bin')

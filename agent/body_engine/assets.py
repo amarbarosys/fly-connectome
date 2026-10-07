@@ -50,6 +50,24 @@ def primitive(box, size):
     return v * size[:3], f
 
 
+def split(v, f, edge=0.4):
+    """triangles cut in half along their longest side until every side is under `edge` mm: render.raster gives one
+    thread a triangle's whole screen box, so a long blade or wall near the camera held a thread for thousands of pixels."""
+    v, out = [np.asarray(p, float) for p in v], []
+    todo = [tuple(t) for t in f]
+    while todo:
+        a, b, c = todo.pop()
+        sides = [(np.linalg.norm(v[a] - v[b]), a, b, c), (np.linalg.norm(v[b] - v[c]), b, c, a), (np.linalg.norm(v[c] - v[a]), c, a, b)]
+        n, i, j, k = max(sides)
+        if n < edge:
+            out.append((a, b, c))
+            continue
+        v.append((v[i] + v[j]) / 2)
+        m = len(v) - 1
+        todo += [(i, m, k), (m, j, k)]
+    return np.array(v), np.array(out)
+
+
 def merge(parts):
     vs, fs, n = [], [], 0
     for v, f in parts:
