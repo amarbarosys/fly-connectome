@@ -10,7 +10,7 @@ window, and fly3_dn.bin int32 DN neuron ids, left then right; env FLY3_GRAPH: th
 """
 from std.collections import Optional
 from std.atomic import Atomic
-from std.gpu import block_idx, block_dim, thread_idx
+from max.gpu import block_idx, block_dim, thread_idx
 from std.os import getenv
 from std.sys import get_defined_int
 from max.gpu.host import DeviceContext, DeviceBuffer

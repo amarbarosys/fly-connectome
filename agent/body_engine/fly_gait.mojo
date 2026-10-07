@@ -11,7 +11,7 @@ Writes the 42 leg servo targets and the 6 adhesion values into the engine's ctrl
 value, the two head servos hold). tab = per leg: 4 x NSEG x 7 coefficients (c3 dx^3 + c2 dx^2 + c1 dx + c0 order as scipy: c[0] highest), 7 neutral values,
 swing_end; state = 6 phases, 6 magnitudes.
 """
-from std.gpu import thread_idx
+from max.gpu import thread_idx
 from std.sys import get_defined_int
 from layout import TileTensor, row_major
 from smooth import F, NU, TU
