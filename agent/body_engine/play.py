@@ -45,7 +45,7 @@ EYES = os.environ.get('PLAY_EYES', '0') == '1'  # the world's proximity reaches 
 EYE_EVERY = 20  # control steps per eye frame: 50 Hz
 CAL = 250  # control steps (0.25 s) of W held after fl.WINDOW: the drive reference is their mean DN rate per side; the first 50 ms
 # alone (still ramping: 244 vs 524 Hz L/R) left W decoding 0.84 vs 0.67 and the fly turning -34 deg
-HOLD = fl.WINDOW + CAL
+HOLD = fl.WINDOW + 2 * CAL  # two calibration windows: W alone (-> HEADROOM), then W + symmetric loom (-> 1)
 HEADROOM = 0.8  # W decodes to this drive: room above it for the brain's own turns before the clip at 1
 NAMES = ('idle', 'w', 'a', 'd', 'w+threat')
 
@@ -184,8 +184,11 @@ def setup(F, render=0, out='/dev/null', seed=None, q0=None):
 
 def loop(brain, eng, gaits, rates_at, steps, on_step=None):
     """Brain + body for `steps` control steps (0 = until rates_at returns None). The first HOLD steps hold the body and
-    fire `w` in every column; the last CAL of them fix the drive scale (W -> HEADROOM) (W = full drive, as fly_link's symmetric eye drive); then rates_at(i, game)."""
-    j = brain.names.index('w')
+    fire `w` in every column; the last 2 CAL of them calibrate the decoder per side: W alone -> HEADROOM (ref_w), then W + symmetric loom -> 1
+    (ref_l, fly_link's recipe: the symmetric eye drive is the top of the scale). The map is piecewise linear through (0, 0), (ref_w, HEADROOM),
+    (ref_l, 1), so a one-sided loom leaves the other side near HEADROOM instead of clipping both at 1 (2026-10-07: with W alone as the only
+    reference a forced one-sided loom was swap-invariant; with the loom reference alone W decoded to 0.1, docs/plans/PLAY.md); then rates_at(i, game)."""
+    j, lm = brain.names.index('w'), [brain.names.index('loom-' + s) for s in ('left', 'right')]
     zero = np.zeros((brain.cols, 2), np.int64)
     cum, split, held = deque([zero], fl.WINDOW + 1), deque([zero], fl.WINDOW + 1), gaits[0].held  # one window of history, fixed size
     ref, tr, cost = None, [], dict.fromkeys(('neural', 'write', 'rates', 'gait', 'recv', 'send', 'on_step'), 0.0)  # s per stage
@@ -210,6 +213,8 @@ def loop(brain, eng, gaits, rates_at, steps, on_step=None):
         if i < HOLD:
             r = np.zeros((brain.cols, len(brain.names)), np.float32)
             r[:, j] = brain.hz[j]
+            if i >= HOLD - CAL:  # second window: W + symmetric loom
+                r[:, lm] = brain.hz[lm]
             return r
         return rates_at(i - HOLD, game)
 
@@ -235,11 +240,13 @@ def loop(brain, eng, gaits, rates_at, steps, on_step=None):
         split.append(sp)
         w = min(i + 1, fl.WINDOW)
         rate = (cum[-1] - cum[-1 - w]) / (w * fl.K * fl.DT)
-        if i + 1 == HOLD - CAL:  # start of the calibration window: W held, body held, brain settled
+        if i + 1 == HOLD - 2 * CAL:  # start of the W window: W held, body held, brain settled
             cal0 = s
+        if i + 1 == HOLD - CAL:  # end of the W window, start of the W + loom window
+            ref_w, cal0 = np.maximum(((s - cal0) / (CAL * fl.K * fl.DT)).mean(0), 1.0), s
         if i + 1 == HOLD:
-            ref = np.maximum(((s - cal0) / (CAL * fl.K * fl.DT)).mean(0) / HEADROOM, 1.0)
-        drive = np.clip(rate / ref, 0, 1) if i >= HOLD else np.zeros_like(rate, float)
+            ref = np.maximum(((s - cal0) / (CAL * fl.K * fl.DT)).mean(0), ref_w + 1.0)
+        drive = np.where(rate <= ref_w, HEADROOM * rate / ref_w, HEADROOM + (1 - HEADROOM) * (rate - ref_w) / (ref - ref_w)).clip(0, 1) if i >= HOLD else np.zeros_like(rate, float)
         t = time.perf_counter()
         ctrl = np.stack([g.ctrl(dv) for g, dv in zip(gaits, drive)]) if i >= HOLD else np.tile(held, (brain.cols, 1))
         cost['gait'] += time.perf_counter() - t
@@ -253,7 +260,7 @@ def loop(brain, eng, gaits, rates_at, steps, on_step=None):
     if pend is not None:
         take(*pend)
     cost['steps'] = i
-    return np.array(tr), ref, cost
+    return np.array(tr), np.stack([ref_w, ref]), cost
 
 
 def check(*args):
@@ -298,7 +305,7 @@ def check(*args):
     out = {'forward_body_lengths': fwd, 'yaw_deg': yaw, 'tilt_max': {k: res[k]['tilt_max'] for k in NAMES},
            'w+threat [player, own] DN spikes, last window before / during': [before.tolist(), during.tolist()],
            'game rows end (energy, health, stamina, dead)': {k: game[c].tolist() for c, k in enumerate(NAMES)},
-           'drive ref (DN Hz, W held)': ref.tolist(),
+           'drive ref (DN Hz per side: W held, W + symmetric loom)': ref.tolist(),
            'drive [L, R] mean / clipped at 1 share': {k: [np.mean(drives, 0)[c].tolist(), np.mean(np.array(drives)[:, c] >= 1, 0).tolist()] for c, k in enumerate(NAMES)}, 'ms per control step': {k: 1e3 * v / n for k, v in cost.items() if k != 'steps'},
            'engine COST ms/frame': engine_cost, 'work_rate': WORK_RATE, 'gates': gates}
     (OUT / ('check.json' if seed is None else f'check-world{seed}.json')).write_text(json.dumps(out, indent=1, default=float) + '\n')
