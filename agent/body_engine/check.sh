@@ -240,13 +240,14 @@ if [ "$stage" = loop ]; then  # K steps per launch, state kept on the card. K=1 
   # gate); one K=10 launch must equal ten K=1 launches byte for byte (the loop). K=10 vs ten chained mj_step is not a
   # gate: the engine's ~5e-6 per-step float32 error grows ~12x in 10 steps on contact-rich states (diag/k_floor.py)
   F=.work/agent/gpu-body-port/body-v2/body.xml
-  $M -m agent.body_engine.model check $F $X/fly actuated 64 1 || { echo "FAIL fly loop K=1"; fail=$((fail+1)); }
+  # one step is not a chained trajectory: the chaotic-state filter (for K>1 at wide bars) flags 52/64 states at this 1e-5 bar
+  CHAOS_SEEDS=0 $M -m agent.body_engine.model check $F $X/fly actuated 64 1 || { echo "FAIL fly loop K=1"; fail=$((fail+1)); }
   ~/iTools/bin/mojo-cached build $(cat $X/fly/sizes.txt) -DFLIES=64 -DSTAGE=7 -DK=10 -DWAVE=${WAVE:-0} agent/body_engine/smooth.mojo -o $X/fly/k10
   cp $X/fly/state10.bin $X/fly/k1x10.bin && $X/fly/k10 $X/fly/
   cmp $X/fly/state.bin $X/fly/k1x10.bin && echo "PASS K=10 launch == 10 K=1 launches, byte-equal" || { echo "FAIL loop K=10 vs 10 x K=1"; fail=$((fail+1)); }
   # the gate must fail with the velocity write-back dropped (each step restarts from the launch's qvel)
   ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo 's/qvel\[v \* F + f\] += mf\[TSTEP\]/qvel[v * F + f] += 0 * mf[TSTEP]/' -- \
-    $M -m agent.body_engine.model check .work/agent/gpu-body-port/body-v2/body.xml $X/mutant actuated 64 1 || fail=$((fail+1))
+    env CHAOS_SEEDS=0 $M -m agent.body_engine.model check .work/agent/gpu-body-port/body-v2/body.xml $X/mutant actuated 64 1 || fail=$((fail+1))
   [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
   echo "PASS all loop checks"; exit 0
 fi
