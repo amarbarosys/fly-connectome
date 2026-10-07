@@ -73,7 +73,12 @@ def saved(out):
         assert abs(row['source_elapsed_s'] - row['physical_time_s']) < .001
         assert np.isfinite(row['position_mm']).all()
         assert np.all(np.asarray(row['inputs'])[:6] == 0)
-        if i == 0 or p['trial'][i] != p['trial'][i - 1]:
+        k = int(p['source_indices'][i])
+        if 'replay_timestamps' in p:
+            # Continuous replay: every frame follows the previous source sample.
+            assert p['replay_heading'][k] == p['heading'][i] and p['replay_contrast'][k] == p['proxy_contrast'][i]
+            dt = p['replay_timestamps'][k] - p['replay_timestamps'][k - 1] if k else .01
+        elif i == 0 or p['trial'][i] != p['trial'][i - 1]:
             dt = .01
         else:
             dt = s['timestamps'][i] - s['timestamps'][i - 1]
@@ -113,15 +118,34 @@ def neural_clock():
     return {'neural_clock': 'PASS', 'check': '40 single updates equal ten four-update batches exactly'}
 
 
+def continuity():
+    """Brain state carries across windows: each window starts where the replay left it, not at zero."""
+    import tempfile
+    from agent.calcium_validation import ROOT, record
+    t = np.arange(8) * .1; heading = np.linspace(-1., 1., 8); frames = np.asarray([2, 3, 6, 7])
+    with tempfile.TemporaryDirectory(dir=ROOT / '.work') as tmp:
+        np.savez(Path(tmp) / 'protocol.npz', replay_timestamps=t, replay_heading=heading,
+            replay_contrast=np.ones(8), source_indices=frames, source_timestamps=t[frames],
+            heading=heading[frames], proxy_contrast=np.ones(4), trial=np.asarray([0, 0, 1, 1]),
+            contrast_code=np.full(4, 3), cue_heading_sign=-1, neural_tick_s=.0025, source_stimulus=True)
+        states = record(Path(tmp))['window_initial_state']
+    assert [w['trial'] for w in states] == [0, 1]
+    assert all(w['state_l1'] > 0 for w in states), states
+    return {'continuity': 'PASS', 'window_initial_state': states}
+
+
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--saved', type=Path)
     parser.add_argument('--neural-clock', action='store_true')
+    parser.add_argument('--continuity', action='store_true')
     args = parser.parse_args()
     report = mechanics()
     if args.neural_clock:
         report.update(neural_clock())
+    if args.continuity:
+        report.update(continuity())
     if args.saved:
         report.update(saved(args.saved))
         (args.saved / 'verification.json').write_text(json.dumps(report, indent=2) + '\n')

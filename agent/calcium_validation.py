@@ -82,7 +82,12 @@ def prepare(out, frames=48, start_offset=1., source_matched=False):
     code = contrasts[trials].astype(int)
     if not set(code) <= {1, 2, 3}:
         raise ValueError('unknown source contrast category')
-    proxy_contrast = np.choose(code - 1, [0., 1. / 15 if source_matched else .25, 1.])
+    levels = np.asarray([0., 1. / 15 if source_matched else .25, 1.])
+    proxy_contrast = levels[code - 1]
+    # Every source sample from recording start to the last window: the brain runs
+    # through the gaps between windows, as the recording does.
+    last = int(selected[-1]) + 1
+    replay_contrast = levels[contrasts[np.searchsorted(starts, t[:last], 'right') - 1].astype(int) - 1]
     # Trial-level final holdout. Train/selection share the first three trials.
     within = np.tile(np.arange(frames), 6)
     train = (trials < 3) & (within >= 8) & (within < int(frames * .65))
@@ -97,7 +102,8 @@ def prepare(out, frames=48, start_offset=1., source_matched=False):
         train=train, selection=selection, final=final,
         cue_heading_sign=-1 if source_matched else 1,
         neural_tick_s=.0025 if source_matched else 0.,
-        source_stimulus=source_matched)
+        source_stimulus=source_matched, replay_timestamps=t[:last],
+        replay_heading=heading[:last], replay_contrast=replay_contrast)
     report = {'status': 'PASS', 'reference_sha256': digest(REFERENCE),
         'source_nwb': str(NWB), 'frames_per_trial': frames,
         'window_start_offset_s': start_offset,
@@ -117,7 +123,7 @@ def prepare(out, frames=48, start_offset=1., source_matched=False):
             if source_matched else 'four dimensionless updates per source frame'),
         'methods_url': 'https://www.nature.com/articles/s41593-024-01823-z',
         'splits': 'first 3 trial windows train/selection with 4-frame gap; last 3 windows final; first 8 frames excluded from scoring',
-        'coverage': 'six short contiguous windows, not full 20-minute replay'}
+        'coverage': 'six short scored windows; brain and eyes replay every source sample from 0 s to the last window, zero state only at 0 s'}
     write_json(out / 'protocol.json', report)
     return report
 
@@ -168,37 +174,25 @@ def record(out):
     rates, rows = [], []
     started = time.monotonic()
     current_trial = -1
-    previous_source = None
+    window_states = []
+    times, headings, levels = (protocol['replay_' + k] for k in ('timestamps', 'heading', 'contrast'))
+    frame = np.full(len(times), -1); frame[protocol['source_indices']] = np.arange(len(protocol['source_indices']))
+    counts = np.zeros(len(indices), np.float64)
+    sensory = np.zeros((1, 8), np.float32)
     try:
         arena = EthologyArena(seed=20261001, food_patches=[])
         # No eye or body image rendering is needed for the explicit retinal proxy.
         arena.eye_renderer.close()
         arena.eye_renderer = None
         initial = copy.deepcopy(arena.get_state())
-        for i, (trial, source_time, heading, contrast) in enumerate(zip(
-                protocol['trial'], protocol['source_timestamps'],
-                protocol['heading'], protocol['proxy_contrast'])):
-            if int(trial) != current_trial:
-                current_trial = int(trial)
-                arena.set_state(copy.deepcopy(initial))
-                brain.reset()
-                vision = EyeVision()
-                previous_source = float(source_time) - .01
-                trial_origin = previous_source
-            dt = float(source_time) - previous_source
-            previous_source = float(source_time)
-            # The source clock determines the physical interval; no wall pacing.
-            arena.step_behavior('WALK', [.4, .6], milliseconds=dt * 1000)
-            body_yaw = float(arena.heading)
-            cue_world = float(wrap(body_yaw + sign * heading))
-            relative = float(cue_relative(body_yaw, cue_world))
-            if abs(float(wrap(relative - sign * heading))) > 1e-10:
-                raise AssertionError('cue frame does not match source heading')
+        vision = EyeVision()
+        previous_source = float(times[0]) - .01
+
+        def advance(relative, contrast, dt):
             visual, _, info = vision.step(cue_images(relative, contrast,
                 width=48 if source_stimulus else 64, source_stimulus=source_stimulus))
-            sensory = np.zeros((1, 8), np.float32)
             sensory[0, 6:8] = visual
-            counts = np.zeros(len(indices), np.float64)
+            counts[:] = 0
             # The legacy pilot used four updates/frame; the source-informed mode
             # preserves the existing nominal 400 Hz model clock across sample rates.
             ticks = int(round(dt / tick_s)) if tick_s else 4
@@ -206,7 +200,36 @@ def record(out):
                 raise ValueError('source frame cannot be aligned to neural clock')
             for _ in range(ticks):
                 brain.step(sensory, ticks=1)
-                counts += brain.spikes[indices, 0]
+                counts[:] += brain.spikes[indices, 0]
+            return ticks, info
+
+        bridge_updates = 0
+        for k, (source_time, heading, contrast) in enumerate(zip(times, headings, levels)):
+            if k and k % 480 == 0:
+                print(json.dumps({'replayed_samples': k, 'recorded_frames': len(rows),
+                                  'wall_s': time.monotonic() - started}), flush=True)
+            dt = float(source_time) - previous_source
+            previous_source, i = float(source_time), int(frame[k])
+            if i < 0:
+                # Unscored sample before or between windows: brain and eyes only.
+                bridge_updates += advance(float(wrap(sign * heading)), contrast, dt)[0]
+                continue
+            if int(protocol['trial'][i]) != current_trial:
+                # Only the prescribed body restarts per window; brain state carries over.
+                current_trial = int(protocol['trial'][i])
+                arena.set_state(copy.deepcopy(initial))
+                trial_origin = float(source_time) - dt
+                window_states.append({'trial': current_trial, 'source_time_s': float(source_time),
+                    'state_l1': float(sum(np.abs(x).sum(dtype=np.float64) for x in (brain.v, brain.trace, brain.a))),
+                    'ever_fired': int(brain.ever.sum())})
+            # The source clock determines the physical interval; no wall pacing.
+            arena.step_behavior('WALK', [.4, .6], milliseconds=dt * 1000)
+            body_yaw = float(arena.heading)
+            cue_world = float(wrap(body_yaw + sign * heading))
+            relative = float(cue_relative(body_yaw, cue_world))
+            if abs(float(wrap(relative - sign * heading))) > 1e-10:
+                raise AssertionError('cue frame does not match source heading')
+            ticks, info = advance(relative, contrast, dt)
             rates.append(counts / dt)
             rows.append({'sample': i, 'source_frame': int(protocol['source_indices'][i]),
                 'trial': current_trial, 'source_time_s': float(source_time),
@@ -221,9 +244,6 @@ def record(out):
                 'neural_updates': ticks,
                 'model_update_interval_s_assumption': tick_s or dt / 4,
                 'retinal_image_sha256': info['image_sha256']})
-            if (i + 1) % 48 == 0:
-                print(json.dumps({'recorded_frames': i + 1,
-                                  'wall_s': time.monotonic() - started}), flush=True)
         np.savez_compressed(out / 'simulation.npz', source_indices=protocol['source_indices'],
             trial=protocol['trial'], timestamps=protocol['source_timestamps'],
             epg_root_ids=roots, epg_roster_indices=indices, spike_rate=rates)
@@ -240,6 +260,9 @@ def record(out):
                 if tick_s else '4 dimensionless updates/source frame; dt/4 interpretation is uncalibrated'),
             'source_stimulus': source_stimulus,
             'neural_updates': sum(r['neural_updates'] for r in rows),
+            'bridge_neural_updates': bridge_updates,
+            'brain_state': 'continuous from recording start (zero state at 0 s only); unscored samples between windows replayed through brain and eyes',
+            'window_initial_state': window_states,
             'graph_weights': 'unchanged', 'protocol_sha256': digest(out / 'protocol.npz'),
             'annotation_sha256': digest(ANNOTATIONS)}
         write_json(out / 'recording.json', report)
@@ -376,7 +399,7 @@ def evaluate(out):
         'frozen_observer_sha256': frozen_hash,
         'observation_model': 'two exponential filters (.05 s rise; .6 or 1.2 s decay) + train-only ridge map from 47 annotated EPG units to 42 ROIs; hypothesis, not calibrated GCaMP7f kinetics',
         'split': 'first 3 short trial windows train/selection; last 3 windows final, no final-driven fitting',
-        'limits': ('one fly, reset short windows, coarse visual ports, grayscale digital-level proxy without optical calibration, imaging-rate stimulus holds, nominal engineering clock without biological calibration, unknown ROI-to-neuron mapping; shifted controls not biological replicates'
+        'limits': ('one fly, short scored windows, coarse visual ports, grayscale digital-level proxy without optical calibration, imaging-rate stimulus holds, nominal engineering clock without biological calibration, unknown ROI-to-neuron mapping; shifted controls not biological replicates'
             if source_stimulus else 'one fly, short windows, coarse visual ports, proxy contrast/geometry, assumed heading sign and neural clock, unknown ROI-to-neuron mapping; shifted controls not biological replicates'),
         'active_simulator_changed': False,
         'accepted_measurement_model': str(accepted_path) if gate else None,

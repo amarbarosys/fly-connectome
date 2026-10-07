@@ -73,7 +73,7 @@ Correction 2026-10-02: p-values recomputed with seed clusters (mirrored layouts 
 | Capability | Status | Number | Receipt | Entrypoint |
 |---|---|---:|---|---|
 | Learned one-decision odor steering readout | PASS | 15/16 in the pilot; current scaled real arm 56/64 | `docs/plans/ODOR_MEMORY_PILOT.md`; `docs/plans/CONNECTOME_BENEFIT.md` | `./.venv/bin/python -m agent.verify_odor_memory_receipt --output <receipt>` |
-| Continuous state across calcium replay windows | broken | Brain state resets at each measurement window | `docs/plans/CONTROL_AUDIT.md`; `docs/plans/CALCIUM_VALIDATION.md` | `./.venv/bin/python -m agent.verify_calcium_validation` checks the replay validation receipt |
+| Continuous state across calcium replay windows | PASS (harness reset removed; science gate unchanged) | `record` replays every source sample from 0 s to the last window through brain and eyes (9,204 samples, 388,340 bridge updates on the source-v2 protocol); zero state only at 0 s, body still restarts per window (prescribed gait). Per-window first-frame state L1 260,752 / 264,017 vs reset-per-window mutant 0 / 0. The saved R^2 receipt predates the fix, is not rerun, measurement gate FAIL unchanged | `docs/plans/CALCIUM_VALIDATION.md`; `docs/plans/CONTROL_AUDIT.md` row 13 | `tools/calcium_continuity_check.sh` |
 
 ## LEARNING
 
@@ -132,7 +132,6 @@ Correction 2026-10-02: p-values recomputed with seed clusters (mirrored layouts 
 - GPU physics track closed; CPU MuJoCo stays the backend (`docs/plans/GPU_BODY_PORT.md`). Own engine (MuJoCo port) in progress: `docs/plans/BODY_ENGINE.md`.
 - Engage MBON output at sparse gain (KC-trace eligibility rule, per-class gain), then the reversal task.
 - Fix the dim-light vision response so the stripe can trigger spikes.
-- Preserve continuous neural state across calcium replay windows.
 
 ## Does not claim
 
