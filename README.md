@@ -79,3 +79,4 @@ validation.
 - Worm (C. elegans) connectome: [`docs/WORM_ASSET_INDEX.md`](docs/WORM_ASSET_INDEX.md)
 - Plans and protocols: [`docs/plans/`](docs/plans/)
 - Tests: `pytest tests/` (see `pytest.ini` for markers)
+- Toolchain: Mojo 1.1.0 / MAX 26.6.0 in `.venv` (builds go through `~/iTools/bin/mojo-cached`, which uses the `.venv/bin/mojo` of the repo or worktree holding the source)
