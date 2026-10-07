@@ -302,15 +302,66 @@ if [ "$stage" = flylink ]; then  # brain-driven fly in live, host transport (BRA
 fi
 if [ "$stage" = world_hud ]; then  # plume world in the live frame (-DWORLD=1, docs/plans/WORLD.md): odor sites sample the plume on the card, the HUD prints the
   # concentrations and draws the sources from the same descriptor, fly (fly/l_odor, fly/r_odor) and spider (leg I tarsus tips), decoy present and absent.
-  # Mutants: food/decoy swapped in the sampler, the presence flag ignored, mini-map y flipped
+  # Mutants: food/decoy swapped in the sampler, the presence flag ignored, mini-map y flipped, text colour back to white (illegible on the pale scene)
   export PYTHONPATH=$PWD
   W="$M -m agent.body_engine.world_check check"
   $W || { echo "FAIL world_hud"; fail=$((fail+1)); }
   ~/iTools/bin/mutant-check agent/body_engine/spectate.mojo 's|    plume\[2 \* s\] = c\[0\]|    plume[2 * s] = c[1]|' -- $W spider || fail=$((fail+1))
   ~/iTools/bin/mutant-check agent/body_engine/spectate.mojo 's|Int32(src\[8\]), src\[9\])|Int32(1), src[9])|' -- $W spider || fail=$((fail+1))
   ~/iTools/bin/mutant-check agent/body_engine/hud.mojo 's|center_y - (source_y - target_y) \* scale|center_y + (source_y - target_y) * scale|' -- $W spider || fail=$((fail+1))
+  ~/iTools/bin/mutant-check agent/body_engine/spectate.mojo 's|comptime TEXT_RGB = UInt32(0x202020)|comptime TEXT_RGB = UInt32(0xFFFFFF)|' -- $W spider || fail=$((fail+1))  # white text on the pale floor: invisible
   [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
   echo "PASS all world_hud checks"; exit 0
+fi
+if [ "$stage" = worldgame ]; then  # `live.py watch K world-game` as a user meets it (watch_world.py check): follow camera, bars from the engine's own game rows, plume text, mini-map in one frame.
+  # Mutants: the HUD reads a zero buffer instead of the engine rows, the mini-map launch dropped
+  export PYTHONPATH=$PWD
+  W="$M -m agent.body_engine.watch_world check"
+  $W || { echo "FAIL worldgame"; fail=$((fail+1)); }
+  ~/iTools/bin/mutant-check agent/body_engine/live.mojo 's|gs_src = o_b.create_sub_buffer\[DType.float32\](eng.OGAME \* eng.F, 4 \* eng.F)|gs_src = gs_b|' -- $W || fail=$((fail+1))
+  ~/iTools/bin/mutant-check agent/body_engine/live.mojo 's|ctx.enqueue_function(kmm, img, tpose, troot, tsrc, grid_dim=(spec.MAP \* spec.MAP + 63) // 64, block_dim=64)|pass|' -- $W || fail=$((fail+1))
+  [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
+  echo "PASS all worldgame checks"; exit 0
+fi
+if [ "$stage" = flygait ]; then  # the FlyGym gait on the card (fly_gait.mojo, live.mojo -DBRAIN=3): the kernel vs HybridTurningController on a 400-step drive sequence, max abs err <= 1e-5.
+  # Mutants: the coupling's phase difference reversed (sin(a - pi) = -sin(a + pi): the bias sign itself cannot be a mutant), the adhesion window, the drive sign
+  export PYTHONPATH=$PWD
+  G="$M -m agent.body_engine.fly_gait check"
+  $G || { echo "FAIL flygait"; fail=$((fail+1)); }
+  ~/iTools/bin/mutant-check agent/body_engine/fly_gait.mojo 's|sin64(theta\[j\] - theta\[i\] - 3.141592653589793)|sin64(theta[i] - theta[j] - 3.141592653589793)|' -- $G || fail=$((fail+1))
+  ~/iTools/bin/mutant-check agent/body_engine/fly_gait.mojo 's|ph < swing_end)|ph < swing_end - 0.5)|' -- $G || fail=$((fail+1))
+  ~/iTools/bin/mutant-check agent/body_engine/fly_gait.mojo 's|freq\[leg\] = FREQ if d >= 0 else -FREQ|freq[leg] = FREQ|' -- $G || fail=$((fail+1))
+  [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
+  echo "PASS all flygait checks"; exit 0
+fi
+if [ "$stage" = shiures ]; then  # the resident Shiu brain on a caller-owned DeviceContext (agent/body_engine/shiu_resident.mojo) vs ShiuLive.advance: counts and voltages bit-equal. Mutant: a tick counter that skips ticks
+  export PYTHONPATH=$PWD
+  R="$M -m agent.verify_shiu_resident"
+  $R || { echo "FAIL shiures"; fail=$((fail+1)); }
+  ~/iTools/bin/mutant-check agent/body_engine/shiu_resident.mojo 's|            self.t += 1|            self.t += 2|' -- $R || fail=$((fail+1))
+  [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
+  echo "PASS all shiures checks"; exit 0
+fi
+if [ "$stage" = flylink3 ]; then  # brain-driven fly, ONE DeviceContext (live.mojo -DBRAIN=3): fly_link's gates plus no host copy per step (rocprofv3 --memory-copy-trace). Submit with --vram 4.
+  # Mutants: the brain step dropped, the silence flag ignored, left and right drive merged
+  export PYTHONPATH=$PWD
+  L="$M -m agent.body_engine.fly_link3 check"
+  $L || { echo "FAIL flylink3"; fail=$((fail+1)); }
+  ~/iTools/bin/mutant-check agent/body_engine/live.mojo 's|            fly3.step(ctx, TileTensor(u_b, eng.LU), fr, max(eng.K, 1))|            pass|' -- $L || fail=$((fail+1))
+  ~/iTools/bin/mutant-check agent/body_engine/fly_brain.mojo 's|    if cfg\[2\] != 0 or not active:|    if not active:|' -- $L || fail=$((fail+1))
+  ~/iTools/bin/mutant-check agent/body_engine/fly_brain.mojo 's|drive\[1\] = min(max(rr /|drive[1] = min(max(rl /|' -- $L || fail=$((fail+1))
+  [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
+  echo "PASS all flylink3 checks"; exit 0
+fi
+if [ "$stage" = hudclip ]; then  # one 300-frame clip with every HUD overlay on (follow camera, game-state bars from the engine rows, plume text, mini-map), checked frame by frame
+  # (hud_clip.py), hooks off byte-equal to main's live.mojo. Mutants: the mini-map source x and y swapped (marker at the wrong place), a state bar one pixel short
+  export PYTHONPATH=$PWD
+  H="$M -m agent.body_engine.hud_clip"
+  $H || { echo "FAIL hudclip"; fail=$((fail+1)); }
+  ~/iTools/bin/mutant-check agent/body_engine/spectate.mojo 's|project_source(src\[5 \* k\], src\[5 \* k + 1\], tx, ty,|project_source(src[5 * k + 1], src[5 * k], tx, ty,|' -- $H || fail=$((fail+1))
+  ~/iTools/bin/mutant-check agent/body_engine/spectate.mojo 's|Float32(x - BAR_X) + 0.5 < fill.width|Float32(x - BAR_X) + 1.5 < fill.width|' -- $H || fail=$((fail+1))
+  [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
+  echo "PASS all hudclip checks"; exit 0
 fi
 if [ "$stage" = fluid ]; then  # Flybody flight model: mj_fluid (ellipsoid wings + inertia boxes) inside qfrc_passive, wing velocities up to flapping rate
   R=~/Projects/science/fly-connectome; FL=${FLIGHT:-$R/.work/flight-body}

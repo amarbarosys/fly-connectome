@@ -147,9 +147,10 @@ def scenario(name, absent):
     region = np.zeros((H, W), bool)
     region[g['TXT_Y']:g['TXT_Y'] + 2 * g['BAR_PITCH'], :g['BAR_X'] + 96 + 8] = True
     shown = hud & region
-    two = bool((shown == mask).all() and (img[mask][:, :3] == 255).all())
+    ratio = contrast(img, mask)
+    two = bool((shown == mask).all() and (img[mask][:, :3] == 0x20).all() and ratio >= 4.5)
     ok &= two
-    print(('PASS' if two else 'FAIL'), f'{tag} (2) text: {int(mask.sum())} glyph pixels expected, {int(shown.sum())} drawn, equal={bool((shown == mask).all())}')
+    print(('PASS' if two else 'FAIL'), f'{tag} (2) text: {int(mask.sum())} glyph pixels expected, {int(shown.sum())} drawn, equal={bool((shown == mask).all())}, contrast against the scene around it {ratio:.1f}:1 (bar 4.5:1: white text on the pale floor was invisible)')
     # (3) map: each source square at project_source, in its kind colour
     tx, ty = float(roots[-1, 0]), float(roots[-1, 1])
     three = True
@@ -170,6 +171,19 @@ def scenario(name, absent):
         print(('PASS' if good else 'FAIL'), f'{tag} (3) map source {i} kind {s.kind}: expected ({cx:.2f}, {cy:.2f}) got ({got[0]:.2f}, {got[1]:.2f}), {len(xs)} px')
     ok &= three
     return bool(ok)
+
+
+def contrast(img, mask):
+    """WCAG contrast ratio of the text pixels against the scene in a 3 px ring around them (HUD pixels excluded): legibility, which an exact-pixel gate cannot see."""
+    ring = np.zeros_like(mask)
+    for dy in range(-3, 4):
+        for dx in range(-3, 4):
+            ring |= np.roll(np.roll(mask, dy, 0), dx, 1)
+    ring &= ~mask & (img[..., 3] != 254)
+    lin = lambda c: np.where(c <= 0.04045, c / 12.92, ((c + 0.055) / 1.055) ** 2.4)
+    lum = lambda rgb: float((lin(np.asarray(rgb, float) / 255) * (0.2126, 0.7152, 0.0722)).sum(-1).mean()) if np.ndim(rgb) == 1 else float((lin(rgb.astype(float) / 255) * (0.2126, 0.7152, 0.0722)).sum(-1).mean())
+    a, b = lum(img[mask][:, :3]), lum(img[ring][:, :3])
+    return (max(a, b) + 0.05) / (min(a, b) + 0.05)
 
 
 def check(name):

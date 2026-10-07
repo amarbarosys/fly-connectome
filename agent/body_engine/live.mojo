@@ -20,6 +20,10 @@ spectator (docs/plans/RENDERER.md; each flag compiles none of its block when 0):
        between phases and, with arg 12 = FILE, writes the root trace FILE (float32 frame, root, xyz; arg 13 = game rows + effort sums per frame under GAME) and prints one COST line
        (ms per frame: physics, neural_control, render, copy, display; the syncs cost, the run is for the split, not for fps).
 
+BRAIN=3 (unit 5b; the fly's whole loop on this context: fly_brain.mojo = agent/body_engine/shiu_resident.mojo brain + DN readout + FlyGym gait kernel, no host copy per step, nothing
+       on stdin; env FLY3_WORK / FLY3_GRAPH name the brain's files, DIR/gait.* the gait tables; build (no extra -I: body_engine/shiu_worker.mojo is a symlink to agent/shiu_worker.mojo) -DSHIU_N= -DSHIU_E= -DSHIU_C=1 -DFLY_NDN= -DFLY_NDNL= -DGSEG=;
+       packets and frames as BRAIN=1/2; prints REF left right on exit).
+
 usage: live DIR/ FRAMES ex ey ez tx ty tz fovy_deg [OUT]
        DIR holds the engine files (mi.bin, mf.bin, qpos.bin, qvel.bin, ctrl.bin) and the mesh tables (rmi.bin ...);
        FRAMES 0 = until the reader closes the pipe; OUT = a .rgba file gets frame FRAMES-1 instead of the stream
@@ -39,6 +43,7 @@ from layout import TileTensor
 import spider_brain as brain
 import spectate as spec
 import eyes
+import fly_brain as fb
 
 comptime BRAIN = get_defined_int["BRAIN", 0]()
 comptime NVALID = eng.NSLOT
@@ -161,6 +166,7 @@ def main() raises:
     var pkt_v = ctx.enqueue_create_host_buffer[DType.float32](eng.NV * eng.F)
     var pkt_s = ctx.enqueue_create_host_buffer[DType.float32](max(NVALID, 1) * eng.F)
     var pkt_g = ctx.enqueue_create_host_buffer[DType.float32](4 * eng.F)  # GAME: the game rows ride after the contacts
+    var fly3 = fb.FlyBrain[BRAIN == 3](ctx, dir)  # BRAIN=3: the Shiu brain, DN readout and FlyGym gait on this context (fly_brain.mojo)
     var kb = ctx.compile_function[brain.gait]()  # launched only when BRAIN == 2
     var drive_b = ctx.enqueue_create_buffer[DType.float32](2 * eng.F)
     var k_ec = ctx.compile_function[eyes.eye_cam]()  # the eye kernels launch only when EYES
@@ -246,6 +252,8 @@ def main() raises:
                 if not read_all(0, gaze_h.unsafe_ptr().unsafe_bitcast[UInt8](), eng.F * 4):
                     return
                 ctx.enqueue_copy(gaze_b, gaze_h)
+        elif BRAIN == 3:
+            fly3.step(ctx, TileTensor(u_b, eng.LU), fr, max(eng.K, 1))
         elif BRAIN == 2:
             ctx.enqueue_function(kb, TileTensor(u_b, eng.LU), TileTensor(drive_b, brain.LD), Float32(fr * max(eng.K, 1)) * Float32(1e-4),
                 grid_dim=(eng.NU * eng.F + 63) // 64, block_dim=64)
@@ -396,6 +404,11 @@ def main() raises:
             comptime if PROFILE > 0:  # running per-phase split, so a long or killed run still reports where the time goes
                 var per = 1e-6 / Float64(max(fr, 1))
                 print("COST@" + String(fr), "physics", ms[1] * per, "neural_control", ms[0] * per, "render", ms[2] * per, "copy", ms[3] * per, "display", ms[4] * per, file=stderr)
+    comptime if BRAIN == 3:  # the references the brain measured on the card at the end of its first window (cfg ref = 0 asks for it)
+        var cfgh = ctx.enqueue_create_host_buffer[DType.float64](5)
+        ctx.enqueue_copy(cfgh, fly3.cfg_b)
+        ctx.synchronize()
+        print("REF", cfgh[0], cfgh[1], file=stderr)
     comptime if PROFILE > 0:
         var per = 1e-6 / Float64(max(fr, 1))
         print("COST physics", ms[1] * per, "neural_control", ms[0] * per, "render", ms[2] * per, "copy", ms[3] * per, "display", ms[4] * per, "frames", fr, file=stderr)
