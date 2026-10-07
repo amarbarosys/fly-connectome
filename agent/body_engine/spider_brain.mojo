@@ -6,7 +6,7 @@ control step. Drives per animal: speed, turn (rows 0 and 1 of the drive buffer, 
 ctrl layout: servo 0,1 = pedicel (0), servo 2 + 7 leg + j = leg (l1..l4, r1..r4), j 0 coxa_yaw, 1 coxa_pitch, rest 0.
 """
 from std.math import cos, sin
-from std.gpu import block_idx, block_dim, thread_idx
+from max.gpu import block_idx, block_dim, thread_idx
 from layout import TileTensor, row_major
 from smooth import F, NU, TU
 

@@ -9,7 +9,7 @@ its own legs, nothing else. Nothing here reads the prey's state: the prey is a b
 
 prey_set is the ENVIRONMENT, not the controller: it writes the prey body's free joint (the last 7 qpos and 6 dof rows) from env.bin (per animal: x0 y0 z0 vx vy t_on, mm, mm/s, s) before each step: still until t_on, then constant velocity.
 """
-from std.gpu import block_idx, block_dim, thread_idx
+from max.gpu import block_idx, block_dim, thread_idx
 from std.atomic import Atomic, Ordering
 from std.math import sqrt, cos, sin
 from layout import TileTensor, row_major

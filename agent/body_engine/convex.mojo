@@ -83,7 +83,7 @@ struct Shape[o: MutOrigin](Copyable):
     var edges: Pointer[Int32, Self.o]  # hull-local neighbour ids, -1 ends a vertex
     var vertindex: Int
     var meshindex: Int
-    var prism: InlineArray[V, 6]
+    var prism: Array[V, 6]
 
     def __init__(out self, verts: Pointer[Float32, Self.o], first: Pointer[Int32, Self.o], edges: Pointer[Int32, Self.o]):
         self.kind = 0
@@ -98,7 +98,7 @@ struct Shape[o: MutOrigin](Copyable):
         self.edges = edges
         self.vertindex = -1
         self.meshindex = -1
-        self.prism = InlineArray[V, 6](fill=V(0))
+        self.prism = Array[V, 6](fill=V(0))
 
     @always_inline
     def local(self, d: V) -> V:
@@ -215,26 +215,26 @@ struct Face(Copyable):
 
 
 struct Polytope(Copyable):
-    var verts: InlineArray[Vertex, MAXV]
-    var faces: InlineArray[Face, MAXF]
-    var map: InlineArray[Int32, MAXF]
+    var verts: Array[Vertex, MAXV]
+    var faces: Array[Face, MAXF]
+    var map: Array[Int32, MAXF]
     var nverts: Int
     var nfaces: Int
     var nmap: Int
-    var hedges: InlineArray[Int32, 24]  # horizon: edge of the face, face index
-    var hindex: InlineArray[Int32, 24]
+    var hedges: Array[Int32, 24]  # horizon: edge of the face, face index
+    var hindex: Array[Int32, 24]
     var nedges: Int
     var w: V
 
     def __init__(out self):
-        self.verts = InlineArray[Vertex, MAXV](fill=Vertex())
-        self.faces = InlineArray[Face, MAXF](fill=Face())
-        self.map = InlineArray[Int32, MAXF](fill=0)
+        self.verts = Array[Vertex, MAXV](fill=Vertex())
+        self.faces = Array[Face, MAXF](fill=Face())
+        self.map = Array[Int32, MAXF](fill=0)
         self.nverts = 0
         self.nfaces = 0
         self.nmap = 0
-        self.hedges = InlineArray[Int32, 24](fill=0)
-        self.hindex = InlineArray[Int32, 24](fill=0)
+        self.hedges = Array[Int32, 24](fill=0)
+        self.hindex = Array[Int32, 24](fill=0)
         self.nedges = 0
         self.w = V(0)
 
@@ -252,7 +252,7 @@ struct Status(Copyable):
     var gjk_iterations: Int
     var epa_iterations: Int
     var epa_status: Int
-    var simplex: InlineArray[Vertex, 4]
+    var simplex: Array[Vertex, 4]
     var nsimplex: Int
 
     def __init__(out self):
@@ -267,7 +267,7 @@ struct Status(Copyable):
         self.gjk_iterations = 0
         self.epa_iterations = 0
         self.epa_status = -1
-        self.simplex = InlineArray[Vertex, 4](fill=Vertex())
+        self.simplex = Array[Vertex, 4](fill=Vertex())
         self.nsimplex = 0
 
 
@@ -275,7 +275,7 @@ struct Status(Copyable):
 
 
 @always_inline
-def lincomb(coef: InlineArray[S, 4], n: Int, v1: V, v2: V, v3: V, v4: V) -> V:
+def lincomb(coef: Array[S, 4], n: Int, v1: V, v2: V, v3: V, v4: V) -> V:
     """engine_collision_gjk.c:456."""
     if n == 1:
         return v1 * coef[0]
@@ -331,7 +331,7 @@ def project_origin_line(v1: V, v2: V) -> V:
     return v2 + diff * scl
 
 
-def s1d(mut lam: InlineArray[S, 4], s1: V, s2: V):
+def s1d(mut lam: Array[S, 4], s1: V, s2: V):
     """engine_collision_gjk.c:791: lam[0..1]."""
     var p = project_origin_line(s1, s2)
     var mu = s1[0] - s2[0]
@@ -352,7 +352,7 @@ def s1d(mut lam: InlineArray[S, 4], s1: V, s2: V):
     lam[1] = c2 / mu_max if same else 1
 
 
-def s2d(mut lam: InlineArray[S, 4], s1: V, s2: V, s3: V):
+def s2d(mut lam: Array[S, 4], s1: V, s2: V, s3: V):
     """engine_collision_gjk.c:658: lam[0..2]."""
     var po = V(0)
     if project_origin_plane(po, s1, s2, s3) != 0:
@@ -392,7 +392,7 @@ def s2d(mut lam: InlineArray[S, 4], s1: V, s2: V, s3: V):
         lam[2] = c33 / mmax
         return
     var dmin = BIG
-    var l1 = InlineArray[S, 4](fill=0)
+    var l1 = Array[S, 4](fill=0)
     if comp1 == 0:
         s1d(l1, s2, s3)
         var xx = s2 * l1[0] + s3 * l1[1]
@@ -419,7 +419,7 @@ def s2d(mut lam: InlineArray[S, 4], s1: V, s2: V, s3: V):
             lam[2] = 0
 
 
-def s3d(mut lam: InlineArray[S, 4], s1: V, s2: V, s3: V, s4: V):
+def s3d(mut lam: Array[S, 4], s1: V, s2: V, s3: V, s4: V):
     """engine_collision_gjk.c:567: lam[0..3]."""
     var c41 = -det3(s2, s3, s4)
     var c42 = det3(s1, s3, s4)
@@ -437,7 +437,7 @@ def s3d(mut lam: InlineArray[S, 4], s1: V, s2: V, s3: V, s4: V):
         lam[3] = c44 / mdet
         return
     var dmin = BIG
-    var l2 = InlineArray[S, 4](fill=0)
+    var l2 = Array[S, 4](fill=0)
     if comp1 == 0:
         s2d(l2, s2, s3, s4)
         var x = s2 * l2[0] + s3 * l2[1] + s4 * l2[2]
@@ -476,7 +476,7 @@ def s3d(mut lam: InlineArray[S, 4], s1: V, s2: V, s3: V, s4: V):
             lam[2] = l2[2]
 
 
-def subdistance(mut lam: InlineArray[S, 4], n: Int, simplex: InlineArray[Vertex, 4]):
+def subdistance(mut lam: Array[S, 4], n: Int, simplex: Array[Vertex, 4]):
     """engine_collision_gjk.c:543 (Montanari et al, ToG 2017)."""
     lam[0] = 0
     lam[1] = 0
@@ -520,10 +520,10 @@ def signed_distance(mut normal: V, v1: Vertex, v2: Vertex, v3: Vertex) -> S:
 
 def gjk_intersect(mut st: Status, mut o1: Sp, mut o2: Sp) -> Int:
     """engine_collision_gjk.c:397: 1 in contact, 0 not, -1 inconclusive."""
-    var simplex = InlineArray[Vertex, 4](fill=Vertex())
+    var simplex = Array[Vertex, 4](fill=Vertex())
     for i in range(4):
         simplex[i] = st.simplex[i].copy()
-    var s = InlineArray[Int, 4](fill=0)
+    var s = Array[Int, 4](fill=0)
     for q in range(4):
         s[q] = q
     var k = st.gjk_iterations
@@ -582,7 +582,7 @@ def gjk(mut st: Status, mut o1: Sp, mut o2: Sp):
     var n = 0
     var k = 0
     var kmax = st.max_iterations
-    var lam = InlineArray[S, 4](fill=0)
+    var lam = Array[S, 4](fill=0)
     lam[0] = 1
     var cutoff2 = st.dist_cutoff * st.dist_cutoff
     var tol2 = st.tolerance * st.tolerance
@@ -736,12 +736,12 @@ def horizon_rec(mut pt: Polytope, face0: Int, e0: Int) -> Int:
     Returns 1 if face0 is visible from w (deleted), else 0."""
     if dot(pt.faces[face0].v, pt.w) - pt.faces[face0].dist2 <= MINVAL:
         return 0
-    var sf = InlineArray[Int, CCD_STACK](fill=0)  # face
-    var se = InlineArray[Int, CCD_STACK](fill=0)  # edge it was entered through
-    var sk = InlineArray[Int, CCD_STACK](fill=0)  # next neighbour (1, 2, then done)
-    var sv0 = InlineArray[Int, CCD_STACK](fill=0)  # its vertices at entry
-    var sv1 = InlineArray[Int, CCD_STACK](fill=0)
-    var sv2 = InlineArray[Int, CCD_STACK](fill=0)
+    var sf = Array[Int, CCD_STACK](fill=0)  # face
+    var se = Array[Int, CCD_STACK](fill=0)  # edge it was entered through
+    var sk = Array[Int, CCD_STACK](fill=0)  # next neighbour (1, 2, then done)
+    var sv0 = Array[Int, CCD_STACK](fill=0)  # its vertices at entry
+    var sv1 = Array[Int, CCD_STACK](fill=0)
+    var sv2 = Array[Int, CCD_STACK](fill=0)
     var top = 0
     sf[0] = face0
     se[0] = e0
@@ -797,7 +797,7 @@ def horizon(mut pt: Polytope, face: Int):
         add_edge(pt, pt.faces[face].adj2, adj_edge)
 
 
-def tri_affine_coord(mut lam: InlineArray[S, 4], v1: V, v2: V, v3: V, p: V):
+def tri_affine_coord(mut lam: Array[S, 4], v1: V, v2: V, v3: V, p: V):
     """engine_collision_gjk.c:990."""
     var m14 = v2[1] * v3[2] - v2[2] * v3[1] - v1[1] * v3[2] + v1[2] * v3[1] + v1[1] * v2[2] - v1[2] * v2[1]
     var m24 = v2[0] * v3[2] - v2[2] * v3[0] - v1[0] * v3[2] + v1[2] * v3[0] + v1[0] * v2[2] - v1[2] * v2[0]
@@ -830,7 +830,7 @@ def tri_affine_coord(mut lam: InlineArray[S, 4], v1: V, v2: V, v3: V, p: V):
 
 def tri_point_intersect(v1: V, v2: V, v3: V, p: V) -> Bool:
     """engine_collision_gjk.c:1035."""
-    var lam = InlineArray[S, 4](fill=0)
+    var lam = Array[S, 4](fill=0)
     tri_affine_coord(lam, v1, v2, v3, p)
     if lam[0] < 0 or lam[1] < 0 or lam[2] < 0:
         return False
@@ -840,7 +840,7 @@ def tri_point_intersect(v1: V, v2: V, v3: V, p: V) -> Bool:
 
 def epa_witness(pt: Polytope, fi: Int, mut x1: V, mut x2: V) -> S:
     """engine_collision_gjk.c:1285: witness points from the face's affine coordinates; signed distance."""
-    var lam = InlineArray[S, 4](fill=0)
+    var lam = Array[S, 4](fill=0)
     var a = pt.faces[fi].a
     var b = pt.faces[fi].b
     var c = pt.faces[fi].c
@@ -1001,7 +1001,7 @@ def test_tetra(p0: V, p1: V, p2: V, p3: V) -> Bool:
     return same_side(p0, p1, p2, p3) and same_side(p1, p2, p3, p0) and same_side(p2, p3, p0, p1) and same_side(p3, p0, p1, p2)
 
 
-def rotmat(axis: V) -> InlineArray[S, 9]:
+def rotmat(axis: V) -> Array[S, 9]:
     """engine_collision_gjk.c:870: rotation of 120 degrees around axis."""
     var n = norm(axis)
     var u1 = axis[0] / n
@@ -1009,7 +1009,7 @@ def rotmat(axis: V) -> InlineArray[S, 9]:
     var u3 = axis[2] / n
     var sn = S(0.86602540378)
     var cs = S(-0.5)
-    var R = InlineArray[S, 9](fill=0)
+    var R = Array[S, 9](fill=0)
     R[0] = cs + u1 * u1 * (1 - cs)
     R[1] = u1 * u2 * (1 - cs) - u3 * sn
     R[2] = u1 * u3 * (1 - cs) + u2 * sn
@@ -1227,19 +1227,19 @@ def penetration(mut o1: Sp, mut o2: Sp, margin: S, tol: S, max_contacts: Int) ->
 struct ConSet(Copyable):
     """The contacts of a pair, at most 5 (the first plus four perturbed)."""
     var n: Int
-    var dist: InlineArray[S, 5]
-    var pos: InlineArray[V, 5]
-    var normal: InlineArray[V, 5]
+    var dist: Array[S, 5]
+    var pos: Array[V, 5]
+    var normal: Array[V, 5]
 
     def __init__(out self):
         self.n = 0
-        self.dist = InlineArray[S, 5](fill=0)
-        self.pos = InlineArray[V, 5](fill=V(0))
-        self.normal = InlineArray[V, 5](fill=V(0))
+        self.dist = Array[S, 5](fill=0)
+        self.pos = Array[V, 5](fill=V(0))
+        self.normal = Array[V, 5](fill=V(0))
 
 
 @always_inline
-def rotate_frame(origin: V, rot: InlineArray[S, 9], mut o: Sp):
+def rotate_frame(origin: V, rot: Array[S, 9], mut o: Sp):
     """mju_rotateFrame (engine_collision_convex.c:818): mat = rot mat, pos -= rot (origin - pos) - (origin - pos)."""
     var a = o.r0
     var b = o.r1
@@ -1253,14 +1253,14 @@ def rotate_frame(origin: V, rot: InlineArray[S, 9], mut o: Sp):
     o.pos = o.pos - vec
 
 
-def tilt(axis: V, sgn: S) -> InlineArray[S, 9]:
+def tilt(axis: V, sgn: S) -> Array[S, 9]:
     """mji_axisAngle2Quat + mju_quat2Mat for an angle of sgn * 1e-3 rad."""
     var w = S(0.99999987500000260416)  # cos(5e-4)
     var sn = sgn * S(4.9999997916666693e-4)  # sin(+-5e-4)
     var x = axis[0] * sn
     var y = axis[1] * sn
     var z = axis[2] * sn
-    var m = InlineArray[S, 9](fill=0)
+    var m = Array[S, 9](fill=0)
     m[0] = w * w + x * x - y * y - z * z
     m[1] = 2 * (x * y - w * z)
     m[2] = 2 * (x * z + w * y)
@@ -1307,7 +1307,7 @@ def collide(mut o1: Sp, mut o2: Sp, margin: S, tol: S, rbound: S) -> ConSet:
                     var axis = yax if axis_id == 0 else zax
                     var sgn = S(-1) if angle_id == 0 else S(1)
                     var rot = tilt(axis, sgn)
-                    var inv = InlineArray[S, 9](fill=0)  # transpose
+                    var inv = Array[S, 9](fill=0)  # transpose
                     for a in range(3):
                         for b in range(3):
                             inv[3 * a + b] = rot[3 * b + a]
@@ -1354,15 +1354,15 @@ trait Height:
 struct HCons(Copyable):
     """Contacts of one heightfield pair in the hfield frame, in prism order."""
     var n: Int
-    var dist: InlineArray[S, HF_SLOTS]
-    var pos: InlineArray[V, HF_SLOTS]
-    var normal: InlineArray[V, HF_SLOTS]
+    var dist: Array[S, HF_SLOTS]
+    var pos: Array[V, HF_SLOTS]
+    var normal: Array[V, HF_SLOTS]
 
     def __init__(out self):
         self.n = 0
-        self.dist = InlineArray[S, HF_SLOTS](fill=0)
-        self.pos = InlineArray[V, HF_SLOTS](fill=V(0))
-        self.normal = InlineArray[V, HF_SLOTS](fill=V(0))
+        self.dist = Array[S, HF_SLOTS](fill=0)
+        self.pos = Array[V, HF_SLOTS](fill=V(0))
+        self.normal = Array[V, HF_SLOTS](fill=V(0))
 
 
 @always_inline

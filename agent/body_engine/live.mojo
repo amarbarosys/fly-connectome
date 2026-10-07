@@ -220,7 +220,7 @@ def main() raises:
     var gtrace = List[Float32]()
     var pose_h = ctx.enqueue_create_host_buffer[DType.float32](ren.PROWS * ren.F)  # PROFILE: the root trace reads xpos from here
     var trace = List[Float32]()
-    var ms = InlineArray[Float64, 5](fill=0)  # PROFILE: neural_control, physics, render, copy, display
+    var ms = Array[Float64, 5](fill=0)  # PROFILE: neural_control, physics, render, copy, display
     var t0 = perf_counter_ns()
     var fr = 0
     while frames == 0 or fr < frames:

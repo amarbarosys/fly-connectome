@@ -1,5 +1,5 @@
 """GPU plume sampler gate for the seed-0 scenario descriptor; formula source is agent/maps.py:104-120."""
-from std.gpu import global_idx
+from max.gpu import global_idx
 from max.gpu.host import DeviceContext
 from layout import TileTensor, row_major, TensorLayout
 
