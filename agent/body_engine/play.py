@@ -317,26 +317,30 @@ def walls(*args):
     (10 deg) and keeps farther from it. PLAY_LOOM_SWAP=1 feeds each eye's looming to the other side: must FAIL."""
     seed = next((int(x) for x in args if x.isdigit()), 1)
     km = tomllib.loads(KEYMAP.read_text())
-    swap = os.environ.get('PLAY_LOOM_SWAP') == '1'
+    swap, force = os.environ.get('PLAY_LOOM_SWAP') == '1', os.environ.get('PLAY_LOOM_FORCE') == '1'
+    # PLAY_LOOM_FORCE=1: the probe. No eyes, flat floor, no wall: cols 0/1 get a full left/right loom from HOLD on, 2/3 none.
+    # Same gate. PASS = play's brain + decoder turn away from a one-sided loom; a FAIL here is the brain, a FAIL only in walls is the sensor.
     yaws = (3 * np.pi / 4, 5 * np.pi / 4) * 2
 
     def q0(d):
         q = np.tile(np.fromfile(d / 'qpos.bin', np.float32), (4, 1))
-        q[:, 0], q[:, 1] = -14.0, 0.0
+        q[:, 0], q[:, 1] = (0.0 if force else -14.0), 0.0
         q[:, 3:7] = [(np.cos(y / 2), 0, 0, np.sin(y / 2)) for y in yaws]
         return q
 
     brain = Brain(4, km)
-    d, m, eng = setup(4, seed=seed, q0=q0)
+    d, m, eng = setup(4, seed=None if force else seed, q0=q0)
     gaits = [fl.Gait(m, d, fl.K) for _ in range(4)]
-    eyes = [Eyes(m, km['loom']) for _ in range(2)]
+    eyes = [] if force else [Eyes(m, km['loom']) for _ in range(2)]
     w, lm = brain.names.index('w'), [brain.names.index('loom-' + s) for s in ('left', 'right')]
     loom, hist = np.zeros((2, 2)), []
 
     def rates_at(i, game):
         r = np.zeros((4, len(brain.names)), np.float32)
         r[:, w] = brain.hz[w]
-        if i % EYE_EVERY == 0 and getattr(eng, 'q', None) is not None:
+        if force:
+            loom[:] = np.eye(2)[:, ::-1 if swap else 1] if i >= HOLD else 0.0
+        elif i % EYE_EVERY == 0 and getattr(eng, 'q', None) is not None:
             for col in range(2):
                 loom[col] = eyes[col](eng.q[col])[::-1 if swap else 1]
         r[:2, lm] = brain.hz[lm] * loom
@@ -352,8 +356,10 @@ def walls(*args):
     gap = [float(tr[:, c, root].min() + 20) for c in range(4)]  # nearest root x to the wall face (x = -20), mm
     gates = {'turns away (left wall: right turn)': yaw[0] - yaw[2] < -10 and yaw[1] - yaw[3] > 10,
              'keeps clear': gap[0] > gap[2] and gap[1] > gap[3]}
+    if force:
+        gates.pop('keeps clear')  # no wall on the flat floor
     h = np.array(hist)  # (frames, see col, eye)
-    print(json.dumps({'yaw_deg [see L, see R, blind L, blind R]': yaw, 'min gap mm': gap, 'swap': swap,
+    print(json.dumps({'yaw_deg [see L, see R, blind L, blind R]': yaw, 'min gap mm': gap, 'swap': swap, 'force': force,
                       'loom [col][eye] mean, by quarter': np.round([q.mean(0) for q in np.array_split(h, 4)], 2).tolist(),
                       'ms per control step': {k: 1e3 * v / max(cost['steps'], 1) for k, v in cost.items() if k != 'steps'}}, default=float))
     bad = [k for k, v in gates.items() if not v]
