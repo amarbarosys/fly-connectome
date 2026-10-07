@@ -483,8 +483,6 @@ def feet(m, regex, couple=(), hrows=None, convex=False, hfexact=False):
     elliptic = m.opt.cone == mujoco.mjtCone.mjCONE_ELLIPTIC
     if m.opt.solver != mujoco.mjtSolver.mjSOL_NEWTON and (elliptic or convex or hfexact):  # CG and PGS: pyramidal rows of plane-mesh and sphere pairs (check.sh solver)
         raise SystemExit('FAIL export: CG and PGS are gated with the pyramidal cone and plane-mesh / sphere pairs only (check.sh solver)')
-    if elliptic and hfexact:
-        raise SystemExit('FAIL export: the elliptic cone is gated on plane-mesh and convex pairs (check.sh cone, cone_convex), not exact-heightfield pairs')
     if (m.geom_contype & m.geom_conaffinity).any():
         raise SystemExit('FAIL export: contacts need explicit pairs only')
     sel, drop = pairs(m, regex, convex)
@@ -1165,10 +1163,11 @@ def check(mjcf, out, stage, count=64, k=0, oracle=None):
         raise SystemExit(f'FAIL {stage}: engine wrote {rows.shape[1]} values per fly, MuJoCo {sum(sizes)}')
     got = np.split(rows, np.cumsum(sizes)[:-1], axis=1)
     floor = locals().get('floor', {})
-    if os.environ.get('DIAG') and k:  # per state: error of each field vs the field's largest value, worst states first, with the convex contacts there
+    if os.environ.get('DIAG'):  # per state: error of each field vs the field's largest value, worst states first, with the convex contacts there
+        unst = locals().get('unstable', np.zeros(count, bool))
         for f, g in zip(fields, got):
             e = np.abs(g - want[f].reshape(count, -1)).max(1) / max(np.abs(want[f]).max(), 1e-30)
-            print(f'  DIAG {f} K={k}: median {np.median(e):.1e}, worst states ' + ', '.join(f'{n} {e[n]:.1e} (convex {nconv[n]}{", chaotic" if unstable[n] else ""})' for n in np.argsort(-e)[:6]))
+            print(f'  DIAG {f} K={k}: median {np.median(e):.1e}, worst states ' + ', '.join(f'{n} {e[n]:.1e} (convex {nconv[n]}{", chaotic" if unst[n] else ""})' for n in np.argsort(-e)[:6]))
     bad = []
     if k and 'unstable' in locals():
         print(f"{'PASS' if unstable.mean() <= 0.5 else 'FAIL'} chaotic states dropped {int(unstable.sum())}/{count} (MuJoCo itself moves by more than the bar over {k} steps under a 1e-6 relative start perturbation; at most half)")

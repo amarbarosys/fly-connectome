@@ -566,6 +566,23 @@ if [ "$stage" = cone_convex ]; then  # elliptic friction cone on convex pairs: t
   [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
   echo "PASS all cone_convex checks"; exit 0
 fi
+if [ "$stage" = cone_hfield ]; then  # elliptic friction cone on exact-heightfield pairs (HFEXACT=1): the terrain_exact terrain for the fly and the spider, Newton noslip 0 and 5,
+  # MuJoCo run to convergence (model.elliptic on the terrain xml), one-step fields on 64 states moved onto the terrain. Same contact tail as cone_convex. Bar REL=5e-4 (terrain_exact uses 4e-4, float32 terrain function vs MuJoCo table): fly noslip 0 qacc_euler 4.55e-4 on three Newton active-set switch states (59, 13, 30), median 5.9e-6, deterministic over two runs (DIAG=1); the other three runs within 1.2e-4.
+  # Mutant: the cone force tangent sign (cone_convex's mutant) on the fly's exact-heightfield states.
+  for B in .work/agent/gpu-body-port/body-v2/body.xml .work/agent/body_engine/spider-body/spider.xml; do
+    N=$($M -c "from agent.body_engine.model import terrain; print(terrain('$B', (0, 0, 0.3, 8.0, 4, 1, 2.0, 0.5))[0])")
+    for ns in 0 5; do
+      E=$($M -c "from agent.body_engine.model import elliptic; print(elliptic('$N', $ns))")
+      env HFEXACT=1 REL=5e-4 $M -m agent.body_engine.model check $E $X/cone-hfield-$(basename $B .xml)-$ns actuated 64 || { echo "FAIL cone_hfield $(basename $B .xml) noslip $ns"; fail=$((fail+1)); }
+    done
+  done
+  N=$($M -c "from agent.body_engine.model import terrain; print(terrain('.work/agent/gpu-body-port/body-v2/body.xml', (0, 0, 0.3, 8.0, 4, 1, 2.0, 0.5))[0])")
+  E0=$($M -c "from agent.body_engine.model import elliptic; print(elliptic('$N', 0))")
+  ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo 's/force = V3(f0, -f0 \/ T \* U\[1\] \* fr\[1\], -f0 \/ T \* U\[2\] \* fr\[2\], 0)/force = V3(f0, f0 \/ T * U[1] * fr[1], f0 \/ T * U[2] * fr[2], 0)/' -- \
+    env HFEXACT=1 REL=5e-4 $M -m agent.body_engine.model check $E0 $X/mutant actuated 32 || fail=$((fail+1))
+  [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
+  echo "PASS all cone_hfield checks"; exit 0
+fi
 if [ "$stage" = spidereye ]; then  # native vision (docs/plans/SPIDER_BRAIN.md unit 2): rendered prey vs an independent analytic pinhole,
   # own-body occlusion vs MuJoCo ray casting, per-animal separation, environment-moved prey. Mutants: eye axis yaw flipped in the kernel,
   # prey path sign flipped, eye table yaw flipped (caught against the gate's own hand-written INTENDED geometry)
