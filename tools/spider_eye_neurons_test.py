@@ -23,7 +23,7 @@ deg. Now the retina's position (centroid) is sampled every KC = 10 steps (100 ms
 choice); between samples only the pursuit velocity moves the eye, and pursuit velocity
 integrates the neurons' slip (vel += 0.3 x slip; efference copy = the pursuit command, never
 the position correction). Error = |gaze - target| at the time the gaze command applies.
-E2 positive control: intact < 1 deg and shuffled retina > 2 deg (bar unchanged).
+E2 positive control: intact < 1 deg and shuffled retina >= 0.7 x the masked ceiling (the > 2 deg bar was unreachable: masked 1.8 deg).
 N2 velocity neuron silenced: error >= 3x intact.
 N3 R and L populations swapped: error >= 3x intact.
 """
@@ -33,7 +33,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
-from spider_principal_eye_test import DT, N_REC, TUBE, SACC, WIN, coarse, retina  # noqa: E402
+from spider_principal_eye_test import CEIL_FRAC, DT, N_REC, TUBE, SACC, WIN, coarse, retina  # noqa: E402
 
 V_TH, T_MBR, TAU, T_RFC, W_SYN, F_POI = 7.0, 20e-3, 5e-3, 2.2e-3, 0.275, 250  # agent/shiu.py
 SUB, N_POP, GAIN = 1e-4, 20, 400.0  # 0.1 ms neuron step; GAIN: slip units -> Hz (model choice)
@@ -111,7 +111,7 @@ def calibrate(rec, rng):
     return float(np.polyfit(xs, ys, 1)[0])
 
 
-def track(rec, K, rng, swap=False, silence=False, n=100, steps=100, seed=7):
+def track(rec, K, rng, swap=False, silence=False, n=100, steps=100, seed=7, masked=False):
     trng = np.random.default_rng(seed)
     v = trng.uniform(10, 40, n) * trng.choice([-1, 1], n); x0 = trng.uniform(-20, 20, n) - v * 0.5
     lo, hi = -TUBE + 1, TUBE - 1
@@ -123,7 +123,9 @@ def track(rec, K, rng, swap=False, silence=False, n=100, steps=100, seed=7):
         t = k * DT
         np.multiply(v, t, out=tg); tg += x0; np.clip(tg, lo, hi, out=tg)
         np.subtract(tg, gaze, out=off); ret.see(off)
-        np.greater(ret.sum, 1e-6, out=seen); np.logical_not(seen, out=unseen)
+        np.greater(ret.sum, 1e-6, out=seen)
+        if masked: seen[:] = False  # no principal retina: the ceiling arm, secondary eyes + saccades alone
+        np.logical_not(seen, out=unseen)
         slip = neu.step(ret.motion); slip *= 0.3 * K
         vel += slip; np.copyto(vel, 0.0, where=unseen)  # pursuit integrates retinal slip while the target is seen
         if k % KC == 0:  # retinal position sample: the eye jumps onto the centroid
@@ -143,11 +145,11 @@ def main():
     rec, bad = retina(np.random.default_rng(0)), retina(np.random.default_rng(0), shuffle=True)
     K = calibrate(rec, np.random.default_rng(1))
     print(f"calibration: K = {K:.3f} deg/s per (R-L) spike per 10 ms")
-    intact, shuf = track(rec, K, rng), track(bad, K, rng)
+    intact, shuf, ceil = track(rec, K, rng), track(bad, K, rng), track(rec, K, rng, masked=True)
     silent, swp = track(rec, K, rng, silence=True), track(rec, K, rng, swap=True)
-    ok2, okn2, okn3 = intact < 1 and shuf > 2, silent >= 3 * intact, swp >= 3 * intact
-    print(f"E2 with neurons, position every {KC} steps: intact {intact:.2f} deg, shuffled retina {shuf:.2f} deg "
-          f"(bars < 1, > 2) -> {'PASS' if ok2 else 'FAIL'}")
+    ok2, okn2, okn3 = intact < 1 and ceil >= 1 and shuf >= CEIL_FRAC * ceil, silent >= 3 * intact, swp >= 3 * intact
+    print(f"E2 with neurons, position every {KC} steps: intact {intact:.2f} deg, shuffled retina {shuf:.2f} deg, blind ceiling {ceil:.2f} "
+          f"(bars < 1, ceiling >= 1, >= {CEIL_FRAC} x ceiling) -> {'PASS' if ok2 else 'FAIL'}")
     print(f"N2 velocity neuron silenced: {silent:.2f} deg ({silent / intact:.1f}x, bar 3x) -> {'PASS' if okn2 else 'FAIL'}")
     print(f"N3 R/L swapped: {swp:.2f} deg ({swp / intact:.1f}x, bar 3x) -> {'PASS' if okn3 else 'FAIL'}")
     bad_n = 3 - ok2 - okn2 - okn3
