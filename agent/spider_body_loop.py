@@ -39,6 +39,7 @@ GAIN_FILE = L.G.ROOT / '.work/agent/spider/gait-rate.json'  # gait_rate's measur
 POS = 5.0  # 1/s, the teacher's centring term (0.2 s); set before the run, not tuned
 REFLEX = False  # 95fa88a added it; with the position-trained pathway the reflex-off arm held 0.54 / 0.60 deg, the reflex arm lost the prey (38d70f0)
 SEEDS = (5, 7) if DEBUG else (47, 53)  # prey speeds, trial stream; claim seeds pass agent.seeds.claim (docs/seeds_used.json)
+EFF = os.environ.get('SPIDER_EFF', '0') == '1'  # off: NEGATIVE, debug hand arm 1.68 deg on vs 1.05 off (slow 1.61 vs 1.02). Efference copy: the eye counter-rotates by the yaw its own turn command predicts (YAW_PER_TURN x turn), so the brain no longer chases the body's turn (hand arm lag 1.166 deg, body turn +0.25). Set before the run
 DEAD = 1.0  # deg: the body turns only on the gaze beyond this (salticid-like pivots); with TAU 1 s (was 0.25: 6f8a87b, the body-turn loop ran away). Set before the run
 
 
@@ -87,6 +88,8 @@ def pursue(net, rec, sp, rng, arm, view=None, log=None):
         turn = turn_law(gaze, arm)
         ctrl = None if arm == 'stand' else gait(k * L.P.DT, np.full(B, SPEED * min(1.0, k / RAMP) if RAMP else SPEED), turn).T
         now = L.receptors(rec, eyes.sense(gaze, ctrl))
+        if EFF and ctrl is not None:  # predicted, not sensed: the stride wobble is not in it
+            gaze = gaze - YAW_PER_TURN * turn * L.P.DT
         t1 = time.perf_counter()
         q = eyes.q
         head_yaw = yaw(q)
@@ -206,7 +209,7 @@ def check():
         seeds.claim('spider_body_loop', SEEDS)
     rec = L.P.retina(np.random.default_rng(0))
     src = [f.read_bytes() for f in (Path(__file__), Path(L.__file__), Path(L.G.__file__), L.G.ROOT / 'agent/spider_pool.mojo', *sorted((L.G.ROOT / 'agent/body_engine').glob('*.mojo')))]
-    key = lambda arm, *w: src + [repr((arm, SEEDS, T, SCORE, L.G.B, DEAD, TAU, POS, REFLEX)).encode(), *w]
+    key = lambda arm, *w: src + [repr((arm, SEEDS, T, SCORE, L.G.B, DEAD, TAU, POS, REFLEX, EFF)).encode(), *w]
     sp = L.P.speeds(np.random.default_rng(SEEDS[0]), 6, 9, L.G.B)
     h = L.G.cached('hand', key('hand'), lambda: pursue(hand_net(), rec, sp, np.random.default_rng(SEEDS[1]), 'hand'))
     hf = float(np.mean(np.sign(h['yaw']) == np.sign(h['bearing'])))
