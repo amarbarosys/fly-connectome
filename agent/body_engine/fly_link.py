@@ -171,12 +171,12 @@ def side_counts(cum, edges):
     return np.array([[cum[edges[2 * col + s]:edges[2 * col + s + 1]].sum() for s in range(2)] for col in range(3)], np.int64)
 
 
-def run(steps=STEPS, k=K, names=('sym', 'left', 'right', 'silenced', 'held')):
+def run(steps=STEPS, k=K, names=('sym', 'left', 'right', 'silenced', 'held'), flags=()):
     d, m, cam = prepare()
     q0 = np.fromfile(d / 'qpos.bin', np.float32).astype(float)
     root = live.roots(m)[0]
     gait = {n: Gait(m, d, k) for n in names}
-    engines = {n: Engine(d, k, n, steps) for n in names}
+    engines = {n: Engine(d, k, n, steps, flags=flags) for n in names}
     brain, edges, _ = brain_setup()
     cum = [np.zeros((3, 2), np.int64)]
     rate_ref = None
@@ -258,7 +258,7 @@ def check():
     print(f"start: standing root z 0.528 (live.prepare), settled into the FlyGym stance thorax z {z0:.3f}, tilt {res['sym']['tilt0']:.1f} deg (flyloop: body-v2 2.1, FlyGym 1.8: thorax body origin, not comparable to the root qpos z); after 1 s z {res['sym']['z_end']:.3f}; DN reference rate per side (spikes/s) {np.round(rate_ref).tolist()}")
     per = lambda s: 1000 * s / STEPS
     # cost: one fly alone (the 5 concurrent engines slow each other), 100 control steps, frames drawn every step
-    _, _, _, _, _, _, c1, e1, _ = run(100, K, ('sym',))
+    _, _, _, _, _, _, c1, e1, _ = run(100, K, ('sym',), flags=('-DPROFILE=1',))  # only this run pays the per-phase syncs
     e = e1['sym']
     cost1 = {'physics': e['physics'], 'neural_shiu_advance': 1000 * c1['neural'] / 100, 'gait_controller': 1000 * c1['gait'] / 100, 'render': e['render'], 'copy': e['copy'],
              'display': e['display'], 'engine_round_trip': 1000 * c1['engine'] / 100}
