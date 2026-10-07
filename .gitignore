@@ -15,3 +15,7 @@ FILE_INDEX.tsv
 INDEX.md
 .claude/*
 !.claude/skills/
+.cache/
+*.mutant-lock
+*.mutant-orig.*
+mpv-shot*.jpg
