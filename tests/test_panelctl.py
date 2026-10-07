@@ -34,3 +34,24 @@ def test_cli_rejects_bad_action():
     r = subprocess.run([sys.executable, '-m', 'agent.panelctl', 'act', '{"do": "control", "action": "explode"}'],
                        cwd=ROOT, text=True, capture_output=True)
     assert r.returncode == 1 and 'unsupported action' in json.loads(r.stdout)['out']
+
+
+def test_port_queue_rows_and_receipt(tmp_path, monkeypatch):
+    q = tmp_path / 'port_queue.tsv'
+    q.write_text('# h\nhfield-cone\tmj_instantiateContact\tengine_core_constraint.c\tcone_hfield\topen\tnote\n')
+    port = tmp_path / 'port'; port.mkdir()
+    (port / 'cone_hfield.receipt.json').write_text(json.dumps({'result': 'PASS', 'mutants_caught': 1, 'mutants_missed': 0, 'us_per_launch': '5', 'when': 'w', 'head': 'h', 'log': 'l'}))
+    monkeypatch.setattr(panelctl, 'QUEUE', q)
+    monkeypatch.setattr(panelctl, 'PORT', port)
+    rows = panelctl.port_queue()
+    assert rows[0]['stage'] == 'cone_hfield' and rows[0]['receipt']['result'] == 'PASS' and rows[0]['fields'] is False
+    try:
+        panelctl.act({'do': 'port', 'step': 'land', 'name': 'hfield-cone'})
+        assert False
+    except ValueError as e:
+        assert 'reviewed git commit' in str(e)
+    try:
+        panelctl.act({'do': 'port', 'step': 'gate', 'name': 'nope'})
+        assert False
+    except ValueError as e:
+        assert 'unknown queue row' in str(e)
