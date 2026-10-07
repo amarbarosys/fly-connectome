@@ -167,7 +167,7 @@ class Eyes:
 
 def setup(F, render=0, out='/dev/null', seed=None):
     """seed: the fly on live.py's seeded terrain (live.WORLD, 0.1 mm bumps and cones), dropped from the flat standing pose."""
-    flags = ['-DGAME=1', '-DHUD=1', '-DFOLLOW=1', '-DORBIT=1'] + (['-DCPU=1'] if CPU else [])
+    flags = ['-DGAME=1', '-DHUD=1', '-DFOLLOW=1', '-DORBIT=1'] + (['-DCPU=1'] if CPU else []) + (['-DPROFILE=1'] if os.environ.get('PLAY_PROFILE') == '1' else [])
     if seed is None:
         d, m, _ = fl.prepare(OUT / 'fly')
     else:  # terrain + the world's walls, stones, grass, flowers and two plume sources (agent/body_engine/assets.py), smelled at the antennae
@@ -196,18 +196,23 @@ def loop(brain, eng, gaits, rates_at, steps, on_step=None):
     j = brain.names.index('w')
     zero = np.zeros((brain.cols, 2), np.int64)
     cum, split, held = deque([zero], fl.WINDOW + 1), deque([zero], fl.WINDOW + 1), gaits[0].held  # one window of history, fixed size
-    ref, tr, cost = None, [], {'neural': 0.0, 'write': 0.0}
+    ref, tr, cost = None, [], dict.fromkeys(('neural', 'write', 'rates', 'gait', 'recv', 'send', 'on_step'), 0.0)  # s per stage
     game = np.ones((brain.cols, 4), np.float32)
     i, pend = 0, None
 
     def take(k, win, drive):  # step k's body state; game rows feed rates_at one step late (stamina, slow)
         nonlocal game
+        t = time.perf_counter()
         q = eng.q = eng.recv()
+        cost['recv'] += time.perf_counter() - t
         game = eng.game
         if k >= fl.WINDOW:
-            tr.append(q if brain.cols > 1 else q[None])
+            if steps:  # play (steps 0) keeps no trajectory: 600 B per 1 ms step grew 2.1 GB per hour
+                tr.append(q if brain.cols > 1 else q[None])
             if on_step:
+                t = time.perf_counter()
                 on_step(k - fl.WINDOW, win, game, drive)
+                cost['on_step'] += time.perf_counter() - t
 
     def rates(i):
         if i < fl.WINDOW:
@@ -217,7 +222,9 @@ def loop(brain, eng, gaits, rates_at, steps, on_step=None):
         return rates_at(i - fl.WINDOW, game)
 
     def start(i):  # brain step i on the worker, running while the host does step i-1's gait and body
+        t = time.perf_counter()
         r = rates(i)
+        cost['rates'] += time.perf_counter() - t
         if r is None:
             return False
         t = time.perf_counter()
@@ -239,14 +246,19 @@ def loop(brain, eng, gaits, rates_at, steps, on_step=None):
         if i + 1 == fl.WINDOW:
             ref = np.maximum(rate.mean(0), 1.0)
         drive = np.clip(rate / ref, 0, 1) if i >= fl.WINDOW else np.zeros_like(rate, float)
+        t = time.perf_counter()
         ctrl = np.stack([g.ctrl(dv) for g, dv in zip(gaits, drive)]) if i >= fl.WINDOW else np.tile(held, (brain.cols, 1))
+        cost['gait'] += time.perf_counter() - t
         if pend is not None:  # the body's previous step ran while the brain advanced (the brain never reads the body)
             take(*pend)
+        t = time.perf_counter()
         eng.send(ctrl)
+        cost['send'] += time.perf_counter() - t
         pend = (i, split[-1] - split[0], drive)
         i += 1
     if pend is not None:
         take(*pend)
+    cost['steps'] = i
     return np.array(tr), ref, cost
 
 
@@ -290,7 +302,7 @@ def check(*args):
     out = {'forward_body_lengths': fwd, 'yaw_deg': yaw, 'tilt_max': {k: res[k]['tilt_max'] for k in NAMES},
            'w+threat [player, own] DN spikes, last window before / during': [before.tolist(), during.tolist()],
            'game rows end (energy, health, stamina, dead)': {k: game[c].tolist() for c, k in enumerate(NAMES)},
-           'drive ref (DN Hz, W held)': ref.tolist(), 'ms per control step': {k: 1e3 * v / n for k, v in cost.items()},
+           'drive ref (DN Hz, W held)': ref.tolist(), 'ms per control step': {k: 1e3 * v / n for k, v in cost.items() if k != 'steps'},
            'engine COST ms/frame': engine_cost, 'work_rate': WORK_RATE, 'gates': gates}
     (OUT / ('check.json' if seed is None else f'check-world{seed}.json')).write_text(json.dumps(out, indent=1, default=float) + '\n')
     for k, v in out.items():
@@ -408,15 +420,19 @@ def play(*args):
         out.flush()
 
     try:
-        loop(brain, eng, gaits, rates_at, 0, hud)
+        _, _, cost = loop(brain, eng, gaits, rates_at, 0, hud)
     finally:
         out.write('\x1b[<u\x1b[?1003l\x1b[?1006l\r\n')
         out.flush()
         if old is not None:
             termios.tcsetattr(fd, termios.TCSADRAIN, old)
         brain.brain.close()
-        eng.close()
+        ec = eng.close()
         mpv.terminate()
+    import resource  # host ms per control step by stage, the engine's own COST line (ms per frame), peak RSS
+    (OUT / 'cost.json').write_text(json.dumps({k: 1e3 * v / max(cost['steps'], 1) for k, v in cost.items() if k != 'steps'}
+                                              | {'steps': cost['steps'], 'engine ms/frame': ec,
+                                                 'maxrss_mb': resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024}, indent=1) + '\n')
 
 
 if __name__ == '__main__':

@@ -148,8 +148,8 @@ class Engine:
         self.p.stdin.close()
         err = self.p.stderr.read().decode()
         self.p.wait()
-        m = re.search(r'COST physics (\S+) neural_control (\S+) render (\S+) copy (\S+) display (\S+) frames (\d+)', err)
-        return {k: float(v) for k, v in zip(('physics', 'neural_control', 'render', 'copy', 'display'), m.groups()[:5])} if m else {}
+        m = re.findall(r'COST(?:@\d+)? physics (\S+) neural_control (\S+) render (\S+) copy (\S+) display (\S+)', err)  # last split: a stopped engine prints only COST@n
+        return {k: float(v) for k, v in zip(('physics', 'neural_control', 'render', 'copy', 'display'), m[-1])} if m else {}
 
 
 def brain_setup(start=True):
