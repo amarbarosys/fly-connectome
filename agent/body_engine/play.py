@@ -32,6 +32,7 @@ from pathlib import Path
 
 import numpy as np
 
+os.environ.setdefault('MUJOCO_GL', 'egl')  # eye cameras render headless (before mujoco loads)
 from agent.body_engine import fly_link as fl, game_check as gc, live, spectate_check as sc
 
 KEYMAP = Path(__file__).with_name('keymap.toml')
@@ -40,6 +41,9 @@ OUT = fl.OUT.parent / 'play'
 RENDER = int(os.environ.get('PLAY_RENDER', 24))  # control steps per frame: 24 = 41.7 fps of sim time; world terrain 0.89x real time vs 0.85x at 16 (62.5 fps), 0.31x at 4
 CPU = os.environ.get('PLAY_CPU', '1') == '1'  # physics on the host (smooth.mojo -DCPU=1): one fly, 53 us per 0.1 ms step vs 4.4 ms on one GPU wave
 WORK_RATE = float(os.environ.get("PLAY_WORK_RATE", 2e-6))  # stamina + energy per unit of actuator work: W walking does about 7.3e3 per sim second (check 2), so about 70 s to exhaustion; see docs/plans/PLAY.md
+EYES = os.environ.get('PLAY_EYES', '0') == '1'  # off: lamina drive gives no wall-side DN asymmetry (docs/plans/PLAY.md); the world reaches the brain: two eye cameras -> FlyWire lamina columns (agent/vision.py)
+EYE_EVERY = 20  # control steps per eye frame: 50 Hz, 1.9 ms per 64x48 pair on the host
+EYE_HZ = float(os.environ.get('PLAY_EYE_HZ', 150))  # lamina Poisson rate at field value 1 (keys use 150)
 NAMES = ('idle', 'w', 'a', 'd', 'w+threat')
 
 
@@ -61,7 +65,7 @@ def resolve(target, c):
 
 class Brain:
     """Resident brain, `cols` columns; every input of keymap.toml a stim entry; readout = DNs per side per column."""
-    def __init__(self, cols, km=None):
+    def __init__(self, cols, km=None, eyes=False):
         from agent import shiu_g1
         from agent.experiment import cells
         from agent.shiu import ShiuLive
@@ -75,10 +79,21 @@ class Brain:
         self.inputs['threat'] = (np.concatenate([resolve(t, c) for t in km['threat']['targets']]), km['threat']['hz'], False)
         self.km, self.names = km, list(self.inputs)
         self.brain = ShiuLive(*next(shiu_g1.arms(data, 'flywire'))[1], n=self.n, flies=cols, seed=71)
+        if eyes:  # lamina neurons of the column map, in the map's order, as Shiu graph rows
+            import pandas as pd
+            from agent.spatial_vision import mapping
+            from agent.verify_shiu import REF
+            ids = pd.read_csv(REF / 'data/2025_Completeness_783.csv', index_col=0).index.to_numpy(np.int64)
+            row = {int(r): i for i, r in enumerate(ids)}
+            self.eye = np.array([row[int(r)] for r in mapping()['root_ids']])
         for col in range(cols):
             for ids, _, _ in self.inputs.values():
                 self.brain.stimulate(ids, 0, fly=col)
+            if eyes:
+                self.brain.stimulate(self.eye, 0, fly=col)
         pos = {e: i for i, e in enumerate(self.brain.stim)}
+        self.vpos = np.array([[pos[col * self.n + i] for i in self.eye] for col in range(cols)]) if eyes else None
+        self.vis = None  # (cols, lamina) field values in [0, 1], set by the eyes
         self.M = np.zeros((cols, len(self.names), len(pos)), np.float32)  # which entries each input of each column drives
         for col in range(cols):
             for j, (ids, _, _) in enumerate(self.inputs.values()):
@@ -97,6 +112,8 @@ class Brain:
     def set(self, rates):
         """rates (cols, inputs) in Hz -> the worker's per-entry probabilities, written only when they changed."""
         p = np.clip(np.einsum('cn,cne->e', rates, self.M) * fl.DT, 0, 1).astype(np.float32)
+        if self.vis is not None:
+            p[self.vpos] = np.clip(self.vis * EYE_HZ * fl.DT, 0, 1)
         if self.p is None or not np.array_equal(p, self.p):
             p.tofile(self.brain.work / 'stim_p.bin')
             self.p = p
@@ -114,6 +131,38 @@ class Brain:
         split = np.zeros((self.cols, 2), np.int64)
         np.add.at(split, (self.colof, (~self.mine).astype(int)), cum)
         return side, split
+
+
+class Eyes:
+    """The fly's two eye cameras (body.xml l/r_eye_cam) rendered by MuJoCo from the engine's qpos, turned into per-column
+    lamina drive by agent/vision.py (local brightness, contrast, motion; approximate camera registration)."""
+    def __init__(self, m):
+        import mujoco
+        from agent.vision import EyeVision
+        self.mj, self.m, self.d = mujoco, m, mujoco.MjData(m)
+        self.cams = [mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_CAMERA, f'fly/{s}_eye_cam_camera') for s in 'lr']
+        self.r, self.v = mujoco.Renderer(m, 48, 64), EyeVision(spatial=True)
+        self.thorax = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, 'fly/c_thorax')
+        self.registered = False
+
+    def __call__(self, q):
+        """(lamina,) drive in [0, 1] for qpos q."""
+        self.d.qpos[:] = q
+        self.mj.mj_kinematics(self.m, self.d)
+        self.mj.mj_camlight(self.m, self.d)
+        if not self.registered:  # image axes against body forward / up, as EyeVision.register_cameras
+            body = self.d.xmat[self.thorax].reshape(3, 3)
+            rot = [self.d.cam_xmat[c].reshape(3, 3) for c in self.cams]
+            self.v.horizontal_flip = tuple(bool(r[:, 0] @ body[:, 0] > 0) for r in rot)
+            self.v.vertical_flip = tuple(bool(r[:, 1] @ body[:, 2] < 0) for r in rot)
+            self.registered = True
+        ims = []
+        for c in self.cams:
+            self.r.update_scene(self.d, camera=c)
+            ims.append(self.r.render())
+        self.v.step(np.stack(ims))
+        self.last = ims
+        return self.v.spatial_drive
 
 
 def setup(F, render=0, out='/dev/null', seed=None):
@@ -153,7 +202,7 @@ def loop(brain, eng, gaits, rates_at, steps, on_step=None):
 
     def take(k, win, drive):  # step k's body state; game rows feed rates_at one step late (stamina, slow)
         nonlocal game
-        q = eng.recv()
+        q = eng.q = eng.recv()
         game = eng.game
         if k >= fl.WINDOW:
             tr.append(q if brain.cols > 1 else q[None])
@@ -260,7 +309,7 @@ def play(*args):
     """play [world [SEED]]: flat floor, or the seeded terrain (seed 1 by default)."""
     seed = next((int(x) for x in args[1:] if x.isdigit()), 1) if args[:1] == ('world',) else None
     km = tomllib.loads(KEYMAP.read_text())
-    brain = Brain(1, km)
+    brain = Brain(1, km, eyes=EYES)
     fifo = OUT / 'frames.fifo'
     OUT.mkdir(parents=True, exist_ok=True)
     fifo.unlink(missing_ok=True)
@@ -270,6 +319,7 @@ def play(*args):
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     d, m, eng = setup(1, render=RENDER, out=fifo, seed=seed)
     gaits = [fl.Gait(m, d, fl.K)]
+    eyes = Eyes(m) if EYES else None
     th = km['threat']
     every, dur = round(th['every_s'] / (fl.K * fl.DT)), round(th['dur_s'] / (fl.K * fl.DT))
     names = {'space': ' '} | {k: k for k in km['keys']}
@@ -331,6 +381,8 @@ def play(*args):
         r[0, brain.names.index('mouse-left' if mouse < 0 else 'mouse-right')] = hz
         r[0, brain.walk] *= 0.2 + 0.8 * game[0, 2]  # tired: the player's walking drive weakens, the brain's own does not
         r[0, brain.names.index('threat')] = brain.hz[brain.names.index('threat')] * (i < threat_until)
+        if eyes and i % EYE_EVERY == 0 and getattr(eng, 'q', None) is not None:
+            brain.vis = eyes(eng.q)[None]
         return r
 
     tick = fl.K * fl.DT  # one control step of sim time; the clock holds play to it, a slow step is not made up (Minecraft's tick)
