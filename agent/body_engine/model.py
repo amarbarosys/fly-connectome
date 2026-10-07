@@ -484,8 +484,8 @@ def feet(m, regex, couple=(), hrows=None, convex=False, hfexact=False):
     elliptic = m.opt.cone == mujoco.mjtCone.mjCONE_ELLIPTIC
     if m.opt.solver != mujoco.mjtSolver.mjSOL_NEWTON and (elliptic or convex or hfexact):  # CG and PGS: pyramidal rows of plane-mesh and sphere pairs (check.sh solver)
         raise SystemExit('FAIL export: CG and PGS are gated with the pyramidal cone and plane-mesh / sphere pairs only (check.sh solver)')
-    if elliptic and (convex or hfexact):
-        raise SystemExit('FAIL export: the elliptic cone is gated on plane-mesh pairs only (check.sh cone), not convex or exact-heightfield pairs')
+    if elliptic and hfexact:
+        raise SystemExit('FAIL export: the elliptic cone is gated on plane-mesh and convex pairs (check.sh cone, cone_convex), not exact-heightfield pairs')
     if (m.geom_contype & m.geom_conaffinity).any():
         raise SystemExit('FAIL export: contacts need explicit pairs only')
     sel, drop = pairs(m, regex, convex)

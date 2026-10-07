@@ -533,6 +533,19 @@ if [ "$stage" = cone ]; then  # elliptic friction cone on the walking fly: Newto
   [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
   echo "PASS all cone checks"; exit 0
 fi
+if [ "$stage" = cone_convex ]; then  # elliptic friction cone on convex pairs: the fly in the arena (box walls, ellipsoid stones, CONVEX=1), Newton noslip 0 and 5,
+  # MuJoCo run to convergence (model.elliptic), one-step fields on 64 states moved into walls and stones. The contact tail (emit_contact) is shared by every pair kind,
+  # so the cone port is the same code; this gate is what lets export accept the pair. Mutant: the cone force tangent sign (the cone gate's first mutant) on convex states.
+  for ns in 0 5; do
+    E=$($M -c "from agent.body_engine.model import elliptic; print(elliptic('.work/agent/gpu-body-port/body-v2/body.xml', $ns))")
+    env CONVEX=1 $M -m agent.body_engine.model check $E $X/cone-convex$ns actuated 64 || { echo "FAIL cone_convex noslip $ns"; fail=$((fail+1)); }
+  done
+  E0=$($M -c "from agent.body_engine.model import elliptic; print(elliptic('.work/agent/gpu-body-port/body-v2/body.xml', 0))")
+  ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo 's/force = V3(f0, -f0 \/ T \* U\[1\] \* fr\[1\], -f0 \/ T \* U\[2\] \* fr\[2\], 0)/force = V3(f0, f0 \/ T * U[1] * fr[1], f0 \/ T * U[2] * fr[2], 0)/' -- \
+    env CONVEX=1 $M -m agent.body_engine.model check $E0 $X/mutant actuated 32 || fail=$((fail+1))
+  [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
+  echo "PASS all cone_convex checks"; exit 0
+fi
 if [ "$stage" = spidereye ]; then  # native vision (docs/plans/SPIDER_BRAIN.md unit 2): rendered prey vs an independent analytic pinhole,
   # own-body occlusion vs MuJoCo ray casting, per-animal separation, environment-moved prey. Mutants: eye axis yaw flipped in the kernel,
   # prey path sign flipped, eye table yaw flipped (caught against the gate's own hand-written INTENDED geometry)
