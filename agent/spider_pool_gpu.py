@@ -1,5 +1,5 @@
 """GPU self-wiring spider pathway (agent/spider_pool.mojo) and its numpy oracle (HashPathway: same counter-hash random
-numbers, integer refractory, kernel order). Scaffold slice of tools/spider_scaffold_learn_test.py: one principal eye,
+numbers, integer refractory, kernel order). Scaffold slice (the pre-review CPU script was removed 2026-10-07, this file is the slice): one principal eye,
 retina 1200 -> AM1 2000 -> AM2 2000 -> 12 eye-muscle motor neurons, fan-in 20 / 20 / 200, every slot empty at start;
 teaching signal per motor neuron (slip direction, motor layer ungated), fixed random feedback to AM1/AM2 (gated by
 their own spikes), prune/regrow on the device after every teach step (30 % slot budget). Fixes from astra's review
