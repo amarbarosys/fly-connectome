@@ -41,7 +41,7 @@ OUT = fl.OUT.parent / 'play'
 RENDER = int(os.environ.get('PLAY_RENDER', 24))  # control steps per frame: 24 = 41.7 fps of sim time; world terrain 0.89x real time vs 0.85x at 16 (62.5 fps), 0.31x at 4
 CPU = os.environ.get('PLAY_CPU', '1') == '1'  # physics on the host (smooth.mojo -DCPU=1): one fly, 53 us per 0.1 ms step vs 4.4 ms on one GPU wave
 WORK_RATE = float(os.environ.get("PLAY_WORK_RATE", 2e-6))  # stamina + energy per unit of actuator work: W walking does about 7.3e3 per sim second (check 2), so about 70 s to exhaustion; see docs/plans/PLAY.md
-EYES = os.environ.get('PLAY_EYES', '0') == '1'  # the world's looming reaches the brain (class Eyes, keymap [loom]); off: walls gate FAILs
+EYES = os.environ.get('PLAY_EYES', '0') == '1'  # the world's proximity reaches the brain's looming cells (class Eyes, keymap [loom]); off: walls gate FAILs
 EYE_EVERY = 20  # control steps per eye frame: 50 Hz
 CAL = 250  # control steps (0.25 s) of W held after fl.WINDOW: the drive reference is their mean DN rate per side; the first 50 ms
 # alone (still ramping: 244 vs 524 Hz L/R) left W decoding 0.84 vs 0.67 and the fly turning -34 deg
@@ -126,9 +126,10 @@ class Brain:
 
 
 class Eyes:
-    """Looming per eye (body.xml l/r_eye_cam, fovy 157): a 32x24 depth render with the fly's own body hidden; the share of
-    each eye nearer than km[loom].near mm (a near surface fills more of the eye as the fly closes in), above `base`, over
-    `span`. Output (2,) in [0, 1], left eye first, drives that side's [loom] targets. Computed looming, not flyvis."""
+    """Engineered PROXIMITY sensor per eye, not visual looming (body.xml l/r_eye_cam, fovy 157): a 32x24 depth render with
+    the fly's own body and the ground hidden; the share of each eye nearer than km[loom].near mm, above `base`, over `span`.
+    A stationary near wall gives a sustained drive; nothing here tells approaching from receding (that needs image
+    expansion over time). Output (2,) in [0, 1], left eye first, drives that side's [loom] targets (LC4 + LPLC2)."""
     def __init__(self, m, loom):
         import copy
         import mujoco
@@ -139,9 +140,8 @@ class Eyes:
         self.cams = [mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_CAMERA, f'fly/{s}_eye_cam_camera') for s in 'lr']
         self.r = mujoco.Renderer(m, 24, 32)
         self.r.enable_depth_rendering()
-        self.prev = None
 
-    def __call__(self, q, dt=None):
+    def __call__(self, q):
         self.d.qpos[:] = q
         self.mj.mj_kinematics(self.m, self.d)
         self.mj.mj_camlight(self.m, self.d)
@@ -149,7 +149,7 @@ class Eyes:
         for e, c in enumerate(self.cams):
             self.r.update_scene(self.d, camera=c)
             near[e] = (self.r.render() < self.loom['near']).mean()
-        self.prev = near
+        self.prev = near  # last frame's shares, for inspection
         return np.clip((near - self.loom['base']) / self.loom['span'], 0, 1)
 
 
@@ -334,7 +334,7 @@ def walls(*args):
         r[:, w] = brain.hz[w]
         if i % EYE_EVERY == 0 and getattr(eng, 'q', None) is not None:
             for col in range(2):
-                loom[col] = eyes[col](eng.q[col], EYE_EVERY * fl.K * fl.DT)[::-1 if swap else 1]
+                loom[col] = eyes[col](eng.q[col])[::-1 if swap else 1]
         r[:2, lm] = brain.hz[lm] * loom
         if i % EYE_EVERY == 0:
             hist.append(loom.copy())
@@ -438,7 +438,7 @@ def play(*args):
         r[0, brain.walk] *= 0.2 + 0.8 * game[0, 2]  # tired: the player's walking drive weakens, the brain's own does not
         r[0, brain.names.index('threat')] = brain.hz[brain.names.index('threat')] * (i < threat_until)
         if eyes and i % EYE_EVERY == 0 and getattr(eng, 'q', None) is not None:
-            loom = eyes(eng.q, EYE_EVERY * fl.K * fl.DT)
+            loom = eyes(eng.q)
         for e, side in enumerate(('left', 'right')):
             r[0, brain.names.index('loom-' + side)] = brain.hz[brain.names.index('loom-' + side)] * loom[e]
         return r

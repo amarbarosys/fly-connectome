@@ -36,7 +36,7 @@ right = "DNa02-left"
 hz_per_px = 15
 max_hz = 200
 
-[loom]                                 # the world's looming, per eye (play.py Eyes): drives that side's cells
+[loom]                                 # engineered proximity per eye (play.py Eyes, not visual expansion): drives that side's cells
 targets = ["LC4", "LPLC2"]
 hz = 150                               # at drive 1
 near = 6.0                             # mm: depth pixels nearer than this count as looming surface
