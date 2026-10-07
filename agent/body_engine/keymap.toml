@@ -36,9 +36,15 @@ right = "DNa02-left"
 hz_per_px = 15
 max_hz = 200
 
-[threat]                               # the world, not the player: looming on both eyes (fly_link's LC4 + LPLC2 drive)
+[loom]                                 # the world's looming, per eye (play.py Eyes): drives that side's cells
+targets = ["LC4", "LPLC2"]
+hz = 150                               # at drive 1
+near = 6.0                             # mm: depth pixels nearer than this count as looming surface
+base = 0.25                            # near share below this: no drive (open ground, far stones about 0.04)
+span = 0.25                            # near share above base that gives drive 1 (wall 2.5 mm ahead: 0.34 both eyes)
+
+[threat]                               # by hand: looming on both eyes (fly_link's LC4 + LPLC2 drive)
 targets = ["LC4", "LPLC2"]
 hz = 150
-key = "t"                              # trigger by hand; play also fires one every `every_s` sim seconds
-every_s = 0.6
+key = "t"
 dur_s = 0.15

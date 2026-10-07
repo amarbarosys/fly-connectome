@@ -9,7 +9,7 @@ Input: the terminal in kitty keyboard mode (press / release events; ghostty, kit
 to mpv. Every key and the mouse are stim entries registered once at start (rate 0); per control step only the probability
 row changes, written to the worker's stim_p.bin, which it rereads on every advance (no new kernel, nothing when no key
 changed). Walking keys are scaled by the engine's stamina (-DGAME=1 game rows, read from the sensor packet). The world
-fires a looming threat (LC4 + LPLC2, both eyes) every few sim seconds or on `t`. HUD (terminal line): the window's DN
+fires a looming threat (LC4 + LPLC2, both eyes) on `t`; PLAY_EYES=1 adds the world's looming per eye (class Eyes). HUD (terminal line): the window's DN
 spikes split into the player's DNs (key targets) and the brain's own DNs; OVERRIDE when own > player while a key is held.
 Engine HUD bars show energy / health / stamina in the frame.
 
@@ -41,9 +41,8 @@ OUT = fl.OUT.parent / 'play'
 RENDER = int(os.environ.get('PLAY_RENDER', 24))  # control steps per frame: 24 = 41.7 fps of sim time; world terrain 0.89x real time vs 0.85x at 16 (62.5 fps), 0.31x at 4
 CPU = os.environ.get('PLAY_CPU', '1') == '1'  # physics on the host (smooth.mojo -DCPU=1): one fly, 53 us per 0.1 ms step vs 4.4 ms on one GPU wave
 WORK_RATE = float(os.environ.get("PLAY_WORK_RATE", 2e-6))  # stamina + energy per unit of actuator work: W walking does about 7.3e3 per sim second (check 2), so about 70 s to exhaustion; see docs/plans/PLAY.md
-EYES = os.environ.get('PLAY_EYES', '0') == '1'  # off: lamina drive gives no wall-side DN asymmetry (docs/plans/PLAY.md); the world reaches the brain: two eye cameras -> FlyWire lamina columns (agent/vision.py)
-EYE_EVERY = 20  # control steps per eye frame: 50 Hz, 1.9 ms per 64x48 pair on the host
-EYE_HZ = float(os.environ.get('PLAY_EYE_HZ', 150))  # lamina Poisson rate at field value 1 (keys use 150)
+EYES = os.environ.get('PLAY_EYES', '0') == '1'  # the world's looming reaches the brain (class Eyes, keymap [loom]); off: walls gate FAILs
+EYE_EVERY = 20  # control steps per eye frame: 50 Hz
 NAMES = ('idle', 'w', 'a', 'd', 'w+threat')
 
 
@@ -65,7 +64,7 @@ def resolve(target, c):
 
 class Brain:
     """Resident brain, `cols` columns; every input of keymap.toml a stim entry; readout = DNs per side per column."""
-    def __init__(self, cols, km=None, eyes=False):
+    def __init__(self, cols, km=None):
         from agent import shiu_g1
         from agent.experiment import cells
         from agent.shiu import ShiuLive
@@ -76,24 +75,15 @@ class Brain:
         self.inputs = {k: (np.concatenate([resolve(t, c) for t in v['targets']]), v['hz'], v.get('walk', False)) for k, v in km['keys'].items()}
         ms = km['mouse']
         self.inputs |= {'mouse-' + s: (resolve(ms[s], c), 0, True) for s in ('left', 'right')}
+        self.inputs |= {'loom-' + s: (np.concatenate([resolve(f'{t}-{s}', c) for t in km['loom']['targets']]), km['loom']['hz'], False)
+                        for s in ('left', 'right')}
         self.inputs['threat'] = (np.concatenate([resolve(t, c) for t in km['threat']['targets']]), km['threat']['hz'], False)
         self.km, self.names = km, list(self.inputs)
         self.brain = ShiuLive(*next(shiu_g1.arms(data, 'flywire'))[1], n=self.n, flies=cols, seed=71)
-        if eyes:  # lamina neurons of the column map, in the map's order, as Shiu graph rows
-            import pandas as pd
-            from agent.spatial_vision import mapping
-            from agent.verify_shiu import REF
-            ids = pd.read_csv(REF / 'data/2025_Completeness_783.csv', index_col=0).index.to_numpy(np.int64)
-            row = {int(r): i for i, r in enumerate(ids)}
-            self.eye = np.array([row[int(r)] for r in mapping()['root_ids']])
         for col in range(cols):
             for ids, _, _ in self.inputs.values():
                 self.brain.stimulate(ids, 0, fly=col)
-            if eyes:
-                self.brain.stimulate(self.eye, 0, fly=col)
         pos = {e: i for i, e in enumerate(self.brain.stim)}
-        self.vpos = np.array([[pos[col * self.n + i] for i in self.eye] for col in range(cols)]) if eyes else None
-        self.vis = None  # (cols, lamina) field values in [0, 1], set by the eyes
         self.M = np.zeros((cols, len(self.names), len(pos)), np.float32)  # which entries each input of each column drives
         for col in range(cols):
             for j, (ids, _, _) in enumerate(self.inputs.values()):
@@ -112,8 +102,6 @@ class Brain:
     def set(self, rates):
         """rates (cols, inputs) in Hz -> the worker's per-entry probabilities, written only when they changed."""
         p = np.clip(np.einsum('cn,cne->e', rates, self.M) * fl.DT, 0, 1).astype(np.float32)
-        if self.vis is not None:
-            p[self.vpos] = np.clip(self.vis * EYE_HZ * fl.DT, 0, 1)
         if self.p is None or not np.array_equal(p, self.p):
             p.tofile(self.brain.work / 'stim_p.bin')
             self.p = p
@@ -134,38 +122,34 @@ class Brain:
 
 
 class Eyes:
-    """The fly's two eye cameras (body.xml l/r_eye_cam) rendered by MuJoCo from the engine's qpos, turned into per-column
-    lamina drive by agent/vision.py (local brightness, contrast, motion; approximate camera registration)."""
-    def __init__(self, m):
+    """Looming per eye (body.xml l/r_eye_cam, fovy 157): a 32x24 depth render with the fly's own body hidden; the share of
+    each eye nearer than km[loom].near mm (a near surface fills more of the eye as the fly closes in), above `base`, over
+    `span`. Output (2,) in [0, 1], left eye first, drives that side's [loom] targets. Computed looming, not flyvis."""
+    def __init__(self, m, loom):
+        import copy
         import mujoco
-        from agent.vision import EyeVision
-        self.mj, self.m, self.d = mujoco, m, mujoco.MjData(m)
+        m = copy.deepcopy(m)
+        hide = (m.geom_bodyid != 0) | np.isin(m.geom_type, (mujoco.mjtGeom.mjGEOM_PLANE, mujoco.mjtGeom.mjGEOM_HFIELD))
+        m.geom_matid[hide], m.geom_rgba[hide, 3] = -1, 0  # alpha 0 is not drawn: no own body, no ground, obstacles only
+        self.mj, self.m, self.d, self.loom = mujoco, m, mujoco.MjData(m), loom
         self.cams = [mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_CAMERA, f'fly/{s}_eye_cam_camera') for s in 'lr']
-        self.r, self.v = mujoco.Renderer(m, 48, 64), EyeVision(spatial=True)
-        self.thorax = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, 'fly/c_thorax')
-        self.registered = False
+        self.r = mujoco.Renderer(m, 24, 32)
+        self.r.enable_depth_rendering()
+        self.prev = None
 
-    def __call__(self, q):
-        """(lamina,) drive in [0, 1] for qpos q."""
+    def __call__(self, q, dt=None):
         self.d.qpos[:] = q
         self.mj.mj_kinematics(self.m, self.d)
         self.mj.mj_camlight(self.m, self.d)
-        if not self.registered:  # image axes against body forward / up, as EyeVision.register_cameras
-            body = self.d.xmat[self.thorax].reshape(3, 3)
-            rot = [self.d.cam_xmat[c].reshape(3, 3) for c in self.cams]
-            self.v.horizontal_flip = tuple(bool(r[:, 0] @ body[:, 0] > 0) for r in rot)
-            self.v.vertical_flip = tuple(bool(r[:, 1] @ body[:, 2] < 0) for r in rot)
-            self.registered = True
-        ims = []
-        for c in self.cams:
+        near = np.empty(2)
+        for e, c in enumerate(self.cams):
             self.r.update_scene(self.d, camera=c)
-            ims.append(self.r.render())
-        self.v.step(np.stack(ims))
-        self.last = ims
-        return self.v.spatial_drive
+            near[e] = (self.r.render() < self.loom['near']).mean()
+        self.prev = near
+        return np.clip((near - self.loom['base']) / self.loom['span'], 0, 1)
 
 
-def setup(F, render=0, out='/dev/null', seed=None):
+def setup(F, render=0, out='/dev/null', seed=None, q0=None):
     """seed: the fly on live.py's seeded terrain (live.WORLD, 0.1 mm bumps and cones), dropped from the flat standing pose."""
     flags = ['-DGAME=1', '-DHUD=1', '-DFOLLOW=1', '-DORBIT=1'] + (['-DCPU=1'] if CPU else []) + (['-DPROFILE=1'] if os.environ.get('PLAY_PROFILE') == '1' else [])
     if seed is None:
@@ -186,7 +170,7 @@ def setup(F, render=0, out='/dev/null', seed=None):
     if not (d / 'mf.base').exists():
         (d / 'mf.bin').rename(d / 'mf.base')
     gc.set_rules(d, 0.0, WORK_RATE)
-    eng = fl.Engine(d, fl.K, 'play', 0, F=F, flags=tuple(flags), out=out, render=render)
+    eng = fl.Engine(d, fl.K, 'play', 0, F=F, flags=tuple(flags), out=out, render=render, q0=q0(d) if q0 else None)
     return d, m, eng
 
 
@@ -314,6 +298,57 @@ def check(*args):
         sys.exit(f'FAIL {len(bad)}/{len(gates)} {bad}')
 
 
+def walls(*args):
+    """walls [SEED]: W held 1 s, the fly 6 mm from the west wall at 45 deg, wall ahead-left (cols 0, 2) or ahead-right (1, 3);
+    cols 0-1 see (Eyes -> loom), 2-3 blind twins. PASS: each seeing fly turns away from its wall more than its blind twin
+    (10 deg) and keeps farther from it. PLAY_LOOM_SWAP=1 feeds each eye's looming to the other side: must FAIL."""
+    seed = next((int(x) for x in args if x.isdigit()), 1)
+    km = tomllib.loads(KEYMAP.read_text())
+    swap = os.environ.get('PLAY_LOOM_SWAP') == '1'
+    yaws = (3 * np.pi / 4, 5 * np.pi / 4) * 2
+
+    def q0(d):
+        q = np.tile(np.fromfile(d / 'qpos.bin', np.float32), (4, 1))
+        q[:, 0], q[:, 1] = -14.0, 0.0
+        q[:, 3:7] = [(np.cos(y / 2), 0, 0, np.sin(y / 2)) for y in yaws]
+        return q
+
+    brain = Brain(4, km)
+    d, m, eng = setup(4, seed=seed, q0=q0)
+    gaits = [fl.Gait(m, d, fl.K) for _ in range(4)]
+    eyes = [Eyes(m, km['loom']) for _ in range(2)]
+    w, lm = brain.names.index('w'), [brain.names.index('loom-' + s) for s in ('left', 'right')]
+    loom, hist = np.zeros((2, 2)), []
+
+    def rates_at(i, game):
+        r = np.zeros((4, len(brain.names)), np.float32)
+        r[:, w] = brain.hz[w]
+        if i % EYE_EVERY == 0 and getattr(eng, 'q', None) is not None:
+            for col in range(2):
+                loom[col] = eyes[col](eng.q[col], EYE_EVERY * fl.K * fl.DT)[::-1 if swap else 1]
+        r[:2, lm] = brain.hz[lm] * loom
+        if i % EYE_EVERY == 0:
+            hist.append(loom.copy())
+        return r
+
+    tr, _, cost = loop(brain, eng, gaits, rates_at, fl.STEPS)
+    brain.brain.close()
+    eng.close()
+    root = live.roots(m)[0]
+    yaw = [float(fl.metrics(m, root, np.r_[tr[:1, c], tr[:, c]])['yaw_deg'][-1]) for c in range(4)]
+    gap = [float(tr[:, c, root].min() + 20) for c in range(4)]  # nearest root x to the wall face (x = -20), mm
+    gates = {'turns away (left wall: right turn)': yaw[0] - yaw[2] < -10 and yaw[1] - yaw[3] > 10,
+             'keeps clear': gap[0] > gap[2] and gap[1] > gap[3]}
+    h = np.array(hist)  # (frames, see col, eye)
+    print(json.dumps({'yaw_deg [see L, see R, blind L, blind R]': yaw, 'min gap mm': gap, 'swap': swap,
+                      'loom [col][eye] mean, by quarter': np.round([q.mean(0) for q in np.array_split(h, 4)], 2).tolist(),
+                      'ms per control step': {k: 1e3 * v / max(cost['steps'], 1) for k, v in cost.items() if k != 'steps'}}, default=float))
+    bad = [k for k, v in gates.items() if not v]
+    print('\n'.join(f"{'FAIL' if k in bad else 'PASS'} {k}" for k in gates))
+    if bad:
+        sys.exit(f'FAIL {len(bad)}/{len(gates)} {bad}')
+
+
 KEY = re.compile(rb'\x1b\[(\d+)(?::\d+)*(?:;\d+(?::(\d))?)?u|\x1b\[<(\d+);(\d+);(\d+)[Mm]|([ -~])')
 
 
@@ -321,7 +356,7 @@ def play(*args):
     """play [world [SEED]]: flat floor, or the seeded terrain (seed 1 by default)."""
     seed = next((int(x) for x in args[1:] if x.isdigit()), 1) if args[:1] == ('world',) else None
     km = tomllib.loads(KEYMAP.read_text())
-    brain = Brain(1, km, eyes=EYES)
+    brain = Brain(1, km)
     fifo = OUT / 'frames.fifo'
     OUT.mkdir(parents=True, exist_ok=True)
     fifo.unlink(missing_ok=True)
@@ -331,9 +366,9 @@ def play(*args):
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     d, m, eng = setup(1, render=RENDER, out=fifo, seed=seed)
     gaits = [fl.Gait(m, d, fl.K)]
-    eyes = Eyes(m) if EYES else None
+    eyes, loom = (Eyes(m, km['loom']) if EYES else None), np.zeros(2)
     th = km['threat']
-    every, dur = round(th['every_s'] / (fl.K * fl.DT)), round(th['dur_s'] / (fl.K * fl.DT))
+    dur = round(th['dur_s'] / (fl.K * fl.DT))
     names = {'space': ' '} | {k: k for k in km['keys']}
     held, tap, mouse, lastx, lasty, threat_until = set(), {}, 0.0, None, None, -1
     orbit, ob_tmp = np.array([1, -np.pi / 4, 0.35, 1], np.float64), d / 'orbit.tmp'  # on, azimuth, elevation (rad), zoom
@@ -349,7 +384,7 @@ def play(*args):
     out.flush()
 
     def rates_at(i, game):
-        nonlocal mouse, lastx, lasty, threat_until
+        nonlocal mouse, lastx, lasty, threat_until, loom
         while select.select([fd], [], [], 0)[0]:
             for g in KEY.finditer(os.read(fd, 4096)):
                 if g.group(1):
@@ -383,7 +418,7 @@ def play(*args):
                         return None
                     tap[ch] = i + round(0.3 / (fl.K * fl.DT))
         keys = held | {k for k, t in tap.items() if t > i}
-        if th['key'] in keys or i % every == 0:
+        if th['key'] in keys:
             threat_until = i + dur
         r = np.zeros((1, len(brain.names)), np.float32)
         for k, ch in names.items():
@@ -394,7 +429,9 @@ def play(*args):
         r[0, brain.walk] *= 0.2 + 0.8 * game[0, 2]  # tired: the player's walking drive weakens, the brain's own does not
         r[0, brain.names.index('threat')] = brain.hz[brain.names.index('threat')] * (i < threat_until)
         if eyes and i % EYE_EVERY == 0 and getattr(eng, 'q', None) is not None:
-            brain.vis = eyes(eng.q)[None]
+            loom = eyes(eng.q, EYE_EVERY * fl.K * fl.DT)
+        for e, side in enumerate(('left', 'right')):
+            r[0, brain.names.index('loom-' + side)] = brain.hz[brain.names.index('loom-' + side)] * loom[e]
         return r
 
     tick = fl.K * fl.DT  # one control step of sim time; the clock holds play to it, a slow step is not made up (Minecraft's tick)
@@ -437,4 +474,4 @@ def play(*args):
 
 if __name__ == '__main__':
     a = sys.argv[1:] or ['play']
-    check(*a[1:]) if a[0] == 'check' else play(*a[a[0] == 'play':])
+    check(*a[1:]) if a[0] == 'check' else walls(*a[1:]) if a[0] == 'walls' else play(*a[a[0] == 'play':])
