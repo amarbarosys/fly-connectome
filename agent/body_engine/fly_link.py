@@ -81,7 +81,11 @@ def prepare(out=None, mjcf=MJCF, convex=True, flat=None, world=None):
 
 class Gait:
     """flyloop's mapping (tools/fly_gait_oracle.py rollout): HybridTurningController -> 42 leg position servos + 6 stance adhesion values."""
-    def __init__(self, m, d, k):
+    def __init__(self, m, d, k, slew_s=0.2, trim=0.02):
+        """slew_s: the drive moves at most 1 per slew_s (a step from 0 to 1 at gait onset turned the fly -38 deg in 0.5 s; ramped
+        +0.7). trim: drive x (1 - trim, 1 + trim) on (left, right): equal drives pulled right about 7 deg/s in MuJoCo and in the
+        engine alike (body + controller, tools/gait_drift.py); 0.02 holds 2 s within 3 deg."""
+        self.rate, self.gain, self.sig = k * DT / slew_s if slew_s else np.inf, np.array([1 - trim, 1 + trim]), np.zeros(2)
         from flygym_demo.complex_terrain import HybridTurningController, PreprogrammedSteps
         from flygym_demo.complex_terrain.common import get_default_locomotion_dof_order
         from flygym_demo.complex_terrain.hybrid_controller import HybridControllerObservation
@@ -100,7 +104,8 @@ class Gait:
         self.controller.reset(seed=4, init_phases=np.array([0, np.pi, 0, np.pi, 0, np.pi]), init_magnitudes=np.zeros(6))
 
     def ctrl(self, signal):
-        a = self.controller.step(np.asarray(signal, float), self.obs)
+        self.sig += np.clip(np.asarray(signal, float) - self.sig, -self.rate, self.rate)
+        a = self.controller.step(self.sig * self.gain, self.obs)
         c = self.held.copy()
         c[self.act], c[self.adh] = a.joint_angles, a.adhesion_onoff.astype(float)
         return c.astype(np.float32)

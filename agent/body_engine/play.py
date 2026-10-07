@@ -43,6 +43,10 @@ CPU = os.environ.get('PLAY_CPU', '1') == '1'  # physics on the host (smooth.mojo
 WORK_RATE = float(os.environ.get("PLAY_WORK_RATE", 2e-6))  # stamina + energy per unit of actuator work: W walking does about 7.3e3 per sim second (check 2), so about 70 s to exhaustion; see docs/plans/PLAY.md
 EYES = os.environ.get('PLAY_EYES', '0') == '1'  # the world's looming reaches the brain (class Eyes, keymap [loom]); off: walls gate FAILs
 EYE_EVERY = 20  # control steps per eye frame: 50 Hz
+CAL = 250  # control steps (0.25 s) of W held after fl.WINDOW: the drive reference is their mean DN rate per side; the first 50 ms
+# alone (still ramping: 244 vs 524 Hz L/R) left W decoding 0.84 vs 0.67 and the fly turning -34 deg
+HOLD = fl.WINDOW + CAL
+HEADROOM = 0.8  # W decodes to this drive: room above it for the brain's own turns before the clip at 1
 NAMES = ('idle', 'w', 'a', 'd', 'w+threat')
 
 
@@ -175,8 +179,8 @@ def setup(F, render=0, out='/dev/null', seed=None, q0=None):
 
 
 def loop(brain, eng, gaits, rates_at, steps, on_step=None):
-    """Brain + body for `steps` control steps (0 = until rates_at returns None). The first fl.WINDOW steps hold the body and
-    fire `w` in every column to fix the drive scale (W = full drive, as fly_link's symmetric eye drive); then rates_at(i, game)."""
+    """Brain + body for `steps` control steps (0 = until rates_at returns None). The first HOLD steps hold the body and
+    fire `w` in every column; the last CAL of them fix the drive scale (W -> HEADROOM) (W = full drive, as fly_link's symmetric eye drive); then rates_at(i, game)."""
     j = brain.names.index('w')
     zero = np.zeros((brain.cols, 2), np.int64)
     cum, split, held = deque([zero], fl.WINDOW + 1), deque([zero], fl.WINDOW + 1), gaits[0].held  # one window of history, fixed size
@@ -190,20 +194,20 @@ def loop(brain, eng, gaits, rates_at, steps, on_step=None):
         q = eng.q = eng.recv()
         cost['recv'] += time.perf_counter() - t
         game = eng.game
-        if k >= fl.WINDOW:
+        if k >= HOLD:
             if steps:  # play (steps 0) keeps no trajectory: 600 B per 1 ms step grew 2.1 GB per hour
                 tr.append(q if brain.cols > 1 else q[None])
             if on_step:
                 t = time.perf_counter()
-                on_step(k - fl.WINDOW, win, game, drive)
+                on_step(k - HOLD, win, game, drive)
                 cost['on_step'] += time.perf_counter() - t
 
     def rates(i):
-        if i < fl.WINDOW:
+        if i < HOLD:
             r = np.zeros((brain.cols, len(brain.names)), np.float32)
             r[:, j] = brain.hz[j]
             return r
-        return rates_at(i - fl.WINDOW, game)
+        return rates_at(i - HOLD, game)
 
     def start(i):  # brain step i on the worker, running while the host does step i-1's gait and body
         t = time.perf_counter()
@@ -222,16 +226,18 @@ def loop(brain, eng, gaits, rates_at, steps, on_step=None):
         t = time.perf_counter()
         s, sp = brain.collect()
         cost['neural'] += time.perf_counter() - t
-        going = not (steps and i + 1 >= steps + fl.WINDOW) and start(i + 1)  # next brain step runs during this step's gait + body
+        going = not (steps and i + 1 >= steps + HOLD) and start(i + 1)  # next brain step runs during this step's gait + body
         cum.append(s)
         split.append(sp)
         w = min(i + 1, fl.WINDOW)
         rate = (cum[-1] - cum[-1 - w]) / (w * fl.K * fl.DT)
-        if i + 1 == fl.WINDOW:
-            ref = np.maximum(rate.mean(0), 1.0)
-        drive = np.clip(rate / ref, 0, 1) if i >= fl.WINDOW else np.zeros_like(rate, float)
+        if i + 1 == HOLD - CAL:  # start of the calibration window: W held, body held, brain settled
+            cal0 = s
+        if i + 1 == HOLD:
+            ref = np.maximum(((s - cal0) / (CAL * fl.K * fl.DT)).mean(0) / HEADROOM, 1.0)
+        drive = np.clip(rate / ref, 0, 1) if i >= HOLD else np.zeros_like(rate, float)
         t = time.perf_counter()
-        ctrl = np.stack([g.ctrl(dv) for g, dv in zip(gaits, drive)]) if i >= fl.WINDOW else np.tile(held, (brain.cols, 1))
+        ctrl = np.stack([g.ctrl(dv) for g, dv in zip(gaits, drive)]) if i >= HOLD else np.tile(held, (brain.cols, 1))
         cost['gait'] += time.perf_counter() - t
         if pend is not None:  # the body's previous step ran while the brain advanced (the brain never reads the body)
             take(*pend)
@@ -254,7 +260,7 @@ def check(*args):
     d, m, eng = setup(len(NAMES), seed=seed)
     gaits = [fl.Gait(m, d, fl.K) for _ in NAMES]
     ix = {k: brain.names.index(k) for k in ('w', 'a', 'd', 'threat')}
-    half, wins = fl.STEPS // 2, []
+    half, wins, drives = fl.STEPS // 2, [], []
 
     def rates_at(i, game):
         r = np.zeros((len(NAMES), len(brain.names)), np.float32)
@@ -264,7 +270,7 @@ def check(*args):
             r[4, ix['threat']] = brain.hz[ix['threat']]
         return r
 
-    tr, ref, cost = loop(brain, eng, gaits, rates_at, fl.STEPS, lambda i, win, game, drive: wins.append(win.copy()))
+    tr, ref, cost = loop(brain, eng, gaits, rates_at, fl.STEPS, lambda i, win, game, drive: (wins.append(win.copy()), drives.append(drive.copy())))
     brain.brain.close()
     engine_cost = eng.close()
     root = live.roots(m)[0]
@@ -275,18 +281,21 @@ def check(*args):
     during = wins[-fl.WINDOW:, 4].sum(0)
     fwd = {n: float(res[n]['forward'][-1]) / fl.BODY_LENGTH for n in NAMES}
     yaw = {n: float(res[n]['yaw_deg'][-1]) for n in NAMES}
-    n = fl.STEPS + fl.WINDOW
+    n = fl.STEPS + HOLD
     gates = {
         'idle stands': abs(fwd['idle']) < 0.25 and res['idle']['tilt_max'] < 90,  # upright: an upside-down fly (172 deg) also stays put
         'w walks': fwd['w'] > 1 and res['w']['tilt_max'] < 20,
-        'a/d turn': yaw['a'] * yaw['d'] < 0 and min(abs(yaw['a']), abs(yaw['d'])) > 10,
+        'w straight': abs(yaw['w']) < 15,  # a -48 deg W used to pass 'w walks'
+        'a turns left, d right': yaw['a'] > 10 and yaw['d'] < -10,
+        'a/d comparable': 0.5 < abs(yaw['a']) / max(abs(yaw['d']), 1e-9) < 2,
         'threat overrides': during[1] > during[0] and during[1] / max(during.sum(), 1) > before[1] / max(before.sum(), 1),
         'stamina drains under w': game[1, 2] < game[0, 2],
     }
     out = {'forward_body_lengths': fwd, 'yaw_deg': yaw, 'tilt_max': {k: res[k]['tilt_max'] for k in NAMES},
            'w+threat [player, own] DN spikes, last window before / during': [before.tolist(), during.tolist()],
            'game rows end (energy, health, stamina, dead)': {k: game[c].tolist() for c, k in enumerate(NAMES)},
-           'drive ref (DN Hz, W held)': ref.tolist(), 'ms per control step': {k: 1e3 * v / n for k, v in cost.items() if k != 'steps'},
+           'drive ref (DN Hz, W held)': ref.tolist(),
+           'drive [L, R] mean / clipped at 1 share': {k: [np.mean(drives, 0)[c].tolist(), np.mean(np.array(drives)[:, c] >= 1, 0).tolist()] for c, k in enumerate(NAMES)}, 'ms per control step': {k: 1e3 * v / n for k, v in cost.items() if k != 'steps'},
            'engine COST ms/frame': engine_cost, 'work_rate': WORK_RATE, 'gates': gates}
     (OUT / ('check.json' if seed is None else f'check-world{seed}.json')).write_text(json.dumps(out, indent=1, default=float) + '\n')
     for k, v in out.items():
