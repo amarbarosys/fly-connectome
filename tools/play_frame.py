@@ -14,12 +14,14 @@ raw = play.OUT / f'frames-world{seed}.rgba'
 km = tomllib.loads(play.KEYMAP.read_text())
 brain = play.Brain(1, km)
 d, m, eng = play.setup(1, render=16, out=str(raw), seed=seed)
+orbit = [float(x) for x in sys.argv[3:7]] or [1, -np.pi / 4, 0.35, 1]  # on, azimuth, elevation, zoom
+np.array(orbit, np.float32).tofile(d / 'orbit.bin')
 w = brain.names.index('w')
 r = np.zeros((1, len(brain.names)), np.float32); r[0, w] = brain.hz[w]
 play.loop(brain, eng, [fl.Gait(m, d, fl.K)], lambda i, game: r, steps)
 brain.brain.close(); eng.close()
 a = np.fromfile(raw, np.uint8)
 n = a.size // (sc.W * sc.H * 4)
-png = play.OUT / f'frame-world{seed}.png'
+png = play.OUT / (f'frame-world{seed}' + ('-az' + sys.argv[4] if len(sys.argv) > 4 else '') + '.png')
 Image.fromarray(a[(n - 1) * sc.W * sc.H * 4:n * sc.W * sc.H * 4].reshape(sc.H, sc.W, 4)[..., :3]).save(png)
 print(f'{n} frames, last -> {png}')

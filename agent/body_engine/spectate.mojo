@@ -12,7 +12,7 @@ hud_text, minimap   (WORLD + HUD) the sampled concentrations as 'd.ddd' text und
         hud.project_source in a mini-map (world XY orthographic around the animal, MAP_SCALE px per mm).
 """
 from max.gpu import block_idx, block_dim, thread_idx
-from std.math import sqrt
+from std.math import cos, sin, sqrt
 from std.sys import get_defined_int
 from layout import TileTensor, row_major
 import render as ren
@@ -72,9 +72,15 @@ def follow(cam: ren.TCAM, pose: ren.TPOSE, root: TROOT):
         var dz = pose[(3 * b + 2) * ren.F] - tz
         radius = max(radius, sqrt(dx * dx + dy * dy + dz * dz) + root[2 * i + 1])
     var d = fit_distance(radius, ren.W, ren.H, cam[6] * 57.29578)
-    cam[0] = tx + d * DIR_X
-    cam[1] = ty - d * DIR_X
-    cam[2] = tz + d * DIR_Z
+    if cam[11] > 0:  # orbit (play: mouse drag / wheel): azimuth cam[12], elevation cam[13] rad, zoom cam[14]
+        var r = d * cam[14]
+        cam[0] = tx + r * cos(cam[13]) * cos(cam[12])
+        cam[1] = ty + r * cos(cam[13]) * sin(cam[12])
+        cam[2] = tz + r * sin(cam[13])
+    else:
+        cam[0] = tx + d * DIR_X
+        cam[1] = ty - d * DIR_X
+        cam[2] = tz + d * DIR_Z
     cam[3] = tx
     cam[4] = ty
     cam[5] = tz

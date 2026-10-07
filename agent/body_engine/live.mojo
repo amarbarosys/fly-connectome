@@ -46,6 +46,7 @@ comptime FOLLOW = get_defined_int["FOLLOW", 0]()
 comptime HUD = get_defined_int["HUD", 0]()
 comptime PROFILE = get_defined_int["PROFILE", 0]()
 comptime WORLD = get_defined_int["WORLD", 0]()
+comptime ORBIT = get_defined_int["ORBIT", 0]() == 1  # FOLLOW camera orbits by DIR/orbit.bin (play)
 comptime GAZE = get_defined_int["GAZE", 0]() == 1  # BRAIN = 1 and EYES: F gaze yaws (deg, AM eyes) follow the ctrl on stdin
 comptime EYES = get_defined_int["EYES", 0]() == 1  # BRAIN > 0: eyes.mojo retinas in the packet, prey moved by DIR/env.bin
 comptime NRET = eyes.F * eyes.NE * eyes.W * eyes.H if EYES else 1
@@ -281,6 +282,16 @@ def main() raises:
                 ctx.enqueue_copy(o_b, ob.unsafe_ptr().unsafe_bitcast[Float32]())
         if draw:
             comptime if FOLLOW > 0:
+                comptime if ORBIT:  # DIR/orbit.bin: on, azimuth, elevation, zoom (play writes it on mouse drag / wheel)
+                    try:
+                        var ob4 = open(dir + "orbit.bin", "r").read_bytes()
+                        if len(ob4) == 16:
+                            var p4 = ob4.unsafe_ptr().unsafe_bitcast[Float32]()
+                            for k in range(4):
+                                camh[11 + k] = p4[k]
+                            ctx.enqueue_copy(cam_b, camh.unsafe_ptr())
+                    except:
+                        pass
                 ctx.enqueue_function(kf, tcam, tpose, troot, grid_dim=1, block_dim=1)
             ctx.enqueue_function(kc, vis, grid_dim=(ren.W * ren.H + 255) // 256, block_dim=256)
             ctx.enqueue_function(kr, vis, tpi, tpf, trv, trt, trp, tpose, tcam, grid_dim=(ren.F * ren.NTRI + 255) // 256, block_dim=256)

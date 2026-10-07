@@ -9,7 +9,7 @@ mkdir -p "$IO"; rm -f "$IO/keys" "$IO/hud"; mkfifo "$IO/keys" "$IO/hud"
 cat "$IO/hud" > "$IO/hud.log" &
 exec 3<>"$IO/keys"
 env_args=(--env PYTHONPATH="$PWD" --env PLAY_IO="$IO")
-for v in WAYLAND_DISPLAY DISPLAY XDG_RUNTIME_DIR; do [ -n "${!v:-}" ] && env_args+=(--env "$v=${!v}"); done
+for v in WAYLAND_DISPLAY DISPLAY XDG_RUNTIME_DIR $(compgen -v PLAY_ || true); do [ -n "${!v:-}" ] && env_args+=(--env "$v=${!v}"); done
 gpu-wait run --priority 90 --vram 4 --timeout 600 "${env_args[@]}" -- .venv/bin/python -m agent.body_engine.play "$@" </dev/null &
 job=$!
 until grep -q "real time" "$IO/hud.log" 2>/dev/null; do kill -0 $job 2>/dev/null || { echo "FAIL play_drive: play exited before its HUD"; exit 1; }; sleep 0.5; done

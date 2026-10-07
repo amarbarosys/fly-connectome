@@ -37,7 +37,7 @@ from agent.body_engine import fly_link as fl, game_check as gc, live, spectate_c
 KEYMAP = Path(__file__).with_name('keymap.toml')
 PRESETS = fl.OUT.parents[2] / 'shiu/presets'
 OUT = fl.OUT.parent / 'play'
-RENDER = int(os.environ.get('PLAY_RENDER', 16))  # control steps per frame: 16 = 62.5 fps of sim time (4 drew 250 fps, 0.31x real time)
+RENDER = int(os.environ.get('PLAY_RENDER', 24))  # control steps per frame: 24 = 41.7 fps of sim time; world terrain 0.89x real time vs 0.85x at 16 (62.5 fps), 0.31x at 4
 CPU = os.environ.get('PLAY_CPU', '1') == '1'  # physics on the host (smooth.mojo -DCPU=1): one fly, 53 us per 0.1 ms step vs 4.4 ms on one GPU wave
 WORK_RATE = float(os.environ.get("PLAY_WORK_RATE", 2e-6))  # stamina + energy per unit of actuator work: W walking does about 7.3e3 per sim second (check 2), so about 70 s to exhaustion; see docs/plans/PLAY.md
 NAMES = ('idle', 'w', 'a', 'd', 'w+threat')
@@ -118,7 +118,7 @@ class Brain:
 
 def setup(F, render=0, out='/dev/null', seed=None):
     """seed: the fly on live.py's seeded terrain (live.WORLD, 0.1 mm bumps and cones), dropped from the flat standing pose."""
-    flags = ['-DGAME=1', '-DHUD=1', '-DFOLLOW=1'] + (['-DCPU=1'] if CPU else [])
+    flags = ['-DGAME=1', '-DHUD=1', '-DFOLLOW=1', '-DORBIT=1'] + (['-DCPU=1'] if CPU else [])
     if seed is None:
         d, m, _ = fl.prepare(OUT / 'fly')
     else:  # terrain + the world's walls, stones, grass, flowers and two plume sources (agent/body_engine/assets.py), smelled at the antennae
@@ -129,7 +129,8 @@ def setup(F, render=0, out='/dev/null', seed=None):
         w = live.load(mjcf)
         stones = [(*w.geom_pos[g][:2], float(w.geom_size[g][:2].max())) for g in range(w.ngeom) if w.geom_type[g] == 4 and w.geom_bodyid[g] == 0]
         parts, src = assets.scene(params, seed, stones)
-        d, m, _ = fl.prepare(OUT / f'fly-world{seed}', mjcf=mjcf, flat=fl.MJCF, world=parts)
+        assets_on = os.environ.get('PLAY_ASSETS', '1') == '1'
+        d, m, _ = fl.prepare(OUT / (f'fly-world{seed}' + ('' if assets_on else '-bare')), mjcf=mjcf, flat=fl.MJCF, world=parts if assets_on else None)
         src.tofile(d / 'src.bin')
         np.array([[b, *p] for b, p in sites_of(m)], np.float32).tofile(d / 'sites.bin')
         flags += ['-DWORLD=1', '-DNSITE=2', '-DSOIL=1']
@@ -272,7 +273,10 @@ def play(*args):
     th = km['threat']
     every, dur = round(th['every_s'] / (fl.K * fl.DT)), round(th['dur_s'] / (fl.K * fl.DT))
     names = {'space': ' '} | {k: k for k in km['keys']}
-    held, tap, mouse, lastx, threat_until = set(), {}, 0.0, None, -1
+    held, tap, mouse, lastx, lasty, threat_until = set(), {}, 0.0, None, None, -1
+    orbit, ob_tmp = np.array([1, -np.pi / 4, 0.35, 1], np.float64), d / 'orbit.tmp'  # on, azimuth, elevation (rad), zoom
+    orbit.astype(np.float32).tofile(ob_tmp)
+    os.replace(ob_tmp, d / 'orbit.bin')
     io = os.environ.get('PLAY_IO')  # gpu-wait jobs have no terminal: play.sh owns it and relays keys / HUD through two fifos here
     if io:
         fd, old, out = os.open(Path(io) / 'keys', os.O_RDWR), None, open(Path(io) / 'hud', 'w')
@@ -283,18 +287,34 @@ def play(*args):
     out.flush()
 
     def rates_at(i, game):
-        nonlocal mouse, lastx, threat_until
+        nonlocal mouse, lastx, lasty, threat_until
         while select.select([fd], [], [], 0)[0]:
             for g in KEY.finditer(os.read(fd, 4096)):
                 if g.group(1):
                     ch, ev = chr(int(g.group(1))), g.group(2) or b'1'
                     if ch in 'q\x1b':
                         return None
+                    if ch == 'c' and ev == b'1':  # camera back to the default follow view
+                        orbit[:] = (1, -np.pi / 4, 0.35, 1)
+                        orbit.astype(np.float32).tofile(ob_tmp)
+                        os.replace(ob_tmp, d / 'orbit.bin')
                     (held.discard if ev == b'3' else held.add)(ch)
-                elif g.group(3):
-                    x = int(g.group(4))
-                    mouse += 0 if lastx is None else x - lastx
-                    lastx = x
+                elif g.group(3):  # SGR mouse: plain motion steers, left drag orbits the camera, wheel zooms
+                    b, x, y = int(g.group(3)), int(g.group(4)), int(g.group(5))
+                    dx, dy = (0, 0) if lastx is None else (x - lastx, y - lasty)
+                    lastx, lasty = x, y
+                    if b == 32:
+                        orbit[1] -= 0.05 * dx
+                        orbit[2] = min(max(orbit[2] + 0.05 * dy, -0.2), 1.5)
+                    elif b in (64, 65):
+                        orbit[3] = min(max(orbit[3] * (0.9 if b == 64 else 1.1), 0.2), 8.0)
+                    elif b in (35, 43):
+                        mouse += dx
+                    else:
+                        continue
+                    if b != 35:
+                        orbit.astype(np.float32).tofile(ob_tmp)
+                        os.replace(ob_tmp, d / 'orbit.bin')
                 elif g.group(6):  # a terminal without kitty events: a keypress holds for 0.3 s
                     ch = g.group(6).decode()
                     if ch == 'q':
