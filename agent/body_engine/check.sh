@@ -242,6 +242,35 @@ if [ "$stage" = sptendon ]; then  # spatial tendons (mj_tendon, mju_wrap): site-
   [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
   echo "PASS all sptendon checks"; exit 0
 fi
+if [ "$stage" = tendon_limit ]; then  # tendon limit rows (mj_instantiateLimit, engine_core_constraint.c:1277) on the equality block, unilateral in Newton:
+  # models/tendon_spatial.xml with every tendon limited to the 35..65 % quantiles of its length over nearby states (model.with_tendon_limits:
+  # 4.8 limit rows per state on average, 63/64 states carry one), twice: MuJoCo's default solref_lim 0.02 (stiff rows: float32 leaves
+  # qfrc_constraint within 2.4e-4 of its max on the CPU and 3.9e-4 on the card, qacc 1.3e-5, bar REL=5e-4; tolerance makes no difference, solref does) and solref_lim 0.1
+  # with tolerance 0 (default bar); the fly and the spider with three spatial tendons limited the same way (soft) at REL=2e-3: the fly's
+  # qacc reaches 1e7 on its light rotational dofs, so float32 resolves J qacc in a row's jar to ~1 rad/s^2, 1e-3 of a 5 N limit force
+  # (measured: fly qfrc_constraint 1.37e-3, qacc 1.42e-5, a 1e-6 input perturbation moves MuJoCo by 3e-7, so not conditioning; spider ten_J
+  # 1.15e-5); vs mj_step with contacts and actuation off, as the equality
+  # stage (its qacc_euler bar). Precision is gated on the fixtures, coverage on the animals; mutants on the soft fixture.
+  S=agent/body_engine/smooth.mojo; mkdir -p $X/tl
+  TL=$($M -c "from agent.body_engine.model import with_tendon_limits; print(with_tendon_limits('agent/body_engine/models/tendon_spatial.xml', '$X/tl/stiff.xml'))")
+  TS=$($M -c "from agent.body_engine.model import with_tendon_limits; print(with_tendon_limits('agent/body_engine/models/tendon_spatial.xml', '$X/tl/soft.xml', solref=0.1, tolerance=0))")
+  FT=$($M -c "from agent.body_engine.model import with_spatial_tendons, with_tendon_limits; print(with_tendon_limits(with_spatial_tendons('${BODY:-.work/agent/gpu-body-port/body-v2/body.xml}', '$X/tl/fly0.xml'), '$X/tl/fly.xml', solref=0.1, tolerance=0))")
+  ST=$($M -c "from agent.body_engine.model import with_spatial_tendons, with_tendon_limits; print(with_tendon_limits(with_spatial_tendons('agent/body_engine/models/spider_test.xml', '$X/tl/spider0.xml'), '$X/tl/spider.xml', solref=0.1, tolerance=0))")
+  REL=5e-4 $M -m agent.body_engine.model check $TL $X/tl/stiff tendon_limit 64 || { echo "FAIL tendon_limit stiff"; fail=$((fail+1)); }
+  $M -m agent.body_engine.model check $TS $X/tl/soft tendon_limit 64 || { echo "FAIL tendon_limit soft"; fail=$((fail+1)); }
+  for B in $FT $ST; do
+    REL=2e-3 $M -m agent.body_engine.model check $B $X/tl/$(basename $B .xml) tendon_limit 64 || { echo "FAIL tendon_limit $(basename $B .xml)"; fail=$((fail+1)); }
+  done
+  # the gate must fail with: the limit side flipped, the margin dropped, the row made bilateral (force while jar >= 0), the Jacobian sign dropped
+  for mut in 's/var dist = side \* (mf\[ef + 24\] - L)/var dist = -side * (mf[ef + 24] - L)/' \
+             's/cpos\[0\] = dist - mf\[ef + 25\]/cpos[0] = dist/' \
+             's/if rbase + k >= NEQB and jar >= 0:/if False:/' \
+             's/= -side \* ten_j(mi, mf, res, f, t, Int(mi\[CEQC + choff + c\])) if on/= side * ten_j(mi, mf, res, f, t, Int(mi[CEQC + choff + c])) if on/'; do
+    ~/iTools/bin/mutant-check $S "$mut" -- $M -m agent.body_engine.model check $TS $X/mutant tendon_limit 64 || fail=$((fail+1))
+  done
+  [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
+  echo "PASS all tendon_limit checks"; exit 0
+fi
 if [ "$stage" = loop ]; then  # K steps per launch, state kept on the card. K=1 vs mj_step (one step: the accuracy
   # gate); one K=10 launch must equal ten K=1 launches byte for byte (the loop). K=10 vs ten chained mj_step is not a
   # gate: the engine's ~5e-6 per-step float32 error grows ~12x in 10 steps on contact-rich states (diag/k_floor.py)

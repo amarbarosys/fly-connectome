@@ -104,7 +104,8 @@ comptime CSP = TNI + 2 * NTEN + 2 * NWRAP
 comptime NI2 = CSP + (3 * NWRAP + NTEN if SPATIAL else 0)
 # equality constraints (model.py eq_block, last block): per constraint 12 ints, then every chain, then its masks
 comptime NEQ = get_defined_int["NEQ", 0]()
-comptime NEQR = get_defined_int["NEQR", 0]()  # rows: connect 3, weld 6, joint 1
+comptime NEQR = get_defined_int["NEQR", 0]()  # rows: connect 3, weld 6, joint 1, then the tendon limit rows (unilateral)
+comptime NEQB = get_defined_int["NEQB", 0]()  # bilateral rows; a row r >= NEQB (tendon limit) costs 0.5 D jar^2 only while jar < 0
 comptime NEQCH = get_defined_int["NEQCH", 0]()
 comptime NEQJ = get_defined_int["NEQJ", 0]()  # Jacobian entries: rows x chain length, summed
 comptime EQH = 12
@@ -1640,7 +1641,24 @@ def equality(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int):
         var cpos = S6(0)
         var jdv = S6(0)  # Jdot qvel of the rows, subtracted from aref
         var posn: Float32
-        if typ == 2:  # joint: q0 - qpos0 - c0 - poly(q1 - qpos1_0) (engine_core_constraint.c:808)
+        if typ == 3:  # tendon limit (mj_instantiateLimit, engine_core_constraint.c:1277): dist = side (range - length), a row while dist < margin, J = -side ten_J
+            var t = Int(mi[eh + 8]); var side = Float32(Int(mi[eh + 9]))
+            var L: Float32
+            comptime if SPATIAL:
+                L = get(res, f, OTLEN + t)
+            else:
+                L = tendon(mi, mf, qpos, qvel, f, t)[0]
+            var dist = side * (mf[ef + 24] - L)
+            var on = dist < mf[ef + 25]
+            for c in range(nch):
+                res[(jb + c) * F + f] = -side * ten_j(mi, mf, res, f, t, Int(mi[CEQC + choff + c])) if on else Float32(0)
+            if not on:
+                res[(OEQD + rbase) * F + f] = 0
+                res[(OEQA + rbase) * F + f] = 0
+                continue
+            cpos[0] = dist - mf[ef + 25]
+            posn = cpos[0]
+        elif typ == 2:  # joint: q0 - qpos0 - c0 - poly(q1 - qpos1_0) (engine_core_constraint.c:808)
             var d0 = Int(mi[eh + 8]); var d1 = Int(mi[eh + 9])
             cpos[0] = qpos[Int(mi[eh + 10]) * F + f] - mf[ef + 29] - mf[ef + 24]
             var deriv: Float32 = 0
@@ -1820,12 +1838,14 @@ def update(mi: TI, mf: TF, res: TO, f: Int) -> Float32:
                     for c in range(nch):
                         var v = Int(mi[CCHAIN + choff + c])
                         res[(OQFC + v) * F + f] += get(res, f, jadr + c) * force
-    comptime if NEQ > 0:  # equality rows are always active (quadratic)
+    comptime if NEQ > 0:  # equality rows are always active (quadratic); a tendon limit row only while jar < 0
         for e in range(NEQ):
             var eh = CEQH + EQH * e
             var nch = Int(mi[eh + 4]); var choff = Int(mi[eh + 5]); var rbase = Int(mi[eh + 6]); var jb = OEQJ + Int(mi[eh + 7])
             for k in range(Int(mi[eh + 3])):
                 var jar = get(res, f, OEQJAR + rbase + k)
+                if rbase + k >= NEQB and jar >= 0:
+                    continue
                 var D = get(res, f, OEQD + rbase + k)
                 cost += 0.5 * D * jar * jar
                 var force = -D * jar
@@ -1895,11 +1915,13 @@ def hessian(mi: TI, mf: TF, res: TO, f: Int):
                     var ra = Int(mi[HADR + d])
                     for bb in range(a + 1):
                         res[(OHN + ra + bb) * F + f] += ja * get(res, f, jadr + bb)
-    comptime if NEQ > 0:  # equality rows: always in H
+    comptime if NEQ > 0:  # equality rows: always in H; a tendon limit row while jar < 0
         for e in range(NEQ):
             var eh = CEQH + EQH * e
             var nch = Int(mi[eh + 4]); var choff = Int(mi[eh + 5]); var rbase = Int(mi[eh + 6]); var jb = OEQJ + Int(mi[eh + 7])
             for k in range(Int(mi[eh + 3])):
+                if rbase + k >= NEQB and get(res, f, OEQJAR + rbase + k) >= 0:
+                    continue
                 var D = get(res, f, OEQD + rbase + k)
                 var jadr = jb + k * nch
                 for a in range(nch):
@@ -2043,9 +2065,11 @@ def peval(mi: TI, mf: TF, res: TO, f: Int, gauss: PNT, alpha: Float32) -> PNT:
                 q0 += 0.5 * D * jar * jar
                 q1 += jv * D * jar
                 q2 += 0.5 * jv * D * jv
-    comptime if NEQ > 0:  # equality rows: active at every alpha
+    comptime if NEQ > 0:  # equality rows: active at every alpha; a tendon limit row where jar + alpha jv < 0
         for r in range(lane(), NEQR, LN):
             var jar = get(res, f, OEQJAR + r); var jv = get(res, f, OEQJV + r); var D = get(res, f, OEQD + r)
+            if r >= NEQB and jar + alpha * jv >= 0:
+                continue
             q0 += 0.5 * D * jar * jar
             q1 += jv * D * jar
             q2 += 0.5 * jv * D * jv
@@ -2617,8 +2641,10 @@ def noslip(mi: TI, mf: TF, res: TO, f: Int):
             fr = -D * get(res, f, OJAR + r)
             imp0 += 0.5 * fr * fr / D
         res[(OFRC + r) * F + f] = fr
-    comptime if NEQ > 0:  # solNoSlip's iteration-0 correction sums every row, equality rows included
+    comptime if NEQ > 0:  # solNoSlip's iteration-0 correction sums every row, equality rows included (a tendon limit row while jar < 0)
         for r in range(NEQR):
+            if r >= NEQB and get(res, f, OEQJAR + r) >= 0:
+                continue
             imp0 += 0.5 * get(res, f, OEQD + r) * get(res, f, OEQJAR + r) * get(res, f, OEQJAR + r)
     for v in range(NV):
         res[(OZ + v) * F + f] = get(res, f, OQFC + v)

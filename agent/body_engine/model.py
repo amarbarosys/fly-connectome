@@ -61,6 +61,7 @@ STAGES['sptendon_act'] = (7, 'mj_step', STAGES['actuated'][2] + ('ten_length', '
 STAGES['equality'] = (6, 'mj_step', STAGES['step'][2] + ('ncon', 'qacc', 'qfrc_constraint'))
 # 'mocap': the same fields with mocap bodies (mocap_pos/quat random around the model pose, models/eq_mocap.xml), welded or connected to the animal.
 STAGES['mocap'] = STAGES['equality']
+STAGES['tendon_limit'] = (6, 'mj_step', STAGES['equality'][2] + TENDON_FIELDS)  # tendon limit rows (mj_instantiateLimit, unilateral) ride the equality block: models/tendon_spatial.xml with limits (with_tendon_limits)
 FEET = '.'  # every plane-mesh pair (55 on the fly: each body part on the floor); 'tarsus5' (6 feet) sank through the floor in MuJoCo too
 VSCALE = float(os.environ.get('VSCALE', 10))  # random qvel in +-VSCALE per dof (10: velocity terms well above float32 noise; qpos moves ~1e-3 per fly step); the flight gate draws up to flapping rate
 REL = float(os.environ.get('REL', 1e-5))  # check.sh sets a measured bar for `arena` (3e-3) and `terrain_exact` (4e-4), reasons there
@@ -341,9 +342,8 @@ def load(mjcf):
                          'actuator damping, polynomial springs or dampers, disable flags)')
     if m.opt.cone == mujoco.mjtCone.mjCONE_ELLIPTIC and m.opt.integrator != mujoco.mjtIntegrator.mjINT_EULER:
         raise SystemExit('FAIL export: the elliptic cone is gated with the Euler integrator only (check.sh cone), not RK4 or implicitfast')
-    if m.tendon_limited.any() or m.tendon_frictionloss.any() \
-            or m.tendon_stiffnesspoly.any() or m.tendon_dampingpoly.any() or m.tendon_actfrclimited.any():
-        raise SystemExit('FAIL export: only unlimited tendons without friction loss, with linear spring and damper, are ported')
+    if m.tendon_frictionloss.any() or m.tendon_stiffnesspoly.any() or m.tendon_dampingpoly.any() or m.tendon_actfrclimited.any():
+        raise SystemExit('FAIL export: only tendons without friction loss, with linear spring and damper, are ported (limits: eq_rows)')
     return m
 
 
@@ -620,6 +620,27 @@ def eq_rows(m):
         if not e['union']:
             raise SystemExit(f'FAIL export: equality {i} constrains nothing movable')
         out.append(e)
+    W = mujoco.mjtWrap
+    for t in np.flatnonzero(m.tendon_limited):  # mj_instantiateLimit tendon rows (engine_core_constraint.c:1277), one per side, unilateral
+        if m.opt.solver != mujoco.mjtSolver.mjSOL_NEWTON or m.opt.cone != mujoco.mjtCone.mjCONE_PYRAMIDAL or m.opt.integrator:
+            raise SystemExit('FAIL export: tendon limits are gated with the Newton solver, the pyramidal cone and the Euler integrator only (check.sh tendon_limit)')
+        if m.tendon_solref_lim[t][0] <= 0 or m.tendon_solref_lim[t][1] <= 0:
+            raise SystemExit(f'FAIL export: tendon {t} has a direct (non-positive) solref_lim; only the standard format is ported')
+        union = set()
+        for w in range(m.tendon_adr[t], m.tendon_adr[t] + m.tendon_num[t]):
+            wt, o = m.wrap_type[w], int(m.wrap_objid[w])
+            if wt == W.mjWRAP_JOINT:
+                union.add(int(m.jnt_dofadr[o]))
+            elif wt == W.mjWRAP_SITE:
+                union |= anc(m.site_bodyid[o])
+            elif wt in (W.mjWRAP_SPHERE, W.mjWRAP_CYLINDER):
+                union |= anc(m.geom_bodyid[o])
+        if not union:
+            raise SystemExit(f'FAIL export: limited tendon {t} moves nothing')
+        for side in (-1, 1):  # dist = side (range - length): lower bound at side -1, upper at +1
+            out.append(dict(type=3, solref=m.tendon_solref_lim[t], solimp=m.tendon_solimp_lim[t], b=[0, 0], size=1, union=union, a=[0.0] * 6,
+                            s=[1, 0, 0, 0, 1, 0, 0, 0], ts=1.0, invw=[float(m.tendon_invweight0[t]), 0.0], in0=set(), in1=set(),
+                            dof=[int(t), side], qadr=[-1, -1], data=[float(m.tendon_range[t][(side + 1) // 2]), float(m.tendon_margin[t]), 0.0, 0.0, 0.0], qref=[0.0, 0.0]))
     return out
 
 
@@ -640,8 +661,10 @@ def eq_block(m, eq, hrow):
         chains += chain
         masks += [(c in e['in0']) + 2 * (c in e['in1']) + 4 * is_quat(c) for c in chain]
         fl += [*e['a'], *e['s'], e['ts'], *e['solref'], *e['solimp'], *e['invw'], *e['data'], *e['qref']]
+    if any(a['type'] == 3 and b['type'] != 3 for a, b in zip(eq, eq[1:])):
+        raise SystemExit('FAIL export: tendon limit rows must follow the bilateral equality rows')
     return (np.array(head + chains + masks), np.array(fl),
-            {'NEQ': len(eq), 'NEQR': nrow, 'NEQCH': len(chains), 'NEQJ': nje})
+            {'NEQ': len(eq), 'NEQR': nrow, 'NEQB': sum(e['size'] for e in eq if e['type'] != 3), 'NEQCH': len(chains), 'NEQJ': nje})
 
 
 def mocap_block(m):
@@ -650,6 +673,42 @@ def mocap_block(m):
     if not m.nmocap:
         return None
     return np.asarray(m.body_mocapid), np.zeros(0), {'NMOCAP': m.nmocap}
+
+
+def with_tendon_limits(mjcf, out, count=256, lo=0.35, hi=0.65, solref=0.02, tolerance=None):
+    """mjcf with every tendon limited to [lo, hi] quantiles of its length over nearby() states (so random states violate each side in
+    about a third of them), margin a tenth of that span, solref_lim (solref, 1) and solimp_lim default, opt.tolerance replaced when given
+    (0: Newton to convergence, as elliptic()); mesh paths made absolute; written to `out`; returns the path. The gate bodies of check.sh
+    tendon_limit: solref 0.02 (MuJoCo's default, stiff: the rows' forces are D (J qacc - aref) with aref 1e3 x the difference, float32
+    leaves qfrc_constraint within 2.4e-4 of its max on the CPU, 3.9e-4 on the card, bar 5e-4) and solref 0.1 with tolerance 0 (within 6e-6, the default bar)."""
+    spec = mujoco.MjSpec.from_file(str(mjcf))
+    base = Path(mjcf).parent / (spec.meshdir or '')
+    for mesh in spec.meshes:
+        mesh.file = str((base / mesh.file).resolve()) if mesh.file else mesh.file
+    spec.meshdir = ''
+    m0 = spec.compile()
+    q, v = nearby(m0, count)
+    d = mujoco.MjData(m0)
+    L = np.zeros((count, m0.ntendon))
+    for n in range(count):
+        d.qpos[:] = q[n]
+        mujoco.mj_forward(m0, d)
+        L[n] = d.ten_length
+    for g in spec.geoms:  # the stage runs contacts off; a body with collision geoms would need explicit pairs at export
+        g.contype = g.conaffinity = 0
+    for j in spec.joints:  # joint limit rows are not ported (README): the fly's two and the spider's limited joints would add rows the engine lacks
+        j.limited = mujoco.mjtLimited.mjLIMITED_FALSE
+    for t, ten in enumerate(spec.tendons):
+        a, b = np.quantile(L[:, t], lo), np.quantile(L[:, t], hi)
+        ten.limited = mujoco.mjtLimited.mjLIMITED_TRUE
+        ten.range = [a, b]
+        ten.margin = 0.1 * (b - a)
+        ten.solref_limit = [solref, 1.0]
+    if tolerance is not None:
+        spec.option.tolerance = tolerance
+    Path(out).parent.mkdir(parents=True, exist_ok=True)
+    Path(out).write_text(spec.to_xml())
+    return str(out)
 
 
 def with_gravcomp(mjcf, out):
@@ -1011,7 +1070,7 @@ def check(mjcf, out, stage, count=64, k=0, oracle=None):
     m, out = export(mjcf, out, FEET if feet else None, stage in ('actuated', 'sptendon_act'), convex, hfexact), Path(out)
     number, fn, fields = STAGES[stage]
     ref = reference if m.opt.solver == mujoco.mjtSolver.mjSOL_NEWTON else reference_fresh  # see reference_fresh
-    near = stage in ('equality', 'mocap') and os.environ.get('EQSPREAD') != 'far'
+    near = stage in ('equality', 'mocap', 'tendon_limit') and os.environ.get('EQSPREAD') != 'far'
     far = not near
     q, v = nearby(m, count) if near else standing(load(oracle) if oracle else m, count) if feet else (states(m, count), velocities(m, count, scale=VSCALE))
     if (convex and not os.environ.get('STONES')) or os.environ.get('ARENA_STATES'):  # STONES: the model already carries its stones (model.stones), the standing rollout meets them; ARENA_STATES: the same states without the convex pairs (isolates what the pairs add)
@@ -1106,7 +1165,7 @@ def check(mjcf, out, stage, count=64, k=0, oracle=None):
             unstable = dev > 1
             fields = ('qpos', 'qvel')
         print('float32 input floor: ' + ', '.join(f'{f} {e:.2e}' for f, e in floor.items()))
-    elif stage in ('equality', 'mocap'):
+    elif stage in ('equality', 'mocap', 'tendon_limit'):
         s = load(mjcf)
         s.opt.disableflags |= mujoco.mjtDisableBit.mjDSBL_CONTACT | mujoco.mjtDisableBit.mjDSBL_ACTUATION
         ref = tuple(f for f in fields if f not in ('qacc_euler', 'qpos_next')) + ('qpos', 'qvel')
@@ -1124,6 +1183,8 @@ def check(mjcf, out, stage, count=64, k=0, oracle=None):
             return {f: np.array(a) for f, a in o.items()}
         want = run(q, v, mp, mq)
         alt = run(r32(q), r32(v), None if mp is None else r32(mp), None if mq is None else r32(mq))  # alt: the float32-rounded input
+        tendon_dense(s, want, q, v, count)
+        tendon_dense(s, alt, r32(q), r32(v), count, show=False)
         for w, r in ((want, v), (alt, r32(v))):
             w['qacc_euler'] = (w.pop('qvel') - r) / m.opt.timestep
             w['qpos_next'] = w.pop('qpos')
@@ -1164,7 +1225,7 @@ def check(mjcf, out, stage, count=64, k=0, oracle=None):
     got = np.split(rows, np.cumsum(sizes)[:-1], axis=1)
     floor = locals().get('floor', {})
     if os.environ.get('DIAG'):  # per state: error of each field vs the field's largest value, worst states first, with the convex contacts there
-        unst = locals().get('unstable', np.zeros(count, bool))
+        unst = locals().get('unstable', np.zeros(count, bool)); nconv = locals().get('nconv', np.zeros(count, int))
         for f, g in zip(fields, got):
             e = np.abs(g - want[f].reshape(count, -1)).max(1) / max(np.abs(want[f]).max(), 1e-30)
             print(f'  DIAG {f} K={k}: median {np.median(e):.1e}, worst states ' + ', '.join(f'{n} {e[n]:.1e} (convex {nconv[n]}{", chaotic" if unst[n] else ""})' for n in np.argsort(-e)[:6]))
