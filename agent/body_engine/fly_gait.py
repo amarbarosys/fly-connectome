@@ -4,7 +4,7 @@
   gpu-wait run --shared --vram 1 --priority 60 --timeout 900 --env PYTHONPATH=$PWD -- .venv/bin/python -m agent.body_engine.fly_gait check
 
 The kernel (float64, one thread) and flygym_demo's HybridTurningController (zero observations, the flyloop mapping fly_link.Gait) run the same
-drive sequence of 400 control steps (steady 1/1, left weak, right reversed, both off, both 0.7) at timestep K x 0.1 ms; the 42 leg servo targets
+drive sequence of 700 control steps (steady 1/1, left weak, right reversed for 300 steps so the slewed drive goes negative, both off, both 0.7) at timestep K x 0.1 ms; the 42 leg servo targets
 and 6 adhesion values written into the ctrl buffer must equal the controller's, max abs error <= 1e-5 (float32 ctrl: ~1e-7). The head servos and
 every other entry keep their start value. check.sh flygait adds the mutants: the phase bias sign, the adhesion window, the drive sign.
 """
@@ -25,7 +25,7 @@ DOFS = (('coxa', 'pitch'), ('coxa', 'roll'), ('coxa', 'yaw'), ('trochanterfemur'
 
 def export():
     """gait.tab (float64: per leg the periodic cubic spline's 4 x 44 x 7 polynomial coefficients, 7 neutral angles, swing end), gait.idx (int32: the ctrl index of
-    every (leg, spline dof), then of the six adhesion controls), gait.state (float64: 6 start phases, 6 start magnitudes), next to the fly's engine files."""
+    every (leg, spline dof), then of the six adhesion controls), gait.state (float64: 6 start phases, 6 start magnitudes, 2 slewed drives at 0), next to the fly's engine files."""
     import mujoco
     from tools.fly_gait_oracle import LEGS, joint_name
     d, m, _ = fly_link.prepare()
@@ -40,7 +40,7 @@ def export():
     nseg = g.steps._psi_funcs['lf'].c.shape[1]
     np.concatenate(tab).astype(np.float64).tofile(d / 'gait.tab')
     np.array(idx, np.int32).tofile(d / 'gait.idx')
-    np.r_[[0, np.pi, 0, np.pi, 0, np.pi], np.zeros(6)].astype(np.float64).tofile(d / 'gait.state')
+    np.r_[[0, np.pi, 0, np.pi, 0, np.pi], np.zeros(8)].astype(np.float64).tofile(d / 'gait.state')
     return d, m, g, nseg
 
 
@@ -56,13 +56,15 @@ def build(d, nseg):
     return b
 
 
-def drives(n=400):
+def drives(n=700):
+    """The slew moves a drive by at most dt / 0.2 s per step, so the reversed segment is 300 steps: the right drive reaches -0.5 (from +1) at step
+    500; a shorter one never goes negative and the drive-sign mutant passes unseen (2026-10-07)."""
     seq = np.zeros((n, 2))
     seq[:100] = (1.0, 1.0)
     seq[100:200] = (0.3, 1.0)
-    seq[200:300] = (1.0, -0.5)
-    seq[300:350] = (0.0, 0.0)
-    seq[350:] = (0.7, 0.7)
+    seq[200:500] = (1.0, -1.0)
+    seq[500:550] = (0.0, 0.0)
+    seq[550:] = (0.7, 0.7)
     return seq
 
 

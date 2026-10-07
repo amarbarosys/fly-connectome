@@ -86,7 +86,7 @@ struct FlyBrain[enabled: Bool](Movable):
         self.drive_b = ctx.enqueue_create_buffer[DType.float64](2)
         self.tab_b = ctx.enqueue_create_buffer[DType.float64](fg.NLEG * fg.LEGSZ)
         self.idx_b = ctx.enqueue_create_buffer[DType.int32](fg.NLEG * fg.NDOF + fg.NLEG)
-        self.st_b = ctx.enqueue_create_buffer[DType.float64](2 * fg.NLEG)
+        self.st_b = ctx.enqueue_create_buffer[DType.float64](fg.NST)
         self.res = Optional[sr.Resident]()
         self.freeze = -1
         comptime if Self.enabled:
@@ -101,7 +101,7 @@ struct FlyBrain[enabled: Bool](Movable):
             var cfg = load_words(work + "fly3.bin", 10)
             var tab = load_words(dir + "gait.tab", 2 * fg.NLEG * fg.LEGSZ)
             var idx = load_words(dir + "gait.idx", fg.NLEG * fg.NDOF + fg.NLEG)
-            var st = load_words(dir + "gait.state", 2 * 2 * fg.NLEG)
+            var st = load_words(dir + "gait.state", 2 * fg.NST)
             ctx.enqueue_copy(self.dn_b, dn.unsafe_ptr().unsafe_bitcast[Int32]())
             ctx.enqueue_copy(self.cfg_b, cfg.unsafe_ptr().unsafe_bitcast[Float64]())
             ctx.enqueue_copy(self.tab_b, tab.unsafe_ptr().unsafe_bitcast[Float64]())

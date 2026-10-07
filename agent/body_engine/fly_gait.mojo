@@ -9,7 +9,8 @@ Per control step (timestep dt = K x 0.1 ms) with descending drives (left, right)
       segments per dof (scipy CubicSpline .c), 7 dofs per leg;  adhesion = not (0 < theta mod 2 pi < swing_end + pi / 4)  (hybrid_controller _get_adhesion_onoff)
 Writes the 42 leg servo targets and the 6 adhesion values into the engine's ctrl buffer at the indices of gait.idx (every other servo keeps its
 value, the two head servos hold). tab = per leg: 4 x NSEG x 7 coefficients (c3 dx^3 + c2 dx^2 + c1 dx + c0 order as scipy: c[0] highest), 7 neutral values,
-swing_end; state = 6 phases, 6 magnitudes.
+swing_end; state = 6 phases, 6 magnitudes, 2 slewed drives (fly_link.Gait: the drive moves at most 1 per SLEW_S, then x (1 - TRIM, 1 + TRIM)
+left/right; the Python side carries the same two values in Gait.sig).
 """
 from max.gpu import thread_idx
 from std.sys import get_defined_int
@@ -22,7 +23,8 @@ comptime NDOF = 7
 comptime LEGSZ = 4 * NSEG * NDOF + NDOF + 1
 comptime TWO_PI = 6.283185307179586
 comptime LTAB = row_major[NLEG * LEGSZ]()
-comptime LST = row_major[2 * NLEG]()
+comptime NST = 2 * NLEG + 2
+comptime LST = row_major[NST]()
 comptime LIDX = row_major[NLEG * NDOF + NLEG]()
 comptime LDR = row_major[2]()
 comptime TTAB = TileTensor[DType.float64, type_of(LTAB), MutAnyOrigin]
@@ -32,6 +34,8 @@ comptime TDR = TileTensor[DType.float64, type_of(LDR), MutAnyOrigin]
 comptime FREQ = 12.0
 comptime COUPLING = 10.0
 comptime CONVERGE = 20.0
+comptime SLEW_S = 0.2  # fly_link.Gait slew_s
+comptime TRIM = 0.02  # fly_link.Gait trim
 comptime SWING_EXT = 0.7853981633974483  # pi / 4
 
 
@@ -57,10 +61,17 @@ def odd(i: Int, j: Int) -> Bool:
 def gait(ctrl: TU, state: TST, drive: TDR, tab: TTAB, idx: TIDX, dt: Float64):
     if thread_idx.x != 0:
         return
+    var rate = dt / SLEW_S
+    var sig = SIMD[DType.float64, 2](0)
+    for side in range(2):
+        var step = drive[side] - state[2 * NLEG + side]
+        step = rate if step > rate else (-rate if step < -rate else step)
+        sig[side] = state[2 * NLEG + side] + step
+        state[2 * NLEG + side] = sig[side]
     var amp = SIMD[DType.float64, 8](0)
     var freq = SIMD[DType.float64, 8](0)
     for leg in range(NLEG):
-        var d = drive[0] if leg < 3 else drive[1]
+        var d = sig[0] * (1.0 - TRIM) if leg < 3 else sig[1] * (1.0 + TRIM)
         amp[leg] = d if d >= 0 else -d
         freq[leg] = FREQ if d >= 0 else -FREQ
     var theta = SIMD[DType.float64, 8](0)
