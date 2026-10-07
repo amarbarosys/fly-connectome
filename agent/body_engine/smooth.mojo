@@ -178,7 +178,9 @@ comptime CCV = NFL2  # NCV: opt.ccd_tolerance, heightfield size 0-3 and origin z
 comptime CEQF = NFL2 + (6 + 3 * NCP if NCV > 0 else 0)  # per equality: anchors 0 and 1, quaternions 0 and 1, torquescale, solref, solimp, invweight 2, joint data 5, qpos0 2
 comptime CGF = CEQF + EQF * NEQ
 comptime GAME = get_defined_int["GAME", 0]() == 1 and STAGE >= 7  # game layer per step (docs/plans/GAME_LAYER.md): energy, health, stamina, dead
-comptime GAMEF = CGF + (NB if GRAVCOMP else 0)  # GAME: rules appended to mf.bin: basal drain, work rate, health regen
+comptime SLEEP = get_defined_int["SLEEP", 0]() == 1  # mj_sleep (model.py sleep_block): opt.sleep_tolerance, then dof_length per dof (the velocity weights)
+comptime SLPF = CGF + (NB if GRAVCOMP else 0)
+comptime GAMEF = SLPF + (1 + NV if SLEEP else 0)  # GAME: rules appended to mf.bin: basal drain, work rate, health regen
 comptime NFL = GAMEF + (3 if GAME else 0)
 comptime HFNR = get_defined_int["HFNR", 2]()  # HFEXACT: grid rows and columns of the MuJoCo hfield (the engine's grid is virtual and endless, same step)
 comptime HFNC = get_defined_int["HFNC", 2]()
@@ -283,7 +285,9 @@ comptime OGA = OGP + NEFC
 comptime OGZ = OGA + NEFC
 comptime SOLROWS = 3 * NV if SOLVER == 1 else (3 * NEFC + NV if SOLVER == 0 else 0)
 comptime OGAME = OSOL + SOLROWS  # GAME: four float32 rows per animal, energy health stamina dead; all zero = not started
-comptime NROW = OGAME + (4 if GAME else 0)
+comptime OSLP = OGAME + (4 if GAME else 0)  # SLEEP: quiet checks in a row (MuJoCo tree_asleep + 11), SLEPT once asleep
+comptime NROW = OSLP + (1 if SLEEP else 0)
+comptime SLEPT: Float32 = 11  # one past mjMINAWAKE (10) quiet checks
 comptime LI = row_major[NI]()
 comptime LF = row_major[NFL]()
 comptime LQ = row_major[NQ * F]()
@@ -3506,12 +3510,36 @@ def smooth(mi: TI, mf: TF, qpos: TQ, qvel: TV, ctrl: TU, res: TO):
 def smooth_at(mi: TI, mf: TF, qpos: TQ, qvel: TV, ctrl: TU, res: TO, f: Int):
     """K steps of animal f: the kernel's body, also the CPU build's per-animal call."""
     for _ in range(max(K, 1)):
+        comptime if SLEEP:  # asleep (mj_sleep, engine_sleep.c:563): nothing runs; mj_wake (:240) wakes it when the host wrote a velocity
+            if get(res, f, OSLP) >= SLEPT:
+                var moved = False
+                for v in range(NV):
+                    moved = moved or qvel[v * F + f] != 0
+                if not moved:
+                    continue
+                res[OSLP * F + f] = 0
         comptime if INTEGRATOR == 1:  # RK4: four forward passes, X_1..3 held in qpos/qvel, X0 back after the last
             for rks in range(4):
                 step(mi, mf, qpos, qvel, ctrl, res, f, rks)
         else:
             step(mi, mf, qpos, qvel, ctrl, res, f)
             absolute(mi, qpos, res, f)
+        comptime if SLEEP:  # mj_sleep in mj_advance (engine_forward.c:1145), on the step's starting qvel, before the advance: the tree can
+            # sleep when dof_length |qvel| < tolerance on every dof (treeCanSleep, isSmaller; tolerance 0: every qvel exactly 0); the
+            # mjMINAWAKE-th quiet check in a row puts it to sleep (one animal = one tree = its island): qvel and qacc zero, no advance
+            var quiet = True
+            for v in range(NV):
+                quiet = quiet and (mf[SLPF + 1 + v] * abs(qvel[v * F + f]) < mf[SLPF] if mf[SLPF] > 0 else qvel[v * F + f] == 0)
+            var c = get(res, f, OSLP) + 1 if quiet else Float32(0)
+            if c >= 10:
+                c = SLEPT
+                for v in range(NV):
+                    qvel[v * F + f] = 0  # asleep
+                    comptime if K > 0:
+                        res[(OWARM + v) * F + f] = 0
+            res[OSLP * F + f] = c
+            if c >= SLEPT:
+                continue
         comptime if K > 0:  # mj_Euler's write-back: qvel += h qacc, qpos = integrated qpos
             for v in range(NV):
                 qvel[v * F + f] += mf[TSTEP] * get(res, f, OQACC + v)

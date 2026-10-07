@@ -66,6 +66,7 @@ FEET = '.'  # every plane-mesh pair (55 on the fly: each body part on the floor)
 VSCALE = float(os.environ.get('VSCALE', 10))  # random qvel in +-VSCALE per dof (10: velocity terms well above float32 noise; qpos moves ~1e-3 per fly step); the flight gate draws up to flapping rate
 REL = float(os.environ.get('REL', 1e-5))  # check.sh sets a measured bar for `arena` (3e-3) and `terrain_exact` (4e-4), reasons there
 EQ_EULER_BAR = 1e-4  # equality stage, qacc_euler only: see check()
+SLEEP_QPOS_BAR = 1e-5  # sleep stage, the sleepers' frozen qpos: see check()
 CHAOS_SEEDS = int(os.environ.get('CHAOS_SEEDS', 12))  # k-step gate: MuJoCo reruns of each start under a 1e-6 perturbation (see check())
 FLOOR_X = 3  # contact stage: bar = max(REL, 3 x the field's float32 input floor), see check()
 FLOOR_X_CONE = 15  # elliptic cone: the converged nonlinear cone solve amplifies float32 rounding of D, J and jar: measured 4e-5 (noslip 0) and 5.3e-5 (noslip 5) on qfrc_constraint, floor 4.3e-6
@@ -711,6 +712,24 @@ def with_tendon_limits(mjcf, out, count=256, lo=0.35, hi=0.65, solref=0.02, tole
     return str(out)
 
 
+def with_sleep(mjcf, out, tolerance):
+    """mjcf with sleeping enabled (opt.enableflags sleep, sleep_tolerance): the gate body of check.sh sleep. Mesh paths made absolute;
+    written to `out`; returns the path."""
+    spec = mujoco.MjSpec.from_file(str(mjcf))
+    base = Path(mjcf).parent / (spec.meshdir or '')
+    for mesh in spec.meshes:
+        mesh.file = str((base / mesh.file).resolve()) if mesh.file else mesh.file
+    spec.meshdir = ''
+    spec.option.enableflags |= int(mujoco.mjtEnableBit.mjENBL_SLEEP)
+    spec.option.sleep_tolerance = tolerance
+    m0 = spec.compile()  # the compiler's auto policy forbids sleep on an actuated tree (the fly compiles to AUTO_NEVER): allow it on every root
+    for b in np.flatnonzero(m0.body_parentid[1:] == 0) + 1:
+        spec.body(mujoco.mj_id2name(m0, mujoco.mjtObj.mjOBJ_BODY, int(b))).sleep = mujoco.mjtSleepPolicy.mjSLEEP_ALLOWED
+    Path(out).parent.mkdir(parents=True, exist_ok=True)
+    Path(out).write_text(spec.to_xml())
+    return str(out)
+
+
 def with_gravcomp(mjcf, out):
     """mjcf with body_gravcomp 1.0, 0.5, 0.0, 0.8 on its bodies in turn (MjSpec, mesh paths made absolute: combine() does the
     same), written to `out`; the gate body of check.sh gravcomp for the fly and the spider. Returns the path."""
@@ -772,7 +791,7 @@ def with_spatial_tendons(mjcf, out, stiffness=5.0, damping=0.05):
 def gravcomp_block(m):
     """Body gravity compensation (engine_passive.c:817), last block: ints jnt_actgravcomp per joint (those joints' share goes to
     qfrc_actuator, engine_forward.c:770, only when the model has actuators), floats body_gravcomp per body. Refused with joint-level
-    actuator force limits (clampVec on qfrc_actuator, not ported) and with sleeping (not ported anywhere)."""
+    actuator force limits (clampVec on qfrc_actuator, not ported); a sleeping animal skips the whole step, gravcomp included (sleep_block)."""
     if not m.body_gravcomp.any() or not np.linalg.norm(m.opt.gravity):
         return None
     if m.jnt_actfrclimited.any():
@@ -808,6 +827,18 @@ def pair_table(nv, rowadr, rownnz, colind):
         for c in range(rownnz[k]):
             t[k, colind[rowadr[k] + c]] = rowadr[k] + c
     return t.ravel()
+
+
+def sleep_block(m):
+    """Sleep (mj_sleep, engine_sleep.c:563; mjENBL_SLEEP), last float block: opt.sleep_tolerance, then dof_length per dof (treeCanSleep's
+    velocity weights). One animal is one tree and its own island in the engine, so the export takes one tree, the Euler integrator and a
+    tree that may sleep; MuJoCo's wake rules reduce to a host-written velocity (no applied forces, no cross-tree links)."""
+    if not m.opt.enableflags & int(mujoco.mjtEnableBit.mjENBL_SLEEP):
+        return None
+    P = mujoco.mjtSleepPolicy
+    if m.ntree != 1 or m.opt.integrator or m.tree_sleep_policy[0] in (P.mjSLEEP_NEVER, P.mjSLEEP_AUTO_NEVER):
+        raise SystemExit('FAIL export: sleep is gated on one tree per export, the Euler integrator and a tree allowed to sleep (check.sh sleep)')
+    return np.zeros(0), np.concatenate([[m.opt.sleep_tolerance], m.dof_length]), {'SLEEP': 1}
 
 
 def mpair_block(m):
@@ -870,7 +901,7 @@ def export(mjcf, out, regex=None, act=False, convex=False, hfexact=False):
     if eq:  # after the other lanes' blocks too: a model without equalities keeps its bytes
         block = eq_block(m, eq, hr[0])
         ints, floats, sizes = ints + [block[0]], floats + [block[1]], sizes | block[2]
-    for block in (mocap_block(m), gravcomp_block(m), implicit_block(m), mid_block(m), mpair_block(m)):  # after the equality block, in Mojo's order: CMOC follows CEQM, CGC follows CMOC, CIMP follows CGC, CMID follows the implicit block
+    for block in (mocap_block(m), gravcomp_block(m), implicit_block(m), mid_block(m), mpair_block(m), sleep_block(m)):  # after the equality block, in Mojo's order: CMOC follows CEQM, CGC follows CMOC, CIMP follows CGC, CMID follows the implicit block
         if block:
             ints, floats, sizes = ints + [block[0]], floats + [block[1]], sizes | block[2]
     np.concatenate(ints).astype(np.int32).tofile(out / 'mi.bin')
@@ -1083,11 +1114,12 @@ def check(mjcf, out, stage, count=64, k=0, oracle=None):
     u = np.zeros((count, m.nu))
     if stage in ('actuated', 'sptendon_act'):  # servos within 0.3 rad of the current joint angle, adhesion anywhere in [0, 1]
         rng = np.random.default_rng(2)
+        hold = bool(os.environ.get('HOLD'))  # HOLD=1: servos at the current angle, adhesion off (the sleep stage: the fly settles)
         for i in range(m.nu):
             if m.actuator_trntype[i] == mujoco.mjtTrn.mjTRN_JOINT:
-                u[:, i] = q[:, m.jnt_qposadr[m.actuator_trnid[i, 0]]] + rng.uniform(-0.3, 0.3, count)
+                u[:, i] = q[:, m.jnt_qposadr[m.actuator_trnid[i, 0]]] + (0 if hold else rng.uniform(-0.3, 0.3, count))
             else:
-                u[:, i] = rng.uniform(0, 1, count)
+                u[:, i] = 0 if hold else rng.uniform(0, 1, count)
     mp = mq = None
     if m.nmocap:  # mocap pose per animal rides in ctrl.bin rows nu..: pos 3, quat 4 per mocap body (quats left unnormalised on purpose)
         rng = np.random.default_rng(3)
@@ -1223,6 +1255,16 @@ def check(mjcf, out, stage, count=64, k=0, oracle=None):
     if rows.shape[1] != sum(sizes):
         raise SystemExit(f'FAIL {stage}: engine wrote {rows.shape[1]} values per fly, MuJoCo {sum(sizes)}')
     got = np.split(rows, np.cumsum(sizes)[:-1], axis=1)
+    if k and m.opt.enableflags & int(mujoco.mjtEnableBit.mjENBL_SLEEP):  # sleep: the asleep sets (qvel exactly zero) must agree, and be a mix
+        aw, ag = (want['qvel'].reshape(count, -1) == 0).all(1), (got[fields.index('qvel')] == 0).all(1)
+        print(f'sleep: asleep after {k} steps MuJoCo {int(aw.sum())}/{count}, engine {int(ag.sum())}/{count}, sets differ in {int((aw != ag).sum())} states')
+        if (aw != ag).any() or not count // 4 <= aw.sum() <= 3 * count // 4:
+            raise SystemExit(f'FAIL {stage}: asleep sets differ or MuJoCo asleep outside 25..75 % of the states')
+        qa = fields.index('qpos')  # a sleeper's qpos is frozen at its sleeping step: one step early or late moves it by ~5e-4 (measured 1.3e-7)
+        e = float(np.abs(got[qa][aw] - want['qpos'].reshape(count, -1)[aw]).max() / np.abs(want['qpos']).max())
+        print(f"{'PASS' if e < SLEEP_QPOS_BAR else 'FAIL'} sleepers' qpos within {SLEEP_QPOS_BAR:g}: max rel err {e:.2e}")
+        if e >= SLEEP_QPOS_BAR:
+            sys.exit(1)
     floor = locals().get('floor', {})
     if os.environ.get('DIAG'):  # per state: error of each field vs the field's largest value, worst states first, with the convex contacts there
         unst = locals().get('unstable', np.zeros(count, bool)); nconv = locals().get('nconv', np.zeros(count, int))

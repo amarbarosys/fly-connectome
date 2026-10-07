@@ -271,6 +271,22 @@ if [ "$stage" = tendon_limit ]; then  # tendon limit rows (mj_instantiateLimit, 
   [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
   echo "PASS all tendon_limit checks"; exit 0
 fi
+if [ "$stage" = sleep ]; then  # sleep (mj_sleep in mj_advance, mj_wake; mjENBL_SLEEP): the fly with sleeping enabled at a tolerance that puts
+  # about half of the standing states to sleep within K=20 steps (servos held at the current angle, HOLD=1; MuJoCo zeroes qvel and freezes qpos
+  # at the mjMINAWAKE-th quiet check), vs 20 chained mj_step: the asleep sets must agree exactly, the awake states within the K-step bar
+  F=.work/agent/gpu-body-port/body-v2/body.xml; S=agent/body_engine/smooth.mojo
+  SL=$($M -c "from agent.body_engine.model import with_sleep; print(with_sleep('$F', '$X/sleep/fly.xml', ${SLEEP_TOL:-5.0}))")
+  HOLD=1 REL=${SLEEP_REL:-1e-3} $M -m agent.body_engine.model check $SL $X/sleep/fly actuated 64 20 || { echo "FAIL sleep fly K=20"; fail=$((fail+1)); }
+  # the gate must fail with: the dof_length weight dropped, the quiet-check count off by one (the sleepers' qpos bar), the velocity not zeroed.
+  # The asleep skip has no observable here (a stepped sleeper re-zeroes itself: same state, more work), so it carries no mutant.
+  for mut in 's/quiet = quiet and (mf\[SLPF + 1 + v\] \* abs(qvel\[v \* F + f\])/quiet = quiet and (abs(qvel[v * F + f])/' \
+             's/if c >= 10:/if c >= 9:/' \
+             's/qvel\[v \* F + f\] = 0  # asleep/qvel[v * F + f] *= 1  # asleep/'; do
+    ~/iTools/bin/mutant-check $S "$mut" -- env HOLD=1 REL=${SLEEP_REL:-1e-3} $M -m agent.body_engine.model check $SL $X/mutant actuated 64 20 || fail=$((fail+1))
+  done
+  [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
+  echo "PASS all sleep checks"; exit 0
+fi
 if [ "$stage" = loop ]; then  # K steps per launch, state kept on the card. K=1 vs mj_step (one step: the accuracy
   # gate); one K=10 launch must equal ten K=1 launches byte for byte (the loop). K=10 vs ten chained mj_step is not a
   # gate: the engine's ~5e-6 per-step float32 error grows ~12x in 10 steps on contact-rich states (diag/k_floor.py)
