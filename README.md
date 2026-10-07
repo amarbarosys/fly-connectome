@@ -30,6 +30,7 @@ screening engine and chemoinformatics database now live in the separate
 - Mojo resident GPU worker: in sibling repo `fly-spmv/src/fly_batch_gpu.mojo`
 - Built local executable: `fly-screen-rs/target/release/fly-screen`
 - Run receipts/results: `.work/runs/<run-id>/` (created by the executable, gitignored)
+- Tool state never lands in the tree: `mutant-check` locks live in `$XDG_RUNTIME_DIR/mutant-check/` (iTools `3dbcdad`); `.cache/`, `*.mutant-orig.*`, `mpv-shot*.jpg` are gitignored. Health check 2026-10-07 (pytest 31/31, play check 7/7, walls FAIL known): `~/Brain/fly-connectome/notes/2026-10-07-health-check.md`
 - Migration status and remaining gates: [`docs/plans/SCREENING_REBUILD_PLAN.md`](docs/plans/SCREENING_REBUILD_PLAN.md)
 
 Build the Mojo worker and Rust CLI:
