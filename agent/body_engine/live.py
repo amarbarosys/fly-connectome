@@ -26,6 +26,7 @@ from kinestride.render_check import DIST, MJCF, MOJO
 from kinestride.verify_render_leak import sample
 from kinestride.world import height_grad
 APP = Path(__file__).parent  # this app's Mojo sources (live, spectate, gait check); the physics core is kinestride's ENGINE
+IMKIT = Path.home() / 'Projects/mojo/mojo-imkit/src'  # the GUI package live.mojo imports (imkit: window, font, ui)
 
 OUT = Path('.work/agent/body_engine/live')
 W, H = 960, 540
@@ -104,7 +105,7 @@ def build(out, m, k, box=0):
     src = [APP / 'live.mojo'] + [ENGINE / f for f in ('smooth.mojo', 'render.mojo')] + [out / 'sizes.txt', out / 'rsizes.txt']
     if binary.is_file() and binary.stat().st_mtime > max(f.stat().st_mtime for f in src):
         return binary  # built on the CPU before the GPU job
-    subprocess.run([MOJO, 'build', '-I', str(ENGINE), *flags, '-DFLIES=1', '-DSTAGE=7', f'-DK={k}', f'-DW={W}', f'-DH={H}',
+    subprocess.run([MOJO, 'build', '-I', str(ENGINE), '-I', str(IMKIT), *flags, '-DFLIES=1', '-DSTAGE=7', f'-DK={k}', f'-DW={W}', f'-DH={H}',
                     f'-DPROWS={7 * (m.nbody - 1)}', f'-DBOX_MM={box}', str(APP / 'live.mojo'), '-o', str(binary)], check=True)
     return binary
 

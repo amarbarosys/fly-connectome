@@ -34,9 +34,9 @@ usage: live DIR/ FRAMES ex ey ez tx ty tz fovy_deg [OUT]
 """
 import smooth as eng
 import render as ren
-import window as gw
-import ui as uim
-from font import Font
+import imkit.window as gw
+from imkit import ui as uim
+from imkit.font import Font
 from ctl import Ctl
 from max.algorithm import parallelize
 from std.ffi import external_call

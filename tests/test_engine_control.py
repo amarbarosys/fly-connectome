@@ -87,7 +87,7 @@ def test_mojo_client_drives_the_runner(runner, tmp_path):
     import subprocess
     ec, seen, done = runner
     exe = tmp_path / 'ctl'
-    subprocess.run([str(Path.home() / 'iTools/bin/mojo-cached'), 'build', '-I', str(Path.home() / 'Projects/mojo/kinestride/kinestride'),
+    subprocess.run([str(Path.home() / 'iTools/bin/mojo-cached'), 'build', '-I', str(Path.home() / 'Projects/mojo/mojo-imkit/src'),
                     str(ROOT / 'agent/body_engine/ctl.mojo'), '-o', str(exe)], check=True, capture_output=True)
     ask = lambda *a: subprocess.run([str(exe), str(tmp_path) + '/', *a], capture_output=True, text=True, timeout=60).stdout
     assert '"paused": true' in ask('pause')

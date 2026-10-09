@@ -19,7 +19,7 @@ from pathlib import Path
 import mujoco
 import numpy as np
 
-from agent.body_engine.live import prepare
+from agent.body_engine.live import IMKIT, prepare
 from kinestride.model import ENGINE, load
 from kinestride.models.spider import build as spider_build
 from kinestride.render_check import MOJO
@@ -51,7 +51,7 @@ def build(d, F, k, brain, w=64, h=64, eyes=False, gaze=False, row=False, profile
     tag = hashlib.sha1(b''.join(f.read_bytes() for f in src + [d / 'sizes.txt', d / 'rsizes.txt'])).hexdigest()[:8]  # content (incl. the model's sizes), not mtime: mutant-check restores old mtimes
     b = d / f'link_b{brain}_k{k}_{w}x{h}{"_eyes" if eyes else ""}{"_gaze" if gaze else ""}{"_row" if row else ""}{"_prof" if profile else ""}_{tag}'
     if not b.is_file():
-        subprocess.run([MOJO, 'build', '-I', str(ENGINE), *flags, f'-DFLIES={F}', '-DSTAGE=7', f'-DK={k}', '-DWAVE=1', f'-DW={w}', f'-DH={h}',
+        subprocess.run([MOJO, 'build', '-I', str(ENGINE), '-I', str(IMKIT), *flags, f'-DFLIES={F}', '-DSTAGE=7', f'-DK={k}', '-DWAVE=1', f'-DW={w}', f'-DH={h}',
                         f'-DPROWS={7 * (nb - 1)}', '-DBOX_MM=0', f'-DBRAIN={brain}', f'-DEYES={int(eyes)}', f'-DGAZE={int(gaze)}', f'-DEYEROW={int(row)}', *(['-DPROFILE=1'] if profile else []), str(APP / 'live.mojo'), '-o', str(b)], check=True,
                        capture_output=True)
     return b

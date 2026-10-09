@@ -9,7 +9,7 @@ from DIR/control.sid (brain_watch writes it), read lazily.
 from std.ffi import external_call
 from std.sys import argv
 from std.time import perf_counter_ns
-from window import readable
+from imkit.window import readable
 
 
 struct Ctl(Movable):
