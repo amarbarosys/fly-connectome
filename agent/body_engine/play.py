@@ -157,9 +157,15 @@ class Eyes:
         return np.clip((near - self.slow - self.loom['base']) / self.loom['span'], 0, 1)
 
 
+def engine_flags(world):
+    """The engine build flags of a play run (gui_run builds the same binary on the CPU before its GPU job)."""
+    flags = ['-DGAME=1', '-DHUD=1', '-DFOLLOW=1', '-DORBIT=1'] + (['-DCPU=1'] if CPU else []) + (['-DPROFILE=1'] if os.environ.get('PLAY_PROFILE') == '1' else []) + (['-DGUI=1'] if os.environ.get('PLAY_GUI') == '1' else [])  # Kinestride's window (live.mojo GUI)
+    return flags + (['-DWORLD=1', '-DNSITE=2', '-DSOIL=1'] if world else [])
+
+
 def setup(F, render=0, out='/dev/null', seed=None, q0=None):
     """seed: the fly on live.py's seeded terrain (live.WORLD, 0.1 mm bumps and cones), dropped from the flat standing pose."""
-    flags = ['-DGAME=1', '-DHUD=1', '-DFOLLOW=1', '-DORBIT=1'] + (['-DCPU=1'] if CPU else []) + (['-DPROFILE=1'] if os.environ.get('PLAY_PROFILE') == '1' else []) + (['-DGUI=1'] if os.environ.get('PLAY_GUI') == '1' else [])  # Kinestride's window (live.mojo GUI)
+    flags = engine_flags(seed is not None)
     if seed is None:
         d, m, _ = fl.prepare(OUT / 'fly')
     else:  # terrain + the world's walls, stones, grass, flowers and two plume sources (agent/body_engine/assets.py), smelled at the antennae
@@ -174,7 +180,6 @@ def setup(F, render=0, out='/dev/null', seed=None, q0=None):
         d, m, _ = fl.prepare(OUT / (f'fly-world{seed}' + ('' if assets_on else '-bare')), mjcf=mjcf, flat=fl.MJCF, world=parts if assets_on else None)
         src.tofile(d / 'src.bin')
         np.array([[b, *p] for b, p in sites_of(m)], np.float32).tofile(d / 'sites.bin')
-        flags += ['-DWORLD=1', '-DNSITE=2', '-DSOIL=1']
     (d / 'mf.bin').replace(d / 'mf.base')  # prepare re-exports every run: the fresh export is the base (a kept base went stale when the export grew)
     gc.set_rules(d, 0.0, WORK_RATE)
     eng = fl.Engine(d, fl.K, 'play', 0, F=F, flags=tuple(flags), out=out, render=render, q0=q0(d) if q0 else None)
