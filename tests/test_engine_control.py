@@ -80,3 +80,19 @@ def test_session_listed_by_panelctl(runner, monkeypatch):
     assert s and s[0]['backend'] == 'engine' and s[0]['paused'] is False and s[0]['flies'] == 3 and s[0]['inputs'] == NAMES
     ask(ec, 'stop')
     assert done.wait(2)
+
+
+def test_mojo_client_drives_the_runner(runner, tmp_path):
+    """agent/body_engine/ctl.mojo (the engine GUI's client) through the same socket: pause, a drive toggle, step 3."""
+    import subprocess
+    ec, seen, done = runner
+    exe = tmp_path / 'ctl'
+    subprocess.run([str(Path.home() / 'iTools/bin/mojo-cached'), 'build', '-I', str(Path.home() / 'Projects/mojo/kinestride/kinestride'),
+                    str(ROOT / 'agent/body_engine/ctl.mojo'), '-o', str(exe)], check=True, capture_output=True)
+    ask = lambda *a: subprocess.run([str(exe), str(tmp_path) + '/', *a], capture_output=True, text=True, timeout=60).stdout
+    assert '"paused": true' in ask('pause')
+    assert '{"fly": 1, "input": "w", "hz": 100.0}' in ask('drive', '{"fly": 1, "input": "w", "on": true}')
+    n = len(seen)
+    assert '"status": "APPLIED"' in ask('step') and len(seen) == n + 1
+    ask('stop')
+    assert done.wait(2)

@@ -9,6 +9,7 @@ registry, so `panelctl state` lists it beside fly sessions.
          space, threat, ...) at the runner's own rate for it, or at x Hz; on false / hz < 0 clears it, back to the script
   camera {"azimuth": rad, "elevation": rad, "zoom": x}   orbit of the follow camera (DIR/orbit.bin), any subset
 """
+import json
 import time
 
 import numpy as np
@@ -19,16 +20,20 @@ from agent.runtime_control import RuntimeControl
 class EngineControl:
     def __init__(self, out, profile, names, hz, flies, orbit_file, dt):
         self.rc = RuntimeControl(out, profile, 'engine')
+        self.log = open(out / 'control.log', 'w')  # every applied action with its snapshot, one JSON line each (the GUI check reads it)
         self.names, self.hz, self.flies, self.orbit_file, self.dt = list(names), list(hz), flies, orbit_file, dt
         self.paused, self.stopping, self.left, self.i = False, False, 0, 0
         self.held = {}  # (fly, input index) -> hz
         self.orbit = np.array([1, -np.pi / 4, 0.45, 4], np.float32)  # on, azimuth, elevation, zoom
         self.idle = lambda: None
+        self.drive = []  # latest DN drive per fly [L, R] (the runner's on_step), for the GUI's sparklines
+        orbit_file.with_name('control.sid').write_text(self.rc.session_id)  # the engine's GUI (ctl.mojo) reads it
 
     def snapshot(self):
         return {'status': 'APPLIED', 'paused': self.paused, 'step': self.i, 'time_s': self.i * self.dt, 'flies': self.flies, 'inputs': self.names,
                 'held': [{'fly': f, 'input': self.names[j], 'hz': hz} for (f, j), hz in self.held.items()],
-                'camera': {'azimuth': float(self.orbit[1]), 'elevation': float(self.orbit[2]), 'zoom': float(self.orbit[3])}}
+                'camera': {'azimuth': float(self.orbit[1]), 'elevation': float(self.orbit[2]), 'zoom': float(self.orbit[3])},
+                'drive': self.drive}
 
     def set_camera(self, azimuth=None, elevation=None, zoom=None):
         for k, v in ((1, azimuth), (2, elevation), (3, zoom)):
@@ -77,8 +82,12 @@ class EngineControl:
             return self.rc.reply(conn, dict(self.snapshot(), status='REJECTED', error=f'{cmd}: {exc}'))
         if cmd == 'step':
             self.rc.waiting_step = (conn, req)  # acknowledged when the steps are done
+            self.log.write(json.dumps({'action': 'step', 'from': self.i, 'steps': self.left}) + '\n')
             return None
-        self.rc.reply(conn, dict(self.snapshot(), action=cmd, request_id=req['request_id']))
+        snap = dict(self.snapshot(), action=cmd, request_id=req['request_id'])
+        self.log.write(json.dumps(dict(snap, drive=None)) + '\n')
+        self.log.flush()
+        self.rc.reply(conn, snap)
 
     def serve(self, i, rates):
         """rates (flies, inputs) from the script, with held drives on top; None = stop. Blocks while paused."""
