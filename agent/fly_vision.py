@@ -32,6 +32,20 @@ def eye_gain(ids):
     return np.where(side == 'L', LEFT_GAIN, 1.0)
 
 
+def eye_region(az, el):
+    """left-eye field region per direction (tools/fly_eye_calibrate_region.py): frontal/lateral split at |az| 72.5, lower/upper at el 5."""
+    return np.where(np.abs(az) < 72.5, 'frontal', 'lateral').astype(object) + np.where(el < 5, '-lower', '-upper')
+
+
+def eye_gain_region(ids, az, el):
+    """per-cell rate gain from the per-region calibration: the region's gain on the left eye, 1 on the right."""
+    import json
+    from agent.neural_connectome import ROOT
+    g = json.loads((ROOT / '.work/agent/shiu/eye-gain-region.json').read_text())
+    side = annotations()['somaSide'].fillna('').str[:1].str.upper().to_numpy()[ids]
+    return np.where(side == 'L', np.vectorize(lambda r: g[r]['gain'])(eye_region(az, el)), 1.0)
+
+
 def sample(img, az, el):
     """luminance at each direction; img rows = elevation +90..-90, columns = azimuth +180..-180 (left to right)."""
     h, w = img.shape
