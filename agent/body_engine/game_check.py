@@ -34,8 +34,7 @@ def prepare(name):
     d = OUT / name
     cam, m = live.prepare(d, mjcf=BODIES[name](), dist=15.0 if name == 'spider' else live.DIST)
     np.array([1, 2.0], np.float32).tofile(d / 'roots.bin')
-    if not (d / 'mf.base').exists():  # the rules ride at the end of mf.bin (smooth.GAMEF): basal drain, work rate, health regen
-        (d / 'mf.bin').rename(d / 'mf.base')
+    (d / 'mf.bin').replace(d / 'mf.base')  # the rules ride at the end of mf.bin (smooth.GAMEF); live.prepare re-exports every run, so the fresh export is the base
     return d, m
 
 

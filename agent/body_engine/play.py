@@ -175,8 +175,7 @@ def setup(F, render=0, out='/dev/null', seed=None, q0=None):
         src.tofile(d / 'src.bin')
         np.array([[b, *p] for b, p in sites_of(m)], np.float32).tofile(d / 'sites.bin')
         flags += ['-DWORLD=1', '-DNSITE=2', '-DSOIL=1']
-    if not (d / 'mf.base').exists():
-        (d / 'mf.bin').rename(d / 'mf.base')
+    (d / 'mf.bin').replace(d / 'mf.base')  # prepare re-exports every run: the fresh export is the base (a kept base went stale when the export grew)
     gc.set_rules(d, 0.0, WORK_RATE)
     eng = fl.Engine(d, fl.K, 'play', 0, F=F, flags=tuple(flags), out=out, render=render, q0=q0(d) if q0 else None)
     return d, m, eng
