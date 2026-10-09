@@ -58,7 +58,7 @@ comptime HUD = get_defined_int["HUD", 0]()
 comptime PROFILE = get_defined_int["PROFILE", 0]()
 comptime WORLD = get_defined_int["WORLD", 0]()
 comptime ORBIT = get_defined_int["ORBIT", 0]() == 1  # FOLLOW camera orbits by DIR/orbit.bin (play)
-comptime GUI = get_defined_int["GUI", 0]() == 1  # Kinestride's window (window.mojo): frames shown there, mouse orbits the FOLLOW camera
+comptime GUI = get_defined_int["GUI", 0]() == 1  # imkit's window (mojo-imkit, imkit.window): frames shown there, mouse orbits the FOLLOW camera
 comptime GAZE = get_defined_int["GAZE", 0]() == 1  # BRAIN = 1 and EYES: F gaze yaws (deg, AM eyes) follow the ctrl on stdin
 comptime EYES = get_defined_int["EYES", 0]() == 1  # BRAIN > 0: eyes.mojo retinas in the packet, prey moved by DIR/env.bin
 comptime NRET = eyes.F * eyes.NE * eyes.W * eyes.H if EYES else 1
