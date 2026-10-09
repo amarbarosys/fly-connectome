@@ -34,6 +34,7 @@ usage: live DIR/ FRAMES ex ey ez tx ty tz fovy_deg [OUT]
 """
 import smooth as eng
 import render as ren
+from max.algorithm import parallelize
 from std.ffi import external_call
 from std.math import tan
 from std.sys import argv, get_defined_int, stderr
@@ -267,9 +268,10 @@ def main() raises:
             ctx.synchronize()
             ms[0] += Float64(perf_counter_ns() - tp)
             tp = perf_counter_ns()
-        comptime if eng.CPU:
-            for f in range(eng.F):
+        comptime if eng.CPU:  # one host thread per animal (each writes only its own columns, as the GPU kernel's threads do)
+            def step_animal(f: Int) {imm hi, imm hf, imm hq, imm hv, imm hu, imm ho}:
                 eng.smooth_at(hi, hf, hq, hv, hu, ho, f)
+            parallelize(step_animal, eng.F)
         else:
             ctx.enqueue_function(step, TileTensor(mi_b, eng.LI), TileTensor(mf_b, eng.LF), TileTensor(q_b, eng.LQ), TileTensor(v_b, eng.LV),
                 TileTensor(u_b, eng.LU), TileTensor(o_b, eng.LO), grid_dim=eng.GRID, block_dim=eng.BLOCK)
