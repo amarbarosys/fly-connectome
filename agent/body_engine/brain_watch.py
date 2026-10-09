@@ -34,6 +34,7 @@ VIEW = os.environ.get('WATCH_VIEW') == 'mujoco'  # the fly project's GUI: MuJoCo
 GUI = os.environ.get('WATCH_VIEW') == 'gui'  # Kinestride's own window (live.mojo -DGUI=1): frames and mouse in the engine process
 if GUI:
     os.environ['PLAY_GUI'] = '1'
+    os.environ['GUI_LABELS'] = ','.join(ROLES)
 
 
 def main(*args):
@@ -93,7 +94,7 @@ def main(*args):
         return control.serve(i, r)  # panel requests at this boundary; held drives on top; None = stop
 
     try:
-        loop(brain, eng, gaits, rates_at, 0)
+        loop(brain, eng, gaits, rates_at, 0, lambda k, win, game, drive: setattr(control, 'drive', drive.tolist()))  # DN drive for the GUI
     except (BrokenPipeError, SystemExit):  # the engine ended: the window was closed (its frame pipe broke), else show why
         eng.p.wait()
         try:

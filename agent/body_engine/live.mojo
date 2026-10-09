@@ -35,6 +35,9 @@ usage: live DIR/ FRAMES ex ey ez tx ty tz fovy_deg [OUT]
 import smooth as eng
 import render as ren
 import window as gw
+import ui as uim
+from font import Font
+from ctl import Ctl
 from max.algorithm import parallelize
 from std.ffi import external_call
 from std.os import getenv
@@ -42,7 +45,7 @@ from std.math import tan
 from std.sys import argv, get_defined_int, stderr
 from std.time import perf_counter_ns
 from max.gpu.host import DeviceContext
-from layout import TileTensor
+from layout import TileTensor, row_major
 import spider_brain as brain
 import spectate as spec
 import eyes
@@ -247,18 +250,43 @@ def main() raises:
     var t0 = perf_counter_ns()
     var fr = 0
     comptime assert not GUI or (FOLLOW > 0 and ORBIT and BRAIN == 1), "GUI: a brain-driven FOLLOW + ORBIT build"
-    var win = Optional[gw.Window](gw.Window("Kinestride", ren.W, ren.H)) if GUI else None
+    var win = Optional[gw.Window](gw.Window("Kinestride", ren.W, ren.H, uim.UW, uim.UH)) if GUI else None
+    var gui = Optional[uim.Ui](uim.Ui(Font("/usr/share/fonts/TTF/Roboto-Medium.ttf", [13, 16, 22]))) if GUI else None
+    var ctl = Ctl(dir)  # the panel's control socket: the GUI's buttons act as /panel does
+    var inp = gw.Input(0, 0, 0, 0, 0, 0, 0, 0, SIMD[DType.uint64, 2](0), False)
+    var acc = inp.copy()  # input since the last drawn UI frame
+    var drag_scene = False  # a drag that began outside every panel moves the camera
+    comptime NG = 1 if not GUI else 0  # GUI buffers are one element when the GUI is off
+    var ucmd_b = ctx.enqueue_create_buffer[DType.uint32](NG + (0 if NG else uim.NCMD * uim.CW))
+    var ubin_b = ctx.enqueue_create_buffer[DType.uint16](NG + (0 if NG else uim.TX * uim.TY * uim.TCAP))
+    var ucnt_b = ctx.enqueue_create_buffer[DType.uint32](NG + (0 if NG else uim.TX * uim.TY))
+    var uatl_b = ctx.enqueue_create_buffer[DType.uint8](NG + (0 if NG else uim.AW * uim.AH))
+    var uimg_b = ctx.enqueue_create_buffer[DType.uint32](NG + (0 if NG else uim.UW * uim.UH))
+    var uhost = ctx.enqueue_create_host_buffer[DType.uint32](NG + (0 if NG else uim.UW * uim.UH))
+    var kui = ctx.compile_function[uim.compose]()
+    var labels = List[String]()
+    var drive = List[Float32](length=eng.F * 128, fill=0)  # DN drive history per fly, 64 x [L, R], ring
+    var dhead = 0
+    var clock = SIMD[DType.float64, 4](Float64(perf_counter_ns()), 0, 0, 0)  # last second: start, steps, presents, speed
+    var fps = Float64(0)
+    comptime if GUI:
+        ctx.enqueue_copy(uatl_b.create_sub_buffer[DType.uint8](0, len(gui.value().font.atlas)), gui.value().font.atlas.unsafe_ptr())
+        var lb = getenv("GUI_LABELS")
+        for w in lb.split(","):
+            labels.append(String(w))
     var orbit = SIMD[DType.float32, 4](1, -0.785, 0.45, 4)  # on, azimuth, elevation (rad), zoom: the window's camera
     var orbit_file = List[UInt8]()
     var script = List[Float32]()  # GUI_SCRIPT=FILE: rows "iteration kind a x y rx ry", pushed through SDL's queue (checks)
     comptime if GUI:
         var sp = getenv("GUI_SCRIPT")
         if sp:
+            win.value().scripted = True
             for line in open(sp, "r").read().splitlines():
                 for w in line.split():
                     script.append(Float32(atof(w)))
     var it = 0
     var si = 0
+    var shot_done = False
     while frames == 0 or fr < frames:
         var tp = perf_counter_ns()
         var stepped = True  # GUI: False when no control step arrived within 16 ms (the brain is paused): draw only
@@ -270,13 +298,16 @@ def main() raises:
                 if si + 7 > len(script):
                     print("GUI script done at iteration", it, file=stderr)
             it += 1
-            var inp = win.value().poll()
+            inp = win.value().poll()
+            acc.merge(inp)
             if inp.quit:
                 break
-            if inp.down & 1:  # left drag orbits, wheel zooms
+            if inp.pressed & 1:
+                drag_scene = not gui.value().over
+            if inp.down & 1 and drag_scene:  # left drag on the scene orbits, wheel zooms
                 orbit[1] -= inp.dx * 0.008
                 orbit[2] = min(max(orbit[2] + inp.dy * 0.008, Float32(0.05)), Float32(1.5))
-            if inp.wheel != 0:
+            if inp.wheel != 0 and not gui.value().over:
                 orbit[3] *= Float32(0.9) ** inp.wheel
             if len(script) and si == len(script) and it == Int(script[si - 7]) + 2:
                 print("GUI orbit", orbit[1], orbit[2], orbit[3], file=stderr)
@@ -349,7 +380,7 @@ def main() raises:
                     ctx.enqueue_copy(cam_b, camh.unsafe_ptr())
                 ctx.enqueue_function(kf, tcam, tpose, troot, grid_dim=1, block_dim=1)
             ren.frame(ctx, kc, kr, ks, ksc, kcs, vis, sm, img, tpi, tpf, trv, trt, trp, tpose, tcam, tscam)
-            comptime if HUD > 0:
+            comptime if HUD > 0 and not GUI:  # the GUI draws its own panels
                 ctx.enqueue_function(kh, img, tgs, grid_dim=(spec.PANEL_W * spec.PANEL_H + 63) // 64, block_dim=64)
                 comptime if WORLD > 0:
                     ctx.enqueue_function(kht, img, tplume, grid_dim=(spec.PANEL_W * spec.TXT_H + 63) // 64, block_dim=64)
@@ -359,6 +390,63 @@ def main() raises:
                 ms[2] += Float64(perf_counter_ns() - tp)
                 tp = perf_counter_ns()
             ctx.enqueue_copy(out_h, img_b)
+            comptime if GUI:
+                ref u = gui.value()
+                var reply = ctl.reply.byte_length()
+                ctl.pump()
+                if it % 15 == 0:
+                    ctl.send("status")
+                var dv = ctl.nums("drive")
+                if ctl.reply.byte_length() != reply and len(dv) == 2 * eng.F:
+                    for k in range(2 * eng.F):
+                        drive[(k // 2) * 128 + dhead * 2 + k % 2] = Float32(dv[k])
+                    dhead = (dhead + 1) % 64
+                var now = Float64(perf_counter_ns())
+                clock[2] += 1
+                if now - clock[0] > 1e9:
+                    fps = clock[2] * 1e9 / (now - clock[0])
+                    clock[3] = (Float64(fr) - clock[1]) * Float64(max(eng.K, 1)) * 1e-4 * 1e9 / (now - clock[0])
+                    clock = SIMD[DType.float64, 4](now, Float64(fr), 0, clock[3])
+                u.begin(acc)
+                var paused = ctl.flag("paused")
+                u.panel(20, 16, 640, 92, "Run")
+                if u.icon(1, 0 if paused else 1, not paused):
+                    ctl.send("resume" if paused else "pause")
+                if u.icon(2, 2) and paused:
+                    ctl.send("step", steps=10)
+                if u.icon(3, 3):
+                    ctl.send("stop")
+                _ = u.text(u.x + 8, 50, "t " + uim.fmt(Float64(fr * max(eng.K, 1)) * 1e-4) + " s     " + uim.fmt(clock[3]) + "x real time     "
+                           + uim.fmt(fps, 0) + " fps" + ("     paused" if paused else ""), 1, uim.TEXT)
+                var px0 = Float32(uim.UW - 340)
+                u.panel(px0, 16, Float32(uim.UW - 20), Float32(60 + eng.F * 124), "Flies")
+                var inputs: List[String] = ["w", "a", "d", "space", "threat"]
+                for f in range(eng.F):
+                    u.x, u.y = px0 + 16, Float32(56 + f * 124)
+                    _ = u.text(u.x, u.y, "Fly " + String(f) + ("   " + labels[f] if f < len(labels) and labels[f] else ""), 1, uim.TEXT)
+                    u.y += 24
+                    for k in range(5):
+                        var on = ctl.held(f, inputs[k])
+                        if u.button(100 + 8 * f + k, inputs[k], Float32(44 if k < 3 else 64), 24, on):
+                            ctl.send("drive", '{"fly": ' + String(f) + ', "input": "' + inputs[k] + '", "on": ' + ("false" if on else "true") + "}")
+                    u.x, u.y = px0 + 16, u.y + 30
+                    comptime if eng.GAME:
+                        u.bar("energy", pkt_g[f], uim.GOOD, 300)
+                        u.bar("stamina", pkt_g[2 * eng.F + f], uim.WARN, 300)
+                    var hist = List[Float32]()
+                    for k in range(64):
+                        var j = (dhead + k) % 64
+                        hist.append(drive[f * 128 + 2 * j] - drive[f * 128 + 2 * j + 1])  # L - R: the turn the brain asks for
+                    u.spark(hist, -1, 1, 304, 22, uim.ACCENT)
+                u.finish()
+                acc = gw.Input(acc.x, acc.y, 0, 0, 0, acc.down, 0, 0, SIMD[DType.uint64, 2](0), False)
+                ctx.enqueue_copy(ucmd_b, u.cmd.unsafe_ptr())
+                ctx.enqueue_copy(ubin_b, u.bins.unsafe_ptr())
+                ctx.enqueue_copy(ucnt_b, u.cnt.unsafe_ptr())
+                ctx.enqueue_function(kui, TileTensor(uimg_b, row_major[uim.UW * uim.UH]()), TileTensor(ucmd_b, row_major[uim.NCMD * uim.CW]()),
+                    TileTensor(ubin_b, row_major[uim.TX * uim.TY * uim.TCAP]()), TileTensor(ucnt_b, row_major[uim.TX * uim.TY]()),
+                    TileTensor(uatl_b, row_major[uim.AW * uim.AH]()), grid_dim=(uim.UW * uim.UH + 255) // 256, block_dim=256)
+                ctx.enqueue_copy(uhost, uimg_b)
         var send = False
         comptime if BRAIN > 0:
             send = stepped and (packet_every > 0 and fr % packet_every == 0 or fr + 1 == frames)
@@ -441,7 +529,22 @@ def main() raises:
                         return
         if draw:
             comptime if GUI:
-                win.value().present(Int(out_h.unsafe_ptr()))
+                win.value().present(Int(out_h.unsafe_ptr()), Int(uhost.unsafe_ptr()))
+                if not shot_done and len(script) >= 7 and it >= Int(script[len(script) - 7]) - 60:  # GUI_SHOT=FILE: the window's picture, once,
+                    shot_done = True                                                                    # 60 iterations before the last event (a stop ends the run)
+                    var shot = getenv("GUI_SHOT")
+                    if shot:
+                        var ppm = List[UInt8](capacity=uim.UW * uim.UH * 3)
+                        for i in range(uim.UW * uim.UH):
+                            var up = uhost[i]
+                            var sp = out_h[(i // uim.UW * ren.H // uim.UH) * ren.W + (i % uim.UW) * ren.W // uim.UW]  # nearest scene pixel
+                            var ua = Float32(up >> 24) / 255
+                            for ch in range(3):
+                                var sh = UInt32(8 * ch)
+                                ppm.append(UInt8(Float32((up >> sh) & 255) * ua + Float32((sp >> sh) & 255) * (1 - ua)))
+                        with open(shot, "w") as o:
+                            o.write("P6\n" + String(uim.UW) + " " + String(uim.UH) + "\n255\n")
+                            o.write_bytes(Span(ppm))
             else:
                 if not write_all(4 if BRAIN > 0 else 1, out_h.unsafe_ptr().unsafe_bitcast[UInt8](), ren.W * ren.H * 4):
                     return  # reader gone
