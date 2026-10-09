@@ -15,6 +15,7 @@ body length, tilt < 20 deg.
   gpu-wait run --shared --vram 8 --priority 60 --timeout 3000 --env PYTHONPATH=$PWD -- .venv/bin/python -m agent.body_engine.full_fly REPEATS SEED
 """
 import json
+import os
 import sys
 
 import mujoco  # before play: its MUJOCO_GL default is egl, which fails off the GPU lease
@@ -25,6 +26,7 @@ from agent.body_engine import fly_link as fl, live
 from agent.body_engine.mcns_link import FWD_HZ, WINDOW, brain, drive
 from agent.eye_render import Eyes
 
+SYM = os.environ.get('FULL_FLY_SYM') == '1'  # U1b: the completed left visual path (agent/mcns_sym.py)
 EYE_EVERY = 10  # control steps per eye frame: 100 Hz
 START = {'L': (-9.0, -4.0, 120), 'R': (-7.0, -7.0, 260)}
 OPEN = (-7.0, 0.0, 0)  # eye reference pose: open ground (wall-left 100.6/6.4 Hz L/R eye, wall-right 8.3/62.7, another open pose 6.6/4.9)
@@ -35,7 +37,7 @@ def main(repeats=1, seed=7):
     from agent.mcns_mapping import descending_name_sets
     if repeats > 1:
         from agent import seeds
-        seeds.claim('full_fly', [seed])
+        seeds.claim('full_fly_sym' if SYM else 'full_fly', [seed])  # sym and its unrepaired control share a seed
     params = live.WORLD[:5] + (1,) + live.WORLD[6:]
     d, m, _ = fl.prepare(fl.OUT.parent / 'full-fly-world1', mjcf=live.terrain(fl.MJCF, params)[0], flat=fl.MJCF)
     q0 = np.fromfile(d / 'qpos.bin', np.float32).astype(float)
@@ -58,7 +60,7 @@ def main(repeats=1, seed=7):
         e.set_base(start(OPEN))  # darkening against the open ground, not a uniform BG (eye_render.set_base)
     legs = ls.cells()
     v = np.load('.work/agent/mcns/vision_readout.npz')
-    b, f, nl, _ = brain(cols=len(cols), seed=seed)
+    b, f, nl, _ = brain(cols=len(cols), seed=seed, sym=SYM)
     dn, _ = descending_name_sets()
     for c in range(len(cols)):
         b.stimulate(dn['forward'], FWD_HZ, fly=c, key=c)
@@ -119,7 +121,7 @@ def main(repeats=1, seed=7):
           (f"mutant mirrored eyes: wall-left {dm:+.1f}, opposite to seeing {dl:+.1f}", dm * dl < 0)]
     for k, ok_ in ok:
         print(('PASS ' if ok_ else 'FAIL ') + k)
-    (fl.OUT / f'full-fly-{repeats}-{seed}.json').write_text(json.dumps(out))
+    (fl.OUT / f'full-fly-{repeats}-{seed}{"-sym" if SYM else ""}.json').write_text(json.dumps(out))
     if not all(ok_ for _, ok_ in ok):
         sys.exit('FAIL full fly U1')
     print('PASS full fly U1: what the fly sees and feels turns it away from walls')

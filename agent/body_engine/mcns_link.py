@@ -24,11 +24,11 @@ FWD_HZ, TURN_HZ = 80, 100  # drive 80/140 = 0.57 forward; a turn adds 0.5 on its
 VIS = ('blank', 'left', 'right', 'mirrored')  # vision mode: forward 80 Hz + an image; disc at az +-70 (left/right eye), mirrored = left disc through the mirrored eye map (mutant)
 
 
-def brain(vision=False, cols=None, repeats=1, seed=7, extra=None):
+def brain(vision=False, cols=None, repeats=1, seed=7, extra=None, sym=False):
     from agent import mcns, shiu_g1
     from agent.mcns_mapping import descending_name_sets
     from agent.shiu import ShiuLive
-    data = mcns.graph()
+    data = mcns.graph(sym=sym)  # sym: left visual path completed (agent/mcns_sym.py)
     n = data[4][0]
     dn, _ = descending_name_sets()
     late = cols is not None  # caller adds its own stimuli, then calls start
