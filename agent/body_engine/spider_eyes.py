@@ -20,7 +20,7 @@ import threading
 
 import numpy as np
 
-from agent.body_engine.models.spider import PREY_R
+from kinestride.models.spider import PREY_R
 
 NPIX = 64
 # name, local position mm, axis yaw deg from heading (+ = left), fov deg
@@ -93,8 +93,8 @@ def visibility(q, points):
     """MuJoCo ray casting from the intended eye to the prey sphere: fraction of 7 sample points (centre, 6 axis points of the
     sphere) with no own-body surface in the way. q: standing qpos of the spider (no prey). Independent of the renderer."""
     import mujoco
-    from agent.body_engine.model import load
-    from agent.body_engine.models.spider import build
+    from kinestride.model import load
+    from kinestride.models.spider import build
     m = load(str(build()))
     d = mujoco.MjData(m)
     d.qpos[:] = q[:m.nq]
@@ -132,7 +132,7 @@ def scenarios(q, head, quat):
 
 
 def check():
-    from agent.body_engine.models.spider import PREY_R
+    from kinestride.models.spider import PREY_R
     from agent.body_engine.spider_link import files, run
     d0 = files(1, 'eyes1', prey=True)  # the standing pose, one animal, to design the scenarios on
     q1 = np.fromfile(d0 / 'qpos.bin', np.float32).astype(float)

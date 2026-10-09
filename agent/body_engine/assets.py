@@ -9,7 +9,7 @@ import sys
 
 import numpy as np
 
-from agent.body_engine.world import height_grad
+from kinestride.world import height_grad
 
 GRASS, BLOOM, STALK = (0.33, 0.55, 0.22, 1), (0.92, 0.42, 0.62, 1), (0.30, 0.48, 0.20, 1)
 FOOD, DECOY = (1.0, 0.75, 0.25, 1), (0.38, 0.63, 1.0, 1)  # spectate.minimap's colours

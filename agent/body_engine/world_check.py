@@ -25,8 +25,8 @@ import mujoco
 import numpy as np
 
 from agent.body_engine import live, spectate_check as sc, world_content as wc
-from agent.body_engine.models.spider import build as spider_build
-from agent.body_engine.render_check import MJCF
+from kinestride.models.spider import build as spider_build
+from kinestride.render_check import MJCF
 
 OUT = Path('.work/agent/body_engine/world-hud')
 W, H = sc.W, sc.H
@@ -37,7 +37,7 @@ COLOR = {0: (255, 190, 64), 1: (96, 160, 255)}  # world_content colours, food an
 
 
 def geometry():
-    src = (sc.ENGINE / 'spectate.mojo').read_text()
+    src = (sc.APP / 'spectate.mojo').read_text()
     g = sc.hud_geometry()
     g['MAP'] = int(re.search(r'comptime MAP = (\d+)', src).group(1))
     g['MAP_SCALE'] = int(re.search(r'MAP_SCALE_E3", (\d+)', src).group(1)) * 0.001

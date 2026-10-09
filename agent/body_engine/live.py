@@ -21,10 +21,11 @@ from pathlib import Path
 import mujoco
 import numpy as np
 
-from agent.body_engine.model import ENGINE, FEET, combine, cube, export, load, meshes, standing, terrain
-from agent.body_engine.render_check import DIST, MJCF, MOJO
-from agent.body_engine.verify_render_leak import sample
-from agent.body_engine.world import height_grad
+from kinestride.model import ENGINE, FEET, combine, cube, export, load, meshes, standing, terrain
+from kinestride.render_check import DIST, MJCF, MOJO
+from kinestride.verify_render_leak import sample
+from kinestride.world import height_grad
+APP = Path(__file__).parent  # this app's Mojo sources (live, spectate, gait check); the physics core is kinestride's ENGINE
 
 OUT = Path('.work/agent/body_engine/live')
 W, H = 960, 540
@@ -100,11 +101,11 @@ def build(out, m, k, box=0):
     flags += ['-DWAVE=1']  # one animal on a 32-lane wave (smooth.mojo WAVE): the live step is latency, not throughput
     flags += ['-DTERRAIN=1'] if any(f.startswith('-DHFGEOM') for f in flags) else []
     binary = out / f'live_k{k}_b{box}'
-    src = [ENGINE / f for f in ('live.mojo', 'smooth.mojo', 'render.mojo')] + [out / 'sizes.txt', out / 'rsizes.txt']
+    src = [APP / 'live.mojo'] + [ENGINE / f for f in ('smooth.mojo', 'render.mojo')] + [out / 'sizes.txt', out / 'rsizes.txt']
     if binary.is_file() and binary.stat().st_mtime > max(f.stat().st_mtime for f in src):
         return binary  # built on the CPU before the GPU job
     subprocess.run([MOJO, 'build', '-I', str(ENGINE), *flags, '-DFLIES=1', '-DSTAGE=7', f'-DK={k}', f'-DW={W}', f'-DH={H}',
-                    f'-DPROWS={7 * (m.nbody - 1)}', f'-DBOX_MM={box}', str(ENGINE / 'live.mojo'), '-o', str(binary)], check=True)
+                    f'-DPROWS={7 * (m.nbody - 1)}', f'-DBOX_MM={box}', str(APP / 'live.mojo'), '-o', str(binary)], check=True)
     return binary
 
 
@@ -234,11 +235,11 @@ def main(cmd, *args):
         box = 40 if 'cube' in args else 0
         body = MJCF
         if 'spider' in args:
-            from agent.body_engine.models.spider import build as spider
+            from kinestride.models.spider import build as spider
             body = str(spider())
         out = OUT.parent / ('live' + ('-cube' if box else '') + ('-spider' if 'spider' in args else '') + ('-world' if 'world' in args else ''))
         if 'world' in args:  # fly + spider on the endless seeded terrain: live.py watch K world [SEED]
-            from agent.body_engine.models.spider import build as spider
+            from kinestride.models.spider import build as spider
             body = combine(MJCF, str(spider()))
             seed = next((int(x) for x in args[1:] if x.isdigit()), 1)
             cam, m = prepare(out, mjcf=terrain(body, WORLD[:5] + (seed,) + WORLD[6:])[0], flat=body)

@@ -16,8 +16,9 @@ from pathlib import Path
 import numpy as np
 
 from agent.body_engine import fly_link
-from agent.body_engine.model import ENGINE
-from agent.body_engine.render_check import MOJO
+from kinestride.model import ENGINE
+from kinestride.render_check import MOJO
+APP = Path(__file__).parent  # this app's Mojo sources (live, spectate, gait check); the physics core is kinestride's ENGINE
 
 K = fly_link.K
 DOFS = (('coxa', 'pitch'), ('coxa', 'roll'), ('coxa', 'yaw'), ('trochanterfemur', 'pitch'), ('trochanterfemur', 'roll'), ('tibia', 'pitch'), ('tarsus1', 'pitch'))  # preprogrammed.py
@@ -52,7 +53,7 @@ def build(d, nseg):
     b = d / f'gait_check_{h}'  # content-addressed: mutant-check restores old mtimes
     if not b.is_file():
         subprocess.run([MOJO, 'build', '-I', str(ENGINE), *sizes, '-DFLIES=1', '-DSTAGE=7', f'-DK={K}', '-DWAVE=1', f'-DGSEG={nseg}', f'-DPROWS={7 * (nb - 1)}',
-                        str(ENGINE / 'fly_gait_check.mojo'), '-o', str(b)], check=True, capture_output=True)
+                        str(APP / 'fly_gait_check.mojo'), '-o', str(b)], check=True, capture_output=True)
     return b
 
 

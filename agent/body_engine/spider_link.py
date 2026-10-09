@@ -20,10 +20,11 @@ import mujoco
 import numpy as np
 
 from agent.body_engine.live import prepare
-from agent.body_engine.model import ENGINE, load
-from agent.body_engine.models.spider import build as spider_build
-from agent.body_engine.render_check import MOJO
+from kinestride.model import ENGINE, load
+from kinestride.models.spider import build as spider_build
+from kinestride.render_check import MOJO
 from agent.body_engine.spider_gait import NU, gait
+APP = Path(__file__).parent  # this app's Mojo sources (live, spectate, gait check); the physics core is kinestride's ENGINE
 
 OUT = Path('.work/agent/body_engine/spider-link')
 CAM = ['0', '0', '10', '0', '0', '0', '45']
@@ -46,12 +47,12 @@ def files(F, name=None, prey=False):
 def build(d, F, k, brain, w=64, h=64, eyes=False, gaze=False, row=False, profile=False):
     flags = (d / 'sizes.txt').read_text().split() + (d / 'rsizes.txt').read_text().split()
     nb = int([f for f in flags if f.startswith('-DNBODY=')][0][8:])
-    src = [ENGINE / f for f in ('live.mojo', 'smooth.mojo', 'render.mojo', 'spider_brain.mojo', 'eyes.mojo')]
+    src = [APP / f for f in ('live.mojo', 'spider_brain.mojo')] + [ENGINE / f for f in ('smooth.mojo', 'render.mojo', 'eyes.mojo')]
     tag = hashlib.sha1(b''.join(f.read_bytes() for f in src + [d / 'sizes.txt', d / 'rsizes.txt'])).hexdigest()[:8]  # content (incl. the model's sizes), not mtime: mutant-check restores old mtimes
     b = d / f'link_b{brain}_k{k}_{w}x{h}{"_eyes" if eyes else ""}{"_gaze" if gaze else ""}{"_row" if row else ""}{"_prof" if profile else ""}_{tag}'
     if not b.is_file():
         subprocess.run([MOJO, 'build', '-I', str(ENGINE), *flags, f'-DFLIES={F}', '-DSTAGE=7', f'-DK={k}', '-DWAVE=1', f'-DW={w}', f'-DH={h}',
-                        f'-DPROWS={7 * (nb - 1)}', '-DBOX_MM=0', f'-DBRAIN={brain}', f'-DEYES={int(eyes)}', f'-DGAZE={int(gaze)}', f'-DEYEROW={int(row)}', *(['-DPROFILE=1'] if profile else []), str(ENGINE / 'live.mojo'), '-o', str(b)], check=True,
+                        f'-DPROWS={7 * (nb - 1)}', '-DBOX_MM=0', f'-DBRAIN={brain}', f'-DEYES={int(eyes)}', f'-DGAZE={int(gaze)}', f'-DEYEROW={int(row)}', *(['-DPROFILE=1'] if profile else []), str(APP / 'live.mojo'), '-o', str(b)], check=True,
                        capture_output=True)
     return b
 

@@ -24,20 +24,21 @@ from pathlib import Path
 import numpy as np
 
 from agent.body_engine import spider_link
-from agent.body_engine.model import ENGINE
-from agent.body_engine.render_check import MOJO
-from agent.body_engine.verify_render_leak import sample
+from kinestride.model import ENGINE
+from kinestride.render_check import MOJO
+from kinestride.verify_render_leak import sample
+APP = Path(__file__).parent  # this app's Mojo sources (live, spectate, gait check); the physics core is kinestride's ENGINE
 
 OUT = Path('.work/agent/body_engine/spectate')
 W, H, K = 640, 360, 10
 CAM = ['0', '0', '10', '0', '0', '0', '45']  # overwritten every frame by follow
 ROOT_BODY, ROOT_RADIUS = 1, 8.0  # the spider's root body and a sphere around it covering the legs (mm)
-CHECKER = ENGINE / 'spectator_integration_check.py'
+CHECKER = APP / 'spectator_integration_check.py'
 PATCH = Path('/home/<user>/Projects/science/fly-connectome/.work/team/status/spectator-hooks/integration-gates.patch')
 
 
 def hud_geometry():
-    src = (ENGINE / 'spectate.mojo').read_text()
+    src = (APP / 'spectate.mojo').read_text()
     return {k: int(re.search(rf'comptime {k} = (\d+)', src).group(1)) for k in ('BAR_X', 'BAR_Y', 'BAR_W', 'BAR_H', 'BAR_PITCH')}
 
 
@@ -56,7 +57,7 @@ def set_state(d, energy, health, stamina, dead):
 def build(d, tag, flags, k=K, src=None, brain=2, flies=1):
     """Content-addressed build (mutant-check restores old mtimes): live.mojo `src` (default the current one), every engine
     module it may import, and the model's sizes (a re-export with other sizes, e.g. convex pairs on, needs its own binary)."""
-    src = src or ENGINE / 'live.mojo'
+    src = src or APP / 'live.mojo'
     deps = [src] + sorted(f for f in ENGINE.glob('*.mojo') if f != src)  # includes shiu_resident.mojo and the shiu_worker.mojo symlink (agent/)
     sz = (d / 'sizes.txt').read_text().split() + (d / 'rsizes.txt').read_text().split()
     sz += ['-DTERRAIN=1'] if any(f.startswith('-DHFGEOM') for f in sz) else []  # as live.build: a heightfield model

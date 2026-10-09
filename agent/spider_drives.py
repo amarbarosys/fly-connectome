@@ -30,7 +30,7 @@ import sys
 import numpy as np
 
 from agent import spider_eye_loop as L
-from agent.body_engine.models.spider import WATER_R, WATER_XY
+from kinestride.models.spider import WATER_R, WATER_XY
 from agent.body_engine.spider_gait import gait
 from agent.spider_body_loop import wrap, yaw
 

@@ -19,7 +19,7 @@ from pathlib import Path
 import mujoco
 import numpy as np
 
-from agent.body_engine.model import FEET, export, load, meshes
+from kinestride.model import FEET, export, load, meshes
 from agent.body_engine.spider_link import build
 
 R = Path('/home/<user>/Projects/science/fly-connectome')

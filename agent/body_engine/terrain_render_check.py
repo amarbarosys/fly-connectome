@@ -3,7 +3,7 @@ frame 1, max channel diff <= 1. usage: gpu-wait run --priority 90 --timeout 900 
 import shutil, subprocess, sys
 import numpy as np
 from pathlib import Path
-from agent.body_engine.model import terrain
+from kinestride.model import terrain
 from agent.body_engine.live import prepare, build
 B = '.work/agent/gpu-body-port/body-v2/body.xml'
 frames = {}

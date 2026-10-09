@@ -20,9 +20,9 @@ import mujoco
 import numpy as np
 
 from agent.body_engine import live, spectate_check as sc
-from agent.body_engine.game_events import Animal, Event, Rules, replay
-from agent.body_engine.models.spider import build as spider_build
-from agent.body_engine.render_check import MJCF
+from kinestride.game_events import Animal, Event, Rules, replay
+from kinestride.models.spider import build as spider_build
+from kinestride.render_check import MJCF
 
 OUT = Path('.work/agent/body_engine/game')
 N = 40

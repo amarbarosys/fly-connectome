@@ -27,8 +27,8 @@ import mujoco
 import numpy as np
 
 from agent.body_engine.live import prepare
-from agent.body_engine.model import ENGINE, load
-from agent.body_engine.models.spider import build as spider_build
+from kinestride.model import ENGINE, load
+from kinestride.models.spider import build as spider_build
 from agent.body_engine.spider_link import build, sizes
 from agent.body_engine.spider_gait import NU
 

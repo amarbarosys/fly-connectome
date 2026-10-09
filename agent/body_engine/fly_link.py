@@ -32,7 +32,7 @@ import mujoco
 import numpy as np
 
 from agent.body_engine import live, spectate_check as sc
-from agent.body_engine.render_check import MJCF
+from kinestride.render_check import MJCF
 
 OUT = Path('.work/agent/body_engine/fly-link')
 K, STEPS, DT = 10, 1000, 1e-4
