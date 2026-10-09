@@ -262,6 +262,7 @@ def main() raises:
     var ucnt_b = ctx.enqueue_create_buffer[DType.uint32](NG + (0 if NG else uim.TX * uim.TY))
     var uatl_b = ctx.enqueue_create_buffer[DType.uint8](NG + (0 if NG else uim.AW * uim.AH))
     var uimg_b = ctx.enqueue_create_buffer[DType.uint32](NG + (0 if NG else uim.UW * uim.UH))
+    var usrc_b = ctx.enqueue_create_buffer[DType.uint32](NG + (0 if NG else uim.ISRC))  # image sources (Ui.image): the brain view
     var uhost = ctx.enqueue_create_host_buffer[DType.uint32](NG + (0 if NG else uim.UW * uim.UH))
     var kui = ctx.compile_function[uim.compose]()
     var labels = List[String]()
@@ -445,7 +446,7 @@ def main() raises:
                 ctx.enqueue_copy(ucnt_b, u.cnt.unsafe_ptr())
                 ctx.enqueue_function(kui, TileTensor(uimg_b, row_major[uim.UW * uim.UH]()), TileTensor(ucmd_b, row_major[uim.NCMD * uim.CW]()),
                     TileTensor(ubin_b, row_major[uim.TX * uim.TY * uim.TCAP]()), TileTensor(ucnt_b, row_major[uim.TX * uim.TY]()),
-                    TileTensor(uatl_b, row_major[uim.AW * uim.AH]()), grid_dim=(uim.UW * uim.UH + 255) // 256, block_dim=256)
+                    TileTensor(uatl_b, row_major[uim.AW * uim.AH]()), TileTensor(usrc_b, row_major[uim.ISRC]()), grid_dim=(uim.UW * uim.UH + 255) // 256, block_dim=256)
                 ctx.enqueue_copy(uhost, uimg_b)
         var send = False
         comptime if BRAIN > 0:
