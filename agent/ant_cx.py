@@ -36,7 +36,8 @@ def subgraph(shuffle=None):
         q = np.random.default_rng(shuffle).permutation(q)
     inst = a['instance'].fillna('').to_numpy()[keep]
     phase = np.array([45.0 * (int(m.group(1)) - 1) if (m := re.search(r'\)_[LR](\d)', s)) else np.nan for s in inst])
-    return keep, a['type'].fillna('').to_numpy()[keep], phase, p, q, w[e]
+    side = np.array([m.group(1) if (m := re.search(r'\)_([LR])\d', s)) else '' for s in inst])  # PB half
+    return keep, a['type'].fillna('').to_numpy()[keep], phase, side, p, q, w[e]
 
 
 def decode(counts, phase, offset=0.0):
@@ -52,7 +53,7 @@ def err(a, b):
 
 def heading_trials(shuffle=None, seed=71):
     from agent.shiu import ShiuGPU
-    keep, types, phase, p, q, w = subgraph(shuffle)
+    keep, types, phase, side, p, q, w = subgraph(shuffle)
     az = np.array([*FIT, *TEST] * REPEATS, float)
     epg = np.flatnonzero(pd.Series(types).str.startswith('EPG').to_numpy() & ~np.isnan(phase))
     b = ShiuGPU(p, q, w, n=len(keep), flies=len(az), seed=seed)
@@ -65,21 +66,28 @@ def heading_trials(shuffle=None, seed=71):
     _, got = b.run_groups(np.array([0, ON, OFF]), np.zeros(n, np.int32), readout=(np.arange(len(az))[:, None] * n + cells).ravel())
     x = np.zeros((2, len(az), n), np.int64)
     x[:, :, cells] = np.diff(np.asarray(got, np.int64), axis=0).reshape(2, len(az), len(cells))  # (windows, columns, cells)
-    return az, types, phase, x[0], x[1], epg
+    return az, types, phase, side, x[0], x[1], epg
 
 
-def heading_score(az, types, phase, on, off, epg):
+def heading_score(az, types, phase, side, on, off, epg):
+    """per read type: offset fitted per PB side on the FIT azimuths (the halves are offset in the fly PB; one map for both
+    smeared seed 71), held-out error = median over both sides' decodes of the TEST azimuths."""
     fit = np.isin(az, FIT)
     out = {}
     for t in READ:
-        m = pd.Series(types).str.startswith(t).to_numpy()
-        raw = decode(on[:, m], phase[m])
-        o = float(np.degrees(np.angle(np.exp(1j * np.radians(raw[fit] - az[fit])).mean())))  # circular mean offset, fit azimuths only
-        out[t] = {'spikes': int(on[:, m].sum()), 'test_err': float(np.median(err(decode(on[~fit][:, m], phase[m], o), az[~fit]))), 'offset': o}
+        e = []
+        for sd in 'LR':
+            m = pd.Series(types).str.startswith(t).to_numpy() & (side == sd)
+            raw = decode(on[:, m], phase[m])
+            o = float(np.degrees(np.angle(np.exp(1j * np.radians(raw[fit] - az[fit])).mean())))
+            e += list(err(decode(on[~fit][:, m], phase[m], o), az[~fit]))
+        out[t] = {'spikes': int(on[:, pd.Series(types).str.startswith(t).to_numpy()].sum()), 'test_err': float(np.median(e))}
     return out, float(np.median(err(decode(off[:, epg], phase[epg]), az)))
 
 
-def heading(seed=71):
+def heading(seed=72):
+    from agent import seeds
+    seeds.claim('ant_cx_heading', [seed])
     res = {}
     for arm, sh in (('real', None), ('shuffled', 5)):
         r, pers = heading_score(*heading_trials(sh, seed))
