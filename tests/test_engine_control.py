@@ -19,7 +19,7 @@ NAMES = ['w', 'a', 'd', 'threat']
 def runner(tmp_path, monkeypatch):
     """A fake engine runner: serve() once per control step on a thread, as play.loop's rates_at does."""
     monkeypatch.setattr(rcm, 'REGISTRY', tmp_path / 'reg')
-    ec = EngineControl(tmp_path, 'test', NAMES, 3, tmp_path / 'orbit.bin', 1e-3)
+    ec = EngineControl(tmp_path, 'test', NAMES, [100.0, 80.0, 80.0, 200.0], 3, tmp_path / 'orbit.bin', 1e-3)
     seen, done = [], threading.Event()
 
     def run():
@@ -61,6 +61,8 @@ def test_drive_and_camera(runner):
     assert seen[-1][2, NAMES.index('a')] == 150.0 and seen[-1][1].sum() == 0
     ask(ec, 'drive', edit={'fly': 2, 'input': 'a', 'hz': -1})
     assert ask(ec, 'status')['held'] == []
+    assert ask(ec, 'drive', edit={'fly': 0, 'input': 'threat', 'on': True})['held'] == [{'fly': 0, 'input': 'threat', 'hz': 200.0}]
+    assert ask(ec, 'drive', edit={'fly': 0, 'input': 'threat', 'on': False})['held'] == []
     with pytest.raises(RuntimeError, match='fly must be'):
         ask(ec, 'drive', edit={'fly': 9, 'input': 'w', 'hz': 1})
     ask(ec, 'camera', edit={'zoom': 6.5})
@@ -75,6 +77,6 @@ def test_session_listed_by_panelctl(runner, monkeypatch):
     ec, seen, done = runner
     monkeypatch.setattr(panelctl, 'REGISTRY', rcm.REGISTRY)
     s = [r for r in panelctl.sessions() if r['session_id'] == ec.rc.session_id]
-    assert s and s[0]['backend'] == 'engine' and s[0]['paused'] is False
+    assert s and s[0]['backend'] == 'engine' and s[0]['paused'] is False and s[0]['flies'] == 3 and s[0]['inputs'] == NAMES
     ask(ec, 'stop')
     assert done.wait(2)

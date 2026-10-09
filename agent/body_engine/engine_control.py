@@ -5,8 +5,8 @@ requests are acknowledged at that boundary, as neural_single does. The session r
 registry, so `panelctl state` lists it beside fly sessions.
 
   status · pause · resume · step (paused, n steps, acknowledged when done) · stop    (neural_single's semantics)
-  drive  {"fly": f, "input": name, "hz": x}   held input for fly f (an input of keymap.toml: w, a, d, space, threat, ...);
-         hz < 0 clears it, back to the script
+  drive  {"fly": f, "input": name, "on": bool} or {..., "hz": x}   held input for fly f (an input of keymap.toml: w, a, d,
+         space, threat, ...) at the runner's own rate for it, or at x Hz; on false / hz < 0 clears it, back to the script
   camera {"azimuth": rad, "elevation": rad, "zoom": x}   orbit of the follow camera (DIR/orbit.bin), any subset
 """
 import time
@@ -17,15 +17,15 @@ from agent.runtime_control import RuntimeControl
 
 
 class EngineControl:
-    def __init__(self, out, profile, names, flies, orbit_file, dt):
+    def __init__(self, out, profile, names, hz, flies, orbit_file, dt):
         self.rc = RuntimeControl(out, profile, 'engine')
-        self.names, self.flies, self.orbit_file, self.dt = list(names), flies, orbit_file, dt
+        self.names, self.hz, self.flies, self.orbit_file, self.dt = list(names), list(hz), flies, orbit_file, dt
         self.paused, self.stopping, self.left, self.i = False, False, 0, 0
         self.held = {}  # (fly, input index) -> hz
         self.orbit = np.array([1, -np.pi / 4, 0.45, 4], np.float32)  # on, azimuth, elevation, zoom
 
     def snapshot(self):
-        return {'status': 'APPLIED', 'paused': self.paused, 'step': self.i, 'time_s': self.i * self.dt, 'flies': self.flies,
+        return {'status': 'APPLIED', 'paused': self.paused, 'step': self.i, 'time_s': self.i * self.dt, 'flies': self.flies, 'inputs': self.names,
                 'held': [{'fly': f, 'input': self.names[j], 'hz': hz} for (f, j), hz in self.held.items()],
                 'camera': {'azimuth': float(self.orbit[1]), 'elevation': float(self.orbit[2]), 'zoom': float(self.orbit[3])}}
 
@@ -59,10 +59,11 @@ class EngineControl:
                 f, j = int(edit['fly']), self.names.index(edit['input'])
                 if not 0 <= f < self.flies:
                     raise ValueError(f'fly must be in [0, {self.flies})')
-                if float(edit['hz']) < 0:
+                hz = (float(self.hz[j]) if edit['on'] else -1.0) if 'on' in edit else float(edit['hz'])
+                if hz < 0:
                     self.held.pop((f, j), None)
                 else:
-                    self.held[(f, j)] = float(edit['hz'])
+                    self.held[(f, j)] = hz
             elif cmd == 'camera':
                 self.set_camera(edit.get('azimuth'), edit.get('elevation'), edit.get('zoom'))
             elif cmd != 'status':
