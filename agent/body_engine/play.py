@@ -159,7 +159,7 @@ class Eyes:
 
 def setup(F, render=0, out='/dev/null', seed=None, q0=None):
     """seed: the fly on live.py's seeded terrain (live.WORLD, 0.1 mm bumps and cones), dropped from the flat standing pose."""
-    flags = ['-DGAME=1', '-DHUD=1', '-DFOLLOW=1', '-DORBIT=1'] + (['-DCPU=1'] if CPU else []) + (['-DPROFILE=1'] if os.environ.get('PLAY_PROFILE') == '1' else [])
+    flags = ['-DGAME=1', '-DHUD=1', '-DFOLLOW=1', '-DORBIT=1'] + (['-DCPU=1'] if CPU else []) + (['-DPROFILE=1'] if os.environ.get('PLAY_PROFILE') == '1' else []) + (['-DGUI=1'] if os.environ.get('PLAY_GUI') == '1' else [])  # Kinestride's window (live.mojo GUI)
     if seed is None:
         d, m, _ = fl.prepare(OUT / 'fly')
     else:  # terrain + the world's walls, stones, grass, flowers and two plume sources (agent/body_engine/assets.py), smelled at the antennae

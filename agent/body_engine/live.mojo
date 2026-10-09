@@ -34,8 +34,10 @@ usage: live DIR/ FRAMES ex ey ez tx ty tz fovy_deg [OUT]
 """
 import smooth as eng
 import render as ren
+import window as gw
 from max.algorithm import parallelize
 from std.ffi import external_call
+from std.os import getenv
 from std.math import tan
 from std.sys import argv, get_defined_int, stderr
 from std.time import perf_counter_ns
@@ -53,6 +55,7 @@ comptime HUD = get_defined_int["HUD", 0]()
 comptime PROFILE = get_defined_int["PROFILE", 0]()
 comptime WORLD = get_defined_int["WORLD", 0]()
 comptime ORBIT = get_defined_int["ORBIT", 0]() == 1  # FOLLOW camera orbits by DIR/orbit.bin (play)
+comptime GUI = get_defined_int["GUI", 0]() == 1  # Kinestride's window (window.mojo): frames shown there, mouse orbits the FOLLOW camera
 comptime GAZE = get_defined_int["GAZE", 0]() == 1  # BRAIN = 1 and EYES: F gaze yaws (deg, AM eyes) follow the ctrl on stdin
 comptime EYES = get_defined_int["EYES", 0]() == 1  # BRAIN > 0: eyes.mojo retinas in the packet, prey moved by DIR/env.bin
 comptime NRET = eyes.F * eyes.NE * eyes.W * eyes.H if EYES else 1
@@ -243,54 +246,87 @@ def main() raises:
     var ms = Array[Float64, 5](fill=0)  # PROFILE: neural_control, physics, render, copy, display
     var t0 = perf_counter_ns()
     var fr = 0
+    comptime assert not GUI or (FOLLOW > 0 and ORBIT and BRAIN == 1), "GUI: a brain-driven FOLLOW + ORBIT build"
+    var win = Optional[gw.Window](gw.Window("Kinestride", ren.W, ren.H)) if GUI else None
+    var orbit = SIMD[DType.float32, 4](1, -0.785, 0.45, 4)  # on, azimuth, elevation (rad), zoom: the window's camera
+    var orbit_file = List[UInt8]()
+    var script = List[Float32]()  # GUI_SCRIPT=FILE: rows "iteration kind a x y rx ry", pushed through SDL's queue (checks)
+    comptime if GUI:
+        var sp = getenv("GUI_SCRIPT")
+        if sp:
+            for line in open(sp, "r").read().splitlines():
+                for w in line.split():
+                    script.append(Float32(atof(w)))
+    var it = 0
+    var si = 0
     while frames == 0 or fr < frames:
         var tp = perf_counter_ns()
-        comptime if EYES:
-            ctx.enqueue_function(k_pr, TileTensor(q_b, eng.LQ), TileTensor(v_b, eng.LV), TileTensor(env_b, eyes.LENV), Float32(fr * max(eng.K, 1)) * Float32(1e-4),
-                grid_dim=(eng.F + 63) // 64, block_dim=64)
-        comptime if BRAIN == 1:
-            if not read_all(0, ctrl_h.unsafe_ptr().unsafe_bitcast[UInt8](), max(eng.NU, 1) * eng.F * 4):
-                return  # brain gone
-            ctx.enqueue_copy(u_b, ctrl_h)
-            comptime if eng.CPU:
-                for k in range(eng.NU * eng.F):
-                    uv.unsafe_ptr().unsafe_bitcast[Float32]()[k] = ctrl_h[k]
-            comptime if GAZE:
-                if not read_all(0, gaze_h.unsafe_ptr().unsafe_bitcast[UInt8](), eng.F * 4):
-                    return
-                ctx.enqueue_copy(gaze_b, gaze_h)
-        elif BRAIN == 3:
-            fly3.step(ctx, TileTensor(u_b, eng.LU), fr, max(eng.K, 1))
-        elif BRAIN == 2:
-            ctx.enqueue_function(kb, TileTensor(u_b, eng.LU), TileTensor(drive_b, brain.LD), Float32(fr * max(eng.K, 1)) * Float32(1e-4),
-                grid_dim=(eng.NU * eng.F + 63) // 64, block_dim=64)
-        comptime if PROFILE > 0:
-            ctx.synchronize()
-            ms[0] += Float64(perf_counter_ns() - tp)
-            tp = perf_counter_ns()
-        comptime if eng.CPU:  # one host thread per animal (each writes only its own columns, as the GPU kernel's threads do)
-            def step_animal(f: Int) {imm hi, imm hf, imm hq, imm hv, imm hu, imm ho}:
-                eng.smooth_at(hi, hf, hq, hv, hu, ho, f)
-            parallelize(step_animal, eng.F)
-        else:
-            ctx.enqueue_function(step, TileTensor(mi_b, eng.LI), TileTensor(mf_b, eng.LF), TileTensor(q_b, eng.LQ), TileTensor(v_b, eng.LV),
-                TileTensor(u_b, eng.LU), TileTensor(o_b, eng.LO), grid_dim=eng.GRID, block_dim=eng.BLOCK)
-        comptime if PROFILE > 0:
-            ctx.synchronize()
-            ms[1] += Float64(perf_counter_ns() - tp)
-            tp = perf_counter_ns()
-        comptime if EYES:
-            var tecam = TileTensor(ecam_b, eyes.LECAM)
-            var tevis = TileTensor(evis_b, eyes.LEVIS)
-            var tret = TileTensor(ret_b, eyes.LRET)
-            for e in range(1 if EYEROW else eyes.NE):
-                ctx.enqueue_function(k_ec, tecam, tpose, TileTensor(eyet_b, eyes.LEYE), TileTensor(gaze_b, eyes.LGAZE), Int32(e), grid_dim=(eng.F + 63) // 64, block_dim=64)
-                ctx.enqueue_function(k_ecl, tevis, grid_dim=(eyes.F * eyes.W * eyes.H + 255) // 256, block_dim=256)
-                ctx.enqueue_function(k_er, tevis, tecam, tpi, tpf, trv, trt, trp, tpose, tcam, grid_dim=(eyes.F * ren.NTRI + 255) // 256, block_dim=256)
-                ctx.enqueue_function(k_es, tevis, tret, Int32(e), tpi, tpf, trv, trt, trp, tpose, tcam, grid_dim=(eyes.F * eyes.W * eyes.H + 255) // 256, block_dim=256)
-            comptime if EYEROW:
-                ctx.enqueue_function(k_rm, tret, TileTensor(row_b, eyes.LROW), grid_dim=(eyes.F * eyes.W + 255) // 256, block_dim=256)
-        var draw = render_every > 0 and fr % render_every == 0 if BRAIN > 0 else True
+        var stepped = True  # GUI: False when no control step arrived within 16 ms (the brain is paused): draw only
+        comptime if GUI:
+            stepped = gw.readable(0, 16)
+            while si + 7 <= len(script) and Int(script[si]) <= it:
+                win.value().push(Int(script[si + 1]), Int(script[si + 2]), script[si + 3], script[si + 4], script[si + 5], script[si + 6])
+                si += 7
+                if si + 7 > len(script):
+                    print("GUI script done at iteration", it, file=stderr)
+            it += 1
+            var inp = win.value().poll()
+            if inp.quit:
+                break
+            if inp.down & 1:  # left drag orbits, wheel zooms
+                orbit[1] -= inp.dx * 0.008
+                orbit[2] = min(max(orbit[2] + inp.dy * 0.008, Float32(0.05)), Float32(1.5))
+            if inp.wheel != 0:
+                orbit[3] *= Float32(0.9) ** inp.wheel
+            if len(script) and si == len(script) and it == Int(script[si - 7]) + 2:
+                print("GUI orbit", orbit[1], orbit[2], orbit[3], file=stderr)
+        if stepped:
+            comptime if EYES:
+                ctx.enqueue_function(k_pr, TileTensor(q_b, eng.LQ), TileTensor(v_b, eng.LV), TileTensor(env_b, eyes.LENV), Float32(fr * max(eng.K, 1)) * Float32(1e-4),
+                    grid_dim=(eng.F + 63) // 64, block_dim=64)
+            comptime if BRAIN == 1:
+                if not read_all(0, ctrl_h.unsafe_ptr().unsafe_bitcast[UInt8](), max(eng.NU, 1) * eng.F * 4):
+                    return  # brain gone
+                ctx.enqueue_copy(u_b, ctrl_h)
+                comptime if eng.CPU:
+                    for k in range(eng.NU * eng.F):
+                        uv.unsafe_ptr().unsafe_bitcast[Float32]()[k] = ctrl_h[k]
+                comptime if GAZE:
+                    if not read_all(0, gaze_h.unsafe_ptr().unsafe_bitcast[UInt8](), eng.F * 4):
+                        return
+                    ctx.enqueue_copy(gaze_b, gaze_h)
+            elif BRAIN == 3:
+                fly3.step(ctx, TileTensor(u_b, eng.LU), fr, max(eng.K, 1))
+            elif BRAIN == 2:
+                ctx.enqueue_function(kb, TileTensor(u_b, eng.LU), TileTensor(drive_b, brain.LD), Float32(fr * max(eng.K, 1)) * Float32(1e-4),
+                    grid_dim=(eng.NU * eng.F + 63) // 64, block_dim=64)
+            comptime if PROFILE > 0:
+                ctx.synchronize()
+                ms[0] += Float64(perf_counter_ns() - tp)
+                tp = perf_counter_ns()
+            comptime if eng.CPU:  # one host thread per animal (each writes only its own columns, as the GPU kernel's threads do)
+                def step_animal(f: Int) {imm hi, imm hf, imm hq, imm hv, imm hu, imm ho}:
+                    eng.smooth_at(hi, hf, hq, hv, hu, ho, f)
+                parallelize(step_animal, eng.F)
+            else:
+                ctx.enqueue_function(step, TileTensor(mi_b, eng.LI), TileTensor(mf_b, eng.LF), TileTensor(q_b, eng.LQ), TileTensor(v_b, eng.LV),
+                    TileTensor(u_b, eng.LU), TileTensor(o_b, eng.LO), grid_dim=eng.GRID, block_dim=eng.BLOCK)
+            comptime if PROFILE > 0:
+                ctx.synchronize()
+                ms[1] += Float64(perf_counter_ns() - tp)
+                tp = perf_counter_ns()
+            comptime if EYES:
+                var tecam = TileTensor(ecam_b, eyes.LECAM)
+                var tevis = TileTensor(evis_b, eyes.LEVIS)
+                var tret = TileTensor(ret_b, eyes.LRET)
+                for e in range(1 if EYEROW else eyes.NE):
+                    ctx.enqueue_function(k_ec, tecam, tpose, TileTensor(eyet_b, eyes.LEYE), TileTensor(gaze_b, eyes.LGAZE), Int32(e), grid_dim=(eng.F + 63) // 64, block_dim=64)
+                    ctx.enqueue_function(k_ecl, tevis, grid_dim=(eyes.F * eyes.W * eyes.H + 255) // 256, block_dim=256)
+                    ctx.enqueue_function(k_er, tevis, tecam, tpi, tpf, trv, trt, trp, tpose, tcam, grid_dim=(eyes.F * ren.NTRI + 255) // 256, block_dim=256)
+                    ctx.enqueue_function(k_es, tevis, tret, Int32(e), tpi, tpf, trv, trt, trp, tpose, tcam, grid_dim=(eyes.F * eyes.W * eyes.H + 255) // 256, block_dim=256)
+                comptime if EYEROW:
+                    ctx.enqueue_function(k_rm, tret, TileTensor(row_b, eyes.LROW), grid_dim=(eyes.F * eyes.W + 255) // 256, block_dim=256)
+        var draw = (render_every > 0 and fr % render_every == 0 if BRAIN > 0 else True) or not stepped
         comptime if WORLD > 0:  # the plume at the odor sites of this step's pose: the HUD text, the trace and a brain's sense packet read it
             ctx.enqueue_function(ksn, tplume, tpose, tsite, tsrc, grid_dim=1, block_dim=64)
         comptime if eng.CPU:  # the device rows only for a frame (pose, game rows); packets read the host arrays below
@@ -298,16 +334,19 @@ def main() raises:
                 ctx.enqueue_copy(o_b, ob.unsafe_ptr().unsafe_bitcast[Float32]())
         if draw:
             comptime if FOLLOW > 0:
-                comptime if ORBIT:  # DIR/orbit.bin: on, azimuth, elevation, zoom (play writes it on mouse drag / wheel)
+                comptime if ORBIT:  # DIR/orbit.bin: on, azimuth, elevation, zoom (play, the panel's camera); applied when it changes
                     try:
                         var ob4 = open(dir + "orbit.bin", "r").read_bytes()
-                        if len(ob4) == 16:
+                        if len(ob4) == 16 and ob4 != orbit_file:
                             var p4 = ob4.unsafe_ptr().unsafe_bitcast[Float32]()
                             for k in range(4):
-                                camh[11 + k] = p4[k]
-                            ctx.enqueue_copy(cam_b, camh.unsafe_ptr())
+                                orbit[k] = p4[k]
+                            orbit_file = ob4^
                     except:
                         pass
+                    for k in range(4):
+                        camh[11 + k] = orbit[k]
+                    ctx.enqueue_copy(cam_b, camh.unsafe_ptr())
                 ctx.enqueue_function(kf, tcam, tpose, troot, grid_dim=1, block_dim=1)
             ren.frame(ctx, kc, kr, ks, ksc, kcs, vis, sm, img, tpi, tpf, trv, trt, trp, tpose, tcam, tscam)
             comptime if HUD > 0:
@@ -322,7 +361,7 @@ def main() raises:
             ctx.enqueue_copy(out_h, img_b)
         var send = False
         comptime if BRAIN > 0:
-            send = packet_every > 0 and fr % packet_every == 0 or fr + 1 == frames
+            send = stepped and (packet_every > 0 and fr % packet_every == 0 or fr + 1 == frames)
             comptime if eng.CPU:
                 if send:
                     var o = ob.unsafe_ptr().unsafe_bitcast[Float32]()
@@ -383,7 +422,8 @@ def main() raises:
                         gtrace.append(qf)
                         gtrace.append(af)
                 tp = perf_counter_ns()
-        fr += 1
+        if stepped:
+            fr += 1
         if to_file:
             continue
         comptime if BRAIN > 0:
@@ -400,11 +440,14 @@ def main() raises:
                     if not write_all(1, pkt_r.unsafe_ptr(), NPKR):
                         return
         if draw:
-            if not write_all(4 if BRAIN > 0 else 1, out_h.unsafe_ptr().unsafe_bitcast[UInt8](), ren.W * ren.H * 4):
-                return  # reader gone
+            comptime if GUI:
+                win.value().present(Int(out_h.unsafe_ptr()))
+            else:
+                if not write_all(4 if BRAIN > 0 else 1, out_h.unsafe_ptr().unsafe_bitcast[UInt8](), ren.W * ren.H * 4):
+                    return  # reader gone
         comptime if PROFILE > 0:
             ms[4] += Float64(perf_counter_ns() - tp)
-        if fr % 100 == 0:
+        if stepped and fr % 100 == 0:
             var ms_frame = Float64(perf_counter_ns() - t0) / Float64(fr) / 1e6
             print(fr, "frames,", ms_frame, "ms per frame,", Float64(fr * max(eng.K, 1)) * 0.1, "ms simulated", file=stderr)
             comptime if PROFILE > 0:  # running per-phase split, so a long or killed run still reports where the time goes

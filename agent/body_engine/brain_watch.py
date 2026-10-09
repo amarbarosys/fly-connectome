@@ -31,6 +31,9 @@ RENDER = int(os.environ.get('WATCH_RENDER', 5))  # control steps (1 ms each) per
 HEADLESS = os.environ.get('WATCH_HEADLESS') == '1'  # frames to /dev/null, no window: timing runs (the engine prints ms per control step)
 GRAB = int(os.environ.get('WATCH_GRAB', 0))  # > 0: no window, keep frame GRAB as OUT/grab.rgba, then stop
 VIEW = os.environ.get('WATCH_VIEW') == 'mujoco'  # the fly project's GUI: MuJoCo's viewer + a control window (engine_view.py), no Kinestride frames
+GUI = os.environ.get('WATCH_VIEW') == 'gui'  # Kinestride's own window (live.mojo -DGUI=1): frames and mouse in the engine process
+if GUI:
+    os.environ['PLAY_GUI'] = '1'
 
 
 def main(*args):
@@ -45,7 +48,7 @@ def main(*args):
     os.mkfifo(fifo)
     frame = sc.W * sc.H * 4
     grab = ['dd', f'if={fifo}', f'of={out / "grab.rgba"}', f'bs={frame}', 'count=1', f'skip={GRAB}', 'iflag=fullblock', 'status=none']
-    mpv = None if VIEW else subprocess.Popen(grab) if GRAB else subprocess.Popen(['cat', str(fifo)], stdout=subprocess.DEVNULL) if HEADLESS else subprocess.Popen(['mpv', '--demuxer=rawvideo', f'--demuxer-rawvideo-w={sc.W}', f'--demuxer-rawvideo-h={sc.H}',
+    mpv = None if VIEW or GUI else subprocess.Popen(grab) if GRAB else subprocess.Popen(['cat', str(fifo)], stdout=subprocess.DEVNULL) if HEADLESS else subprocess.Popen(['mpv', '--demuxer=rawvideo', f'--demuxer-rawvideo-w={sc.W}', f'--demuxer-rawvideo-h={sc.H}',
                             '--demuxer-rawvideo-mp-format=rgba', '--profile=low-latency', '--untimed', '--title=brain flies', str(fifo)],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
@@ -56,7 +59,7 @@ def main(*args):
             qs[f, 1] += SPACING * ((f + 1) // 2) * (1 if f % 2 == 0 else -1)
         return qs
 
-    d, m, eng = setup(F, render=0 if VIEW else RENDER, out='/dev/null' if VIEW else fifo, seed=seed, q0=q0)
+    d, m, eng = setup(F, render=0 if VIEW else RENDER, out='/dev/null' if VIEW or GUI else fifo, seed=seed, q0=q0)
     edir = d.parent / f'{d.name}-f{F}'  # the engine's own dir for F > 1 (fly_link.Engine): it reads orbit.bin from there
     gaits = [fl.Gait(m, d, fl.K) for _ in ROLES]
     ix = {k: brain.names.index(k) for k in ('w', 'a', 'd', 'threat')}
