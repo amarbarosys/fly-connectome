@@ -83,7 +83,11 @@ def main(*args):
         loop(brain, eng, gaits, rates_at, 0)
     except (BrokenPipeError, SystemExit):  # the engine ended: the window was closed (its frame pipe broke), else show why
         eng.p.wait()
-        if mpv.poll() is None:
+        try:
+            mpv.wait(timeout=5)  # a closed window: mpv may still be shutting down when the engine's frame write fails
+        except subprocess.TimeoutExpired:
+            pass
+        if mpv.poll() is None and eng.p.returncode != -13:  # -13: SIGPIPE, the frame reader went away
             sys.exit(f'FAIL engine exited {eng.p.returncode}: {eng.stderr()[-1500:]}')
         print('window closed', flush=True)
         return
