@@ -1,5 +1,8 @@
 # Fly connectome project
 
+**Physics engine:** the batched GPU body engine's core now lives in its own repo, Kinestride (`~/Projects/mojo/kinestride`, installed editable in `.venv`). `agent/body_engine/` keeps the app side: brain links, the live viewer, game and world scenes, and their `check.sh` stages.
+
+
 Whole-brain connectome pipeline and embodied neural fly agents for adult
 *Drosophila melanogaster*, built on FlyWire v783 (139,255
 neurons, 10.5M synapses) with MuJoCo biomechanics (NeuroMechFly) and a GPU
