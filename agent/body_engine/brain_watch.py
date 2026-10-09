@@ -6,7 +6,9 @@ neurons -> drive -> gait -> body; its own drives can outvote the script, as in p
 
   gpu-wait run --shared --vram 6 --priority 90 --timeout 3600 -- .venv/bin/python -m agent.body_engine.brain_watch [world [SEED]]
 
-Flies start 5 mm apart on a line; the camera follows fly 0 (the idle one) at WATCH_ZOOM (default 4) and orbits slowly.
+Flies start 5 mm apart on a line; the camera follows fly 0 (the idle one) at WATCH_ZOOM (default 4).
+Controls: the run owns a RuntimeControl (engine_control.py), so /panel's engine tab or `python -m agent.panelctl act ...`
+pause, step, stop it, hold inputs per fly (drive) and orbit the camera.
 A frame every WATCH_RENDER control steps (default 5). Close the mpv window to stop. WATCH_HEADLESS=1: no window (timing).
 """
 import os
@@ -18,6 +20,7 @@ import tomllib
 import numpy as np
 
 from agent.body_engine import fly_link as fl, spectate_check as sc
+from agent.body_engine.engine_control import EngineControl
 from agent.body_engine.play import KEYMAP, OUT, Brain, loop, setup
 
 ROLES = ('idle', 'w', 'a', 'd', 'w+threat')
@@ -56,7 +59,9 @@ def main(*args):
     gaits = [fl.Gait(m, d, fl.K) for _ in ROLES]
     ix = {k: brain.names.index(k) for k in ('w', 'a', 'd', 'threat')}
     every, dur = round(4.0 / (fl.K * fl.DT)), round(km['threat']['dur_s'] / (fl.K * fl.DT))
-    print('brain flies: ' + ', '.join(f'{f} {r}' for f, r in enumerate(ROLES)) + '; close the window to stop', flush=True)
+    control = EngineControl(out, 'brain-watch', brain.names, brain.hz, F, edir / 'orbit.bin', fl.K * fl.DT)
+    control.set_camera(-np.pi / 4, 0.45, ZOOM)
+    print('brain flies: ' + ', '.join(f'{f} {r}' for f, r in enumerate(ROLES)) + f'; control session {control.rc.session_id}; close the window to stop', flush=True)
 
     clock = [time.perf_counter(), 0]
 
@@ -67,16 +72,12 @@ def main(*args):
             t = time.perf_counter()
             print(f'step {i}: {(t - clock[0]) / (i - clock[1]) * 1e3:.2f} ms per control step, {1e3 / RENDER / ((t - clock[0]) / (i - clock[1]) * 1e3):.1f} fps', flush=True)
             clock[:] = t, i
-        if i % 50 == 0:  # slow orbit, zoomed out to keep the group in frame
-            tmp = edir / 'orbit.tmp'
-            np.array([1, -np.pi / 4 + i * 2e-4, 0.45, ZOOM], np.float32).tofile(tmp)
-            os.replace(tmp, edir / 'orbit.bin')
         r = np.zeros((F, len(brain.names)), np.float32)
         for col, key in ((1, 'w'), (2, 'a'), (3, 'd'), (4, 'w')):
             r[col, ix[key]] = brain.hz[ix[key]]
         if i % every < dur:
             r[4, ix['threat']] = brain.hz[ix['threat']]
-        return r
+        return control.serve(i, r)  # panel requests at this boundary; held drives on top; None = stop
 
     try:
         loop(brain, eng, gaits, rates_at, 0)
@@ -87,6 +88,7 @@ def main(*args):
         print('window closed', flush=True)
         return
     finally:
+        control.close()
         brain.brain.close()
         mpv.terminate()
     eng.close()
