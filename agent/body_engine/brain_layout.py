@@ -33,9 +33,13 @@ def groups(c, km):
     out += [(s, f'drive {s[3]}', 'output', np.flatnonzero((c.super == 'descending') & (c.side == side))) for s, side in (('DN-L', 'left'), ('DN-R', 'right'))]
     for key, v in km['keys'].items():
         try:
-            out.append((f'key {key}', ' + '.join(v['targets']), 'input', np.concatenate([resolve(t, c) for t in v['targets']])))
+            ids = np.concatenate([resolve(t, c) for t in v['targets']])
         except SystemExit as e:
             print(f'skip key {key}: {e}')
+            continue
+        if any(np.array_equal(np.sort(ids), np.sort(o[3])) for o in out):
+            continue  # the key fires an output group's own neurons (w, a, d, space): its activity is that group's, not an input
+        out.append((f'key {key}', ' + '.join(v['targets']), 'input', ids))
     out += [(f'loom {s[0].upper()}', f'{"+".join(km["loom"]["targets"])} {s} eye', 'input', np.concatenate([resolve(f'{t}-{s}', c) for t in km['loom']['targets']]))
             for s in ('left', 'right')]
     return out
