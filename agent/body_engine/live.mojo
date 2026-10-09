@@ -37,6 +37,7 @@ import render as ren
 import imkit.window as gw
 from imkit import ui as uim
 from imkit.font import Font
+from imkit.layer import Layer
 from ctl import Ctl
 from brain_panel import BrainPanel
 from max.algorithm import parallelize
@@ -257,15 +258,7 @@ def main() raises:
     var inp = gw.Input(0, 0, 0, 0, 0, 0, 0, 0, SIMD[DType.uint64, 2](0), False)
     var acc = inp.copy()  # input since the last drawn UI frame
     var drag_scene = False  # a drag that began outside every panel moves the camera
-    comptime NG = 1 if not GUI else 0  # GUI buffers are one element when the GUI is off
-    var ucmd_b = ctx.enqueue_create_buffer[DType.uint32](NG + (0 if NG else uim.NCMD * uim.CW))
-    var ubin_b = ctx.enqueue_create_buffer[DType.uint16](NG + (0 if NG else uim.TX * uim.TY * uim.TCAP))
-    var ucnt_b = ctx.enqueue_create_buffer[DType.uint32](NG + (0 if NG else uim.TX * uim.TY))
-    var uatl_b = ctx.enqueue_create_buffer[DType.uint8](NG + (0 if NG else uim.AW * uim.AH))
-    var uimg_b = ctx.enqueue_create_buffer[DType.uint32](NG + (0 if NG else uim.UW * uim.UH))
-    var usrc_b = ctx.enqueue_create_buffer[DType.uint32](NG + (0 if NG else uim.ISRC))  # image sources (Ui.image): the brain view
-    var uhost = ctx.enqueue_create_host_buffer[DType.uint32](NG + (0 if NG else uim.UW * uim.UH))
-    var kui = ctx.compile_function[uim.compose]()
+    var layer = Optional[Layer](Layer(ctx, gui.value())) if GUI else None  # imkit: the UI's GPU side on this context
     var labels = List[String]()
     var bp = Optional[BrainPanel]()  # BRAIN_LAYOUT + FLY_TAP: the selected fly's live brain (brain_panel.mojo)
     comptime if GUI:
@@ -276,7 +269,6 @@ def main() raises:
     var clock = SIMD[DType.float64, 4](Float64(perf_counter_ns()), 0, 0, 0)  # last second: start, steps, presents, speed
     var fps = Float64(0)
     comptime if GUI:
-        ctx.enqueue_copy(uatl_b.create_sub_buffer[DType.uint8](0, len(gui.value().font.atlas)), gui.value().font.atlas.unsafe_ptr())
         var lb = getenv("GUI_LABELS")
         for w in lb.split(","):
             labels.append(String(w))
@@ -425,7 +417,7 @@ def main() raises:
                 _ = u.text(u.x + 8, 50, "t " + uim.fmt(Float64(fr * max(eng.K, 1)) * 1e-4) + " s     " + uim.fmt(clock[3]) + "x real time     "
                            + uim.fmt(fps, 0) + " fps" + ("     paused" if paused else ""), 1, uim.TEXT)
                 if bp:
-                    bp.value().frame(ctx, u, acc, usrc_b, Float64(fr * max(eng.K, 1)) * 1e-4)
+                    bp.value().frame(ctx, u, acc, layer.value().src, Float64(fr * max(eng.K, 1)) * 1e-4)
                 var px0 = Float32(uim.UW - 340)
                 u.panel(px0, 16, Float32(uim.UW - 20), Float32(60 + eng.F * 124), "Flies")
                 var inputs: List[String] = ["w", "a", "d", "space", "threat"]
@@ -452,13 +444,7 @@ def main() raises:
                     u.spark(hist, -1, 1, 304, 22, uim.ACCENT)
                 u.finish()
                 acc = gw.Input(acc.x, acc.y, 0, 0, 0, acc.down, 0, 0, SIMD[DType.uint64, 2](0), False)
-                ctx.enqueue_copy(ucmd_b, u.cmd.unsafe_ptr())
-                ctx.enqueue_copy(ubin_b, u.bins.unsafe_ptr())
-                ctx.enqueue_copy(ucnt_b, u.cnt.unsafe_ptr())
-                ctx.enqueue_function(kui, TileTensor(uimg_b, row_major[uim.UW * uim.UH]()), TileTensor(ucmd_b, row_major[uim.NCMD * uim.CW]()),
-                    TileTensor(ubin_b, row_major[uim.TX * uim.TY * uim.TCAP]()), TileTensor(ucnt_b, row_major[uim.TX * uim.TY]()),
-                    TileTensor(uatl_b, row_major[uim.AW * uim.AH]()), TileTensor(usrc_b, row_major[uim.ISRC]()), grid_dim=(uim.UW * uim.UH + 255) // 256, block_dim=256)
-                ctx.enqueue_copy(uhost, uimg_b)
+                layer.value().render(u)  # uploads what the frame used, composes, copies to pixels; synchronizes
         var send = False
         comptime if BRAIN > 0:
             send = stepped and (packet_every > 0 and fr % packet_every == 0 or fr + 1 == frames)
@@ -541,14 +527,14 @@ def main() raises:
                         return
         if draw:
             comptime if GUI:
-                win.value().present(Int(out_h.unsafe_ptr()), Int(uhost.unsafe_ptr()))
+                win.value().present(Int(out_h.unsafe_ptr()), Int(layer.value().pixels.unsafe_ptr()))
                 if not shot_done and len(script) >= 7 and it >= Int(script[len(script) - 7]) - 60:  # GUI_SHOT=FILE: the window's picture, once,
                     shot_done = True                                                                    # 60 iterations before the last event (a stop ends the run)
                     var shot = getenv("GUI_SHOT")
                     if shot:
                         var ppm = List[UInt8](capacity=uim.UW * uim.UH * 3)
                         for i in range(uim.UW * uim.UH):
-                            var up = uhost[i]
+                            var up = layer.value().pixels[i]
                             var sp = out_h[(i // uim.UW * ren.H // uim.UH) * ren.W + (i % uim.UW) * ren.W // uim.UW]  # nearest scene pixel
                             var ua = Float32(up >> 24) / 255
                             for ch in range(3):
