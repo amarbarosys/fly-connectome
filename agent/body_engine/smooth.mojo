@@ -1517,7 +1517,8 @@ def contacts(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int):
             dist = len - r1 - r2
             if len < 1e-15:  # same centre: the cross product of the z axes
                 normal = cross(col(q1, 2), col(q2, 2))
-                normal = normal / sqrt((normal * normal).reduce_add())
+                var nl = sqrt((normal * normal).reduce_add())
+                normal = normal / nl if nl > 1e-15 else V3(1, 0, 0, 0)  # parallel z axes: mju_normalize3's fallback
             else:
                 normal = dif / len
             pnt = pos1 + normal * (r1 + dist)  # the loop's contact point pnt - dist/2 normal is MuJoCo's pos
@@ -2441,6 +2442,7 @@ def newton(mi: TI, mf: TF, res: TO, f: Int):
             res[(OCQACC + v) * F + f] += alpha * get(res, f, OSRCH + v)
             res[(OMA + v) * F + f] += alpha * get(res, f, OMV + v)
         var changed = False
+        var eqflip = False
         for a in range(NR * Int(get(res, f, OACT))):
             var r = 4 * Int(get(res, f, OACT + 1 + a // NR)) + a % NR
             res[(OJAR + r) * F + f] += alpha * get(res, f, OJV + r)
@@ -2448,7 +2450,10 @@ def newton(mi: TI, mf: TF, res: TO, f: Int):
                 changed = True
         comptime if NEQ > 0:
             for r in range(NEQR):
+                var was = get(res, f, OEQJAR + r) < 0
                 res[(OEQJAR + r) * F + f] += alpha * get(res, f, OEQJV + r)
+                if r >= NEQB and (get(res, f, OEQJAR + r) < 0) != was:  # a tendon limit row entered or left H: lowrank covers contacts only
+                    eqflip = True
         var cheap = True
         comptime if ELL:  # the cone Hessian moves with jar: rebuilt every iteration, no rank-1 shortcut
             changed = True
@@ -2466,7 +2471,7 @@ def newton(mi: TI, mf: TF, res: TO, f: Int):
         var oldcost = cost
         cost = update(mi, mf, res, f)
         comptime if SOLVER != 1:
-            if changed and not cheap:
+            if (changed and not cheap) or eqflip:
                 hessian(mi, mf, res, f)
         comptime if SOLVER == 1:
             gradient_cg(mi, res, f, False)
