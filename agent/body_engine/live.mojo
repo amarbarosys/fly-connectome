@@ -38,6 +38,7 @@ import imkit.window as gw
 from imkit import ui as uim
 from imkit.font import Font
 from ctl import Ctl
+from brain_panel import BrainPanel
 from max.algorithm import parallelize
 from std.ffi import external_call
 from std.os import getenv
@@ -266,6 +267,10 @@ def main() raises:
     var uhost = ctx.enqueue_create_host_buffer[DType.uint32](NG + (0 if NG else uim.UW * uim.UH))
     var kui = ctx.compile_function[uim.compose]()
     var labels = List[String]()
+    var bp = Optional[BrainPanel]()  # BRAIN_LAYOUT + FLY_TAP: the selected fly's live brain (brain_panel.mojo)
+    comptime if GUI:
+        if getenv("BRAIN_LAYOUT") and getenv("FLY_TAP"):
+            bp = Optional(BrainPanel(ctx, getenv("BRAIN_LAYOUT"), getenv("FLY_TAP")))
     var drive = List[Float32](length=eng.F * 128, fill=0)  # DN drive history per fly, 64 x [L, R], ring
     var dhead = 0
     var clock = SIMD[DType.float64, 4](Float64(perf_counter_ns()), 0, 0, 0)  # last second: start, steps, presents, speed
@@ -419,12 +424,18 @@ def main() raises:
                     ctl.send("stop")
                 _ = u.text(u.x + 8, 50, "t " + uim.fmt(Float64(fr * max(eng.K, 1)) * 1e-4) + " s     " + uim.fmt(clock[3]) + "x real time     "
                            + uim.fmt(fps, 0) + " fps" + ("     paused" if paused else ""), 1, uim.TEXT)
+                if bp:
+                    bp.value().frame(ctx, u, acc, usrc_b, Float64(fr * max(eng.K, 1)) * 1e-4)
                 var px0 = Float32(uim.UW - 340)
                 u.panel(px0, 16, Float32(uim.UW - 20), Float32(60 + eng.F * 124), "Flies")
                 var inputs: List[String] = ["w", "a", "d", "space", "threat"]
                 for f in range(eng.F):
                     u.x, u.y = px0 + 16, Float32(56 + f * 124)
-                    _ = u.text(u.x, u.y, "Fly " + String(f) + ("   " + labels[f] if f < len(labels) and labels[f] else ""), 1, uim.TEXT)
+                    var picked = u.clickable(200 + f, u.x, u.y, u.x + 200, u.y + 20)[1]  # the title selects the fly for the Brain panel
+                    if picked and bp:
+                        bp.value().select(f)
+                    _ = u.text(u.x, u.y, "Fly " + String(f) + ("   " + labels[f] if f < len(labels) and labels[f] else ""), 1,
+                               uim.ACCENT if bp and bp.value().sel == f else uim.TEXT)
                     u.y += 24
                     for k in range(5):
                         var on = ctl.held(f, inputs[k])

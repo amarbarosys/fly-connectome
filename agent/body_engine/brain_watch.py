@@ -10,6 +10,8 @@ Flies start 5 mm apart on a line; the camera follows fly 0 (the idle one) at WAT
 Controls: the run owns a RuntimeControl (engine_control.py), so /panel's engine tab or `python -m agent.panelctl act ...`
 pause, step, stop it, hold inputs per fly (drive) and orbit the camera.
 A frame every WATCH_RENDER control steps (default 5). Close the mpv window to stop. WATCH_HEADLESS=1: no window (timing).
+WATCH_VIEW=gui: Kinestride's window with imkit panels (run controls, fly cards, and the Brain panel: the selected fly's
+brain live from the worker's FLY_TAP, the DN groups it fires and what they do; click a fly card's title to pick the fly).
 WATCH_VIEW=mujoco: MuJoCo's interactive viewer (mouse camera) and a clickable control window instead of mpv (engine_view.py).
 """
 import os
@@ -35,6 +37,13 @@ GUI = os.environ.get('WATCH_VIEW') == 'gui'  # Kinestride's own window (live.moj
 if GUI:
     os.environ['PLAY_GUI'] = '1'
     os.environ['GUI_LABELS'] = ','.join(ROLES)
+    from agent.body_engine import brain_layout
+    if not (brain_layout.OUT / 'groups.txt').is_file():
+        brain_layout.main()  # the brain view's layout, once (2 s on the CPU)
+    os.environ['BRAIN_LAYOUT'] = str(brain_layout.OUT) + '/'
+    os.environ['FLY_TAP'] = str((fl.OUT.parent / 'brain-watch' / 'brain.tap').resolve())  # the worker writes, the Brain panel reads
+    for f in ('brain.tap', 'brain.tap.sel'):
+        (fl.OUT.parent / 'brain-watch' / f).unlink(missing_ok=True)
 
 
 def main(*args):

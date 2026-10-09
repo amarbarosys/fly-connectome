@@ -159,7 +159,7 @@ class Eyes:
 
 def engine_flags(world):
     """The engine build flags of a play run (gui_run builds the same binary on the CPU before its GPU job)."""
-    flags = ['-DGAME=1', '-DHUD=1', '-DFOLLOW=1', '-DORBIT=1'] + (['-DCPU=1'] if CPU else []) + (['-DPROFILE=1'] if os.environ.get('PLAY_PROFILE') == '1' else []) + (['-DGUI=1'] if os.environ.get('PLAY_GUI') == '1' else [])  # Kinestride's window (live.mojo GUI)
+    flags = ['-DGAME=1', '-DHUD=1', '-DFOLLOW=1', '-DORBIT=1'] + (['-DCPU=1'] if CPU else []) + (['-DPROFILE=1'] if os.environ.get('PLAY_PROFILE') == '1' else []) + (['-DGUI=1', '-DUI_IMG=131072'] if os.environ.get('PLAY_GUI') == '1' else [])  # Kinestride's window (live.mojo GUI)
     return flags + (['-DWORLD=1', '-DNSITE=2', '-DSOIL=1'] if world else [])
 
 
