@@ -258,6 +258,9 @@ def main() raises:
     var inp = gw.Input(0, 0, 0, 0, 0, 0, 0, 0, SIMD[DType.uint64, 2](0), False)
     var acc = inp.copy()  # input since the last drawn UI frame
     var drag_scene = False  # a drag that began outside every panel moves the camera
+    var kfly = 0  # the fly the keyboard drives (highlighted title; the Brain panel shows it)
+    var pick_next = -1  # a fly title clicked last frame
+    var kheld = List[Bool](length=5, fill=False)  # keyboard inputs on for kfly: w a d space threat
     var layer = Optional[Layer](Layer(ctx, gui.value())) if GUI else None  # imkit: the UI's GPU side on this context
     var labels = List[String]()
     var bp = Optional[BrainPanel]()  # BRAIN_LAYOUT + FLY_TAP: the selected fly's live brain (brain_panel.mojo)
@@ -407,6 +410,30 @@ def main() raises:
                     clock = SIMD[DType.float64, 4](now, Float64(fr), 0, clock[3])
                 u.begin(acc)
                 var paused = ctl.flag("paused")
+                var inputs: List[String] = ["w", "a", "d", "space", "threat"]
+                var keys: List[Int] = [26, 4, 7, 44, 23]  # SDL scancodes of inputs: w a d space t; 1-9 pick a fly, p pause, . step 10
+                var pick = pick_next if pick_next >= 0 else kfly
+                pick_next = -1
+                for d in range(min(eng.F, 9)):
+                    if acc.key(30 + d):
+                        pick = d
+                if pick != kfly:
+                    for k in range(5):  # release what the old fly held from the keyboard
+                        if kheld[k]:
+                            ctl.send("drive", '{"fly": ' + String(kfly) + ', "input": "' + inputs[k] + '", "on": false}')
+                            kheld[k] = False
+                    kfly = pick
+                    if bp:
+                        bp.value().select(kfly)
+                if acc.key(19):
+                    ctl.send("resume" if paused else "pause")
+                if acc.key(55) and paused:
+                    ctl.send("step", steps=10)
+                for k in range(5):  # a held key is that input on for kfly; its release turns it off
+                    var want = win.value().key_down(keys[k])
+                    if want != kheld[k]:
+                        ctl.send("drive", '{"fly": ' + String(kfly) + ', "input": "' + inputs[k] + '", "on": ' + ("true" if want else "false") + "}")
+                        kheld[k] = want
                 u.panel(20, 16, 640, 92, "Run")
                 if u.icon(1, 0 if paused else 1, not paused):
                     ctl.send("resume" if paused else "pause")
@@ -419,15 +446,13 @@ def main() raises:
                 if bp:
                     bp.value().frame(ctx, u, acc, layer.value().src, Float64(fr * max(eng.K, 1)) * 1e-4)
                 var px0 = Float32(uim.UW - 340)
-                u.panel(px0, 16, Float32(uim.UW - 20), Float32(60 + eng.F * 124), "Flies")
-                var inputs: List[String] = ["w", "a", "d", "space", "threat"]
+                u.panel(px0, 16, Float32(uim.UW - 20), Float32(60 + eng.F * 124), "Flies   (keys: w a d space t, 1-5, p, .)")
                 for f in range(eng.F):
                     u.x, u.y = px0 + 16, Float32(56 + f * 124)
-                    var picked = u.clickable(200 + f, u.x, u.y, u.x + 200, u.y + 20)[1]  # the title selects the fly for the Brain panel
-                    if picked and bp:
-                        bp.value().select(f)
+                    if u.clickable(200 + f, u.x, u.y, u.x + 200, u.y + 20)[1]:  # the title picks the fly (keyboard, Brain panel)
+                        pick_next = f
                     _ = u.text(u.x, u.y, "Fly " + String(f) + ("   " + labels[f] if f < len(labels) and labels[f] else ""), 1,
-                               uim.ACCENT if bp and bp.value().sel == f else uim.TEXT)
+                               uim.ACCENT if kfly == f else uim.TEXT)
                     u.y += 24
                     for k in range(5):
                         var on = ctl.held(f, inputs[k])
