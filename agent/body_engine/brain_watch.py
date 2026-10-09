@@ -83,7 +83,7 @@ def main(*args):
     except (BrokenPipeError, SystemExit):  # the engine ended: the window was closed (its frame pipe broke), else show why
         eng.p.wait()
         if mpv.poll() is None:
-            sys.exit(f'FAIL engine exited {eng.p.returncode}: {eng.p.stderr.read().decode()[-1500:]}')
+            sys.exit(f'FAIL engine exited {eng.p.returncode}: {eng.stderr()[-1500:]}')
         print('window closed', flush=True)
         return
     finally:

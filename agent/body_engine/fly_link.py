@@ -130,8 +130,9 @@ class Engine:
             if q0 is not None:  # (F, nq) start poses, one per animal (F > 1 only: its own dir)
                 np.asarray(q0, np.float32).T.tofile(d / 'qpos.bin')
         b = sc.build(d, 'fly', list(flags), k, brain=1, flies=F)
+        self.err = open(d / f'{tag}.stderr', 'w+b')  # a file, not a pipe: the engine writes a line per 100 steps, a full 64 KB pipe would block it
         self.p = subprocess.Popen(['bash', '-c', 'exec "$0" "$@" 4>"$OUT"', str(b), str(d) + '/', str(frames), *sc.CAM, str(render), '1'],
-                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env={**os.environ, 'OUT': str(out)})
+                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.err, env={**os.environ, 'OUT': str(out)})
         self.ng = 4 if '-DGAME=1' in flags else 0
         self.F, self.size = F, 4 * (self.nu + self.nq + self.nv + self.ns + self.ng) * F
         self.tag = tag
@@ -145,16 +146,20 @@ class Engine:
         """qpos: (nq,) for F == 1, else (F, nq)."""
         buf = self.p.stdout.read(self.size)
         if len(buf) != self.size:
-            raise SystemExit(f'FAIL engine {self.tag} ended early: {self.p.stderr.read().decode()[-300:]}')
+            raise SystemExit(f'FAIL engine {self.tag} ended early: {self.stderr()[-300:]}')
         a = np.frombuffer(buf, np.float32)
         q = a[self.nu * self.F:(self.nu + self.nq) * self.F].reshape(self.nq, self.F).T.astype(float)
         self.game = a[len(a) - self.ng * self.F:].reshape(self.ng, self.F).T
         return q[0] if self.F == 1 else q
 
+    def stderr(self):
+        self.err.seek(0)
+        return self.err.read().decode(errors='replace')
+
     def close(self):
         self.p.stdin.close()
-        err = self.p.stderr.read().decode()
         self.p.wait()
+        err = self.stderr()
         m = re.findall(r'COST(?:@\d+)? physics (\S+) neural_control (\S+) render (\S+) copy (\S+) display (\S+)', err)  # last split: a stopped engine prints only COST@n
         return {k: float(v) for k, v in zip(('physics', 'neural_control', 'render', 'copy', 'display'), m[-1])} if m else {}
 
