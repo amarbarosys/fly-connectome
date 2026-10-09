@@ -16,10 +16,30 @@ DATA = ROOT / '.work/mcns'
 RELEASE = 'male CNS v1.0, minconf 0.5, Traced+Anchor, >= 5 synapses'
 
 
-def graph(threshold=5):
+def graph(threshold=5, sym=False):
+    """sym: the left visual path completed by agent/mcns_sym.py (.work/mcns/graph-sym-t5.npz), same edges, left weights raised."""
     a = pd.read_feather(DATA / 'body-annotations-male-cns-v1.0-minconf-0.5.feather',
                         columns=['bodyId', 'status', 'class', 'superclass', 'type'])
     a = a[a['status'].isin(['Traced', 'Anchor'])].reset_index(drop=True)
+    pre, post, w = edges(a, threshold, sym)
+    names = a['class'].fillna(a['superclass']).fillna('unannotated').to_numpy(object)
+    kc = np.flatnonzero(a['class'].to_numpy() == 'Kenyon_Cell').tolist()
+    orn = {}
+    types = a['type'].fillna('').to_numpy()
+    for i in np.flatnonzero((a['class'].to_numpy() == 'olfactory') & pd.Series(types).str.startswith('ORN_').to_numpy()):
+        orn.setdefault(types[i][4:], []).append(int(i))
+    return pre, post, w, names, (len(a), kc, orn)
+
+
+def edges(a, threshold=5, sym=False):
+    """(pre, post, signed w) int64 in annotation order, cached as int32 .work/mcns/graph-t{threshold}.npz: reading the 1 GB
+    weights feather costs 5.23 s and 8.53 GB peak RSS per call."""
+    path = DATA / (f'graph-sym-t{threshold}.npz' if sym else f'graph-t{threshold}.npz')
+    if path.exists():
+        z = np.load(path)
+        return z['pre'].astype(np.int64), z['post'].astype(np.int64), z['w'].astype(np.int64)
+    if sym:
+        raise FileNotFoundError(f'{path}: run python -m agent.mcns_sym first')
     bodies = a['bodyId'].to_numpy(np.int64)
     nt = pd.read_feather(DATA / 'body-neurotransmitters-male-cns-v1.0.feather', columns=['body', 'consensus_nt'])
     sign = pd.Series(np.where(nt['consensus_nt'].isin(['gaba', 'glutamate']), -1, 1), index=nt['body'])
@@ -32,13 +52,8 @@ def graph(threshold=5):
     keep &= e['body_pre'].to_numpy() != e['body_post'].to_numpy()
     pre, post = order[pre_i[keep]], order[post_i[keep]]
     w = e['weight'].to_numpy()[keep] * sign.reindex(bodies[pre]).fillna(1).to_numpy()
-    names = a['class'].fillna(a['superclass']).fillna('unannotated').to_numpy(object)
-    kc = np.flatnonzero(a['class'].to_numpy() == 'Kenyon_Cell').tolist()
-    orn = {}
-    types = a['type'].fillna('').to_numpy()
-    for i in np.flatnonzero((a['class'].to_numpy() == 'olfactory') & pd.Series(types).str.startswith('ORN_').to_numpy()):
-        orn.setdefault(types[i][4:], []).append(int(i))
-    return pre.astype(np.int64), post.astype(np.int64), w.astype(np.int64), names, (len(bodies), kc, orn)
+    np.savez(path, pre=pre.astype(np.int32), post=post.astype(np.int32), w=w.astype(np.int32))
+    return pre.astype(np.int64), post.astype(np.int64), w.astype(np.int64)
 
 
 def descending():
