@@ -34,7 +34,9 @@ HEADLESS = os.environ.get('WATCH_HEADLESS') == '1'  # frames to /dev/null, no wi
 GRAB = int(os.environ.get('WATCH_GRAB', 0))  # > 0: no window, keep frame GRAB as OUT/grab.rgba, then stop
 VIEW = os.environ.get('WATCH_VIEW') == 'mujoco'  # the fly project's GUI: MuJoCo's viewer + a control window (engine_view.py), no Kinestride frames
 GUI = os.environ.get('WATCH_VIEW') == 'gui'  # Kinestride's own window (live.mojo -DGUI=1): frames and mouse in the engine process
+GUI_WH = (1280, 720)  # the GUI renders the scene at the window's UI size, pixel for pixel (640 x 360 was stretched 2x)
 if GUI:
+    sc.W, sc.H = GUI_WH
     os.environ['PLAY_GUI'] = '1'
     os.environ['GUI_LABELS'] = ','.join(ROLES)
     from agent.body_engine import brain_layout

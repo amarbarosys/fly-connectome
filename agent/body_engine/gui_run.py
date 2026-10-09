@@ -24,7 +24,8 @@ F = 5  # brain_watch.ROLES
 def prebuild(seed):
     """The binary brain_watch's engine will ask for (play.engine_flags, fly_link.Engine's build), built now on the CPU."""
     os.environ['PLAY_GUI'] = '1'
-    from agent.body_engine import fly_link as fl, play, spectate_check as sc
+    from agent.body_engine import brain_watch as bw, fly_link as fl, play, spectate_check as sc
+    sc.W, sc.H = bw.GUI_WH
     d = play.OUT / f'fly-world{seed}-f{F}'
     if not (d / 'sizes.txt').is_file():
         print(f'gui_run: {d} not exported yet; the first run builds inside the GPU job')
