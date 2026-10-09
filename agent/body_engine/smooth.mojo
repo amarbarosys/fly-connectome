@@ -3852,6 +3852,12 @@ def main_cpu(dir: String) raises:
 
 def main() raises:
     var dir = String(argv()[1])
+    comptime if get_defined_int["LAYOUT", 0]() == 1:  # byte audit: float32 rows per animal of each region of the o buffer, then the inputs
+        print("rows per animal NROW", NROW, "=", NROW * 4, "B; NI", NI, "NFL", NFL, "(shared); NQ", NQ, "NV", NV, "NUC", NUC)
+        print("region outputs", NOUTX); print("region body_scratch", OVALID - NOUTX); print("region contact_rows", OJ - OVALID)
+        print("region jacobian", OQSM - OJ); print("region solver_vec", OHN - OQSM); print("region hessian", ODIAG - OHN)
+        print("region noslip_act", OPP + 2 - ODIAG if STAGE >= 6 else 0); print("region tail", NROW - NROW1)
+        return
     comptime if CPU:
         main_cpu(dir)
         return
