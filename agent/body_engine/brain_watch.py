@@ -10,6 +10,7 @@ Flies start 5 mm apart on a line; the camera follows fly 0 (the idle one) at WAT
 Controls: the run owns a RuntimeControl (engine_control.py), so /panel's engine tab or `python -m agent.panelctl act ...`
 pause, step, stop it, hold inputs per fly (drive) and orbit the camera.
 A frame every WATCH_RENDER control steps (default 5). Close the mpv window to stop. WATCH_HEADLESS=1: no window (timing).
+WATCH_VIEW=mujoco: MuJoCo's interactive viewer (mouse camera) and a clickable control window instead of mpv (engine_view.py).
 """
 import os
 import subprocess
@@ -29,6 +30,7 @@ ZOOM = float(os.environ.get('WATCH_ZOOM', 4))
 RENDER = int(os.environ.get('WATCH_RENDER', 5))  # control steps (1 ms each) per frame: play's 24 gave ~8 fps at 5 flies
 HEADLESS = os.environ.get('WATCH_HEADLESS') == '1'  # frames to /dev/null, no window: timing runs (the engine prints ms per control step)
 GRAB = int(os.environ.get('WATCH_GRAB', 0))  # > 0: no window, keep frame GRAB as OUT/grab.rgba, then stop
+VIEW = os.environ.get('WATCH_VIEW') == 'mujoco'  # the fly project's GUI: MuJoCo's viewer + a control window (engine_view.py), no Kinestride frames
 
 
 def main(*args):
@@ -43,7 +45,7 @@ def main(*args):
     os.mkfifo(fifo)
     frame = sc.W * sc.H * 4
     grab = ['dd', f'if={fifo}', f'of={out / "grab.rgba"}', f'bs={frame}', 'count=1', f'skip={GRAB}', 'iflag=fullblock', 'status=none']
-    mpv = subprocess.Popen(grab) if GRAB else subprocess.Popen(['cat', str(fifo)], stdout=subprocess.DEVNULL) if HEADLESS else subprocess.Popen(['mpv', '--demuxer=rawvideo', f'--demuxer-rawvideo-w={sc.W}', f'--demuxer-rawvideo-h={sc.H}',
+    mpv = None if VIEW else subprocess.Popen(grab) if GRAB else subprocess.Popen(['cat', str(fifo)], stdout=subprocess.DEVNULL) if HEADLESS else subprocess.Popen(['mpv', '--demuxer=rawvideo', f'--demuxer-rawvideo-w={sc.W}', f'--demuxer-rawvideo-h={sc.H}',
                             '--demuxer-rawvideo-mp-format=rgba', '--profile=low-latency', '--untimed', '--title=brain flies', str(fifo)],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
@@ -54,20 +56,28 @@ def main(*args):
             qs[f, 1] += SPACING * ((f + 1) // 2) * (1 if f % 2 == 0 else -1)
         return qs
 
-    d, m, eng = setup(F, render=RENDER, out=fifo, seed=seed, q0=q0)
+    d, m, eng = setup(F, render=0 if VIEW else RENDER, out='/dev/null' if VIEW else fifo, seed=seed, q0=q0)
     edir = d.parent / f'{d.name}-f{F}'  # the engine's own dir for F > 1 (fly_link.Engine): it reads orbit.bin from there
     gaits = [fl.Gait(m, d, fl.K) for _ in ROLES]
     ix = {k: brain.names.index(k) for k in ('w', 'a', 'd', 'threat')}
     every, dur = round(4.0 / (fl.K * fl.DT)), round(km['threat']['dur_s'] / (fl.K * fl.DT))
     control = EngineControl(out, 'brain-watch', brain.names, brain.hz, F, edir / 'orbit.bin', fl.K * fl.DT)
     control.set_camera(-np.pi / 4, 0.45, ZOOM)
+    view = None
+    if VIEW:
+        from agent.body_engine import live
+        from agent.body_engine.engine_view import EngineView
+        base = live.terrain(fl.MJCF, live.WORLD[:5] + (seed,) + live.WORLD[6:])[0] if seed is not None else fl.MJCF
+        view = EngineView(base, fl.MJCF, F, m.nq, control, ROLES)
     print('brain flies: ' + ', '.join(f'{f} {r}' for f, r in enumerate(ROLES)) + f'; control session {control.rc.session_id}; close the window to stop', flush=True)
 
     clock = [time.perf_counter(), 0]
 
     def rates_at(i, game):
-        if mpv.poll() is not None:
+        if mpv is not None and mpv.poll() is not None:
             return None
+        if view is not None and i % RENDER == 0 and getattr(eng, 'q', None) is not None and not view.frame(eng.q):
+            return None  # the viewer window was closed
         if i and i % 500 == 0:  # wall ms per 1 ms control step over the last 500 (brain + gait + physics + render)
             t = time.perf_counter()
             print(f'step {i}: {(t - clock[0]) / (i - clock[1]) * 1e3:.2f} ms per control step, {1e3 / RENDER / ((t - clock[0]) / (i - clock[1]) * 1e3):.1f} fps', flush=True)
@@ -84,17 +94,20 @@ def main(*args):
     except (BrokenPipeError, SystemExit):  # the engine ended: the window was closed (its frame pipe broke), else show why
         eng.p.wait()
         try:
-            mpv.wait(timeout=5)  # a closed window: mpv may still be shutting down when the engine's frame write fails
+            mpv and mpv.wait(timeout=5)  # a closed window: mpv may still be shutting down when the engine's frame write fails
         except subprocess.TimeoutExpired:
             pass
-        if mpv.poll() is None and eng.p.returncode != -13:  # -13: SIGPIPE, the frame reader went away
+        if mpv is not None and mpv.poll() is None and eng.p.returncode != -13:  # -13: SIGPIPE, the frame reader went away
             sys.exit(f'FAIL engine exited {eng.p.returncode}: {eng.stderr()[-1500:]}')
         print('window closed', flush=True)
         return
     finally:
         control.close()
         brain.brain.close()
-        mpv.terminate()
+        if view is not None:
+            view.close()
+        if mpv is not None:
+            mpv.terminate()
     eng.close()
 
 

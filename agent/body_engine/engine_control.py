@@ -23,6 +23,7 @@ class EngineControl:
         self.paused, self.stopping, self.left, self.i = False, False, 0, 0
         self.held = {}  # (fly, input index) -> hz
         self.orbit = np.array([1, -np.pi / 4, 0.45, 4], np.float32)  # on, azimuth, elevation, zoom
+        self.idle = lambda: None
 
     def snapshot(self):
         return {'status': 'APPLIED', 'paused': self.paused, 'step': self.i, 'time_s': self.i * self.dt, 'flies': self.flies, 'inputs': self.names,
@@ -37,40 +38,47 @@ class EngineControl:
         self.orbit.tofile(tmp)
         tmp.replace(self.orbit_file)
 
+    def apply(self, cmd, edit=None, steps=1):
+        """One action, from the socket or in process (engine_view's buttons); raises ValueError when refused."""
+        edit = edit or {}
+        if cmd == 'pause':
+            self.paused = True
+        elif cmd == 'resume':
+            self.paused = False
+        elif cmd == 'stop':
+            self.stopping = True
+        elif cmd == 'step':
+            if not self.paused:
+                raise ValueError('pause before stepping')
+            self.left = steps
+        elif cmd == 'drive':
+            f, j = int(edit['fly']), self.names.index(edit['input'])
+            if not 0 <= f < self.flies:
+                raise ValueError(f'fly must be in [0, {self.flies})')
+            hz = (float(self.hz[j]) if edit['on'] else -1.0) if 'on' in edit else float(edit['hz'])
+            if hz < 0:
+                self.held.pop((f, j), None)
+            else:
+                self.held[(f, j)] = hz
+        elif cmd == 'camera':
+            self.set_camera(edit.get('azimuth'), edit.get('elevation'), edit.get('zoom'))
+        elif cmd != 'status':
+            raise ValueError(f'{cmd} is not an engine action')
+
     def handle(self, conn, req):
-        cmd, edit, extra = req['action'], req.get('edit') or {}, {}
+        cmd = req['action']
         if self.stopping and cmd not in ('status', 'stop'):
             return self.rc.reply(conn, dict(self.snapshot(), status='REJECTED', error='runner is stopping'))
         if self.rc.waiting_step and cmd not in ('status', 'stop'):
             return self.rc.reply(conn, dict(self.snapshot(), status='REJECTED', error='step in progress'))
         try:
-            if cmd == 'pause':
-                self.paused = True
-            elif cmd == 'resume':
-                self.paused = False
-            elif cmd == 'stop':
-                self.stopping = True
-            elif cmd == 'step':
-                if not self.paused:
-                    raise ValueError('pause before stepping')
-                self.left, self.rc.waiting_step = req['steps'], (conn, req)
-                return None  # acknowledged when the steps are done
-            elif cmd == 'drive':
-                f, j = int(edit['fly']), self.names.index(edit['input'])
-                if not 0 <= f < self.flies:
-                    raise ValueError(f'fly must be in [0, {self.flies})')
-                hz = (float(self.hz[j]) if edit['on'] else -1.0) if 'on' in edit else float(edit['hz'])
-                if hz < 0:
-                    self.held.pop((f, j), None)
-                else:
-                    self.held[(f, j)] = hz
-            elif cmd == 'camera':
-                self.set_camera(edit.get('azimuth'), edit.get('elevation'), edit.get('zoom'))
-            elif cmd != 'status':
-                raise ValueError(f'{cmd} is not an engine action')
+            self.apply(cmd, req.get('edit'), req.get('steps', 1))
         except (ValueError, KeyError, TypeError) as exc:
             return self.rc.reply(conn, dict(self.snapshot(), status='REJECTED', error=f'{cmd}: {exc}'))
-        self.rc.reply(conn, dict(self.snapshot(), action=cmd, request_id=req['request_id'], **extra))
+        if cmd == 'step':
+            self.rc.waiting_step = (conn, req)  # acknowledged when the steps are done
+            return None
+        self.rc.reply(conn, dict(self.snapshot(), action=cmd, request_id=req['request_id']))
 
     def serve(self, i, rates):
         """rates (flies, inputs) from the script, with held drives on top; None = stop. Blocks while paused."""
@@ -87,6 +95,7 @@ class EngineControl:
                 return None
             if not self.paused or self.left:
                 break
+            self.idle()  # a window in process (engine_view) stays live while paused
             time.sleep(0.03)
         for (f, j), hz in self.held.items():
             rates[f, j] = hz
