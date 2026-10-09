@@ -765,6 +765,10 @@ fi
 if [ "$stage" = contact ]; then  # the gate must fail with the contact spring pushing the wrong way
   ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo 's/- K \* imp \* (dist - imargin)/+ K * imp * (dist - imargin)/' -- \
     $M -m agent.body_engine.model check .work/agent/gpu-body-port/body-v2/body.xml $X/mutant contact 64 || fail=$((fail+1))
+  # direct solref (-stiffness, -damping; about the shipped 0.02/1 at d_width 0.95): K = -solref[0] / d^2, B = -solref[1] / d, no refsafe
+  ENGINE_OPT=solref=-2500:-100 $M -m agent.body_engine.model check .work/agent/gpu-body-port/body-v2/body.xml $X/direct contact 64 || { echo "FAIL contact direct solref"; fail=$((fail+1)); }
+  ENGINE_OPT=solref=-2500:-100 ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo 's/if ref1 > 0 else -ref1/if ref1 > 0 else ref1/' -- \
+    $M -m agent.body_engine.model check .work/agent/gpu-body-port/body-v2/body.xml $X/mutant contact 64 || fail=$((fail+1))
 fi
 if [ "$stage" = actuated ]; then  # the gate must fail with the servo bias (-kp q) dropped
   ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo 's/mf\[af\] \* c + mf\[af + 1\] + mf\[af + 2\] \* length/mf[af] * c + mf[af + 1]/' -- \

@@ -1290,13 +1290,15 @@ def emit_contact(mi: TI, mf: TF, qvel: TV, res: TO, f: Int, p: Int, count: Int, 
                 res[(jadr + 2 * nch) * F + f] = jn + f1 * j2
                 res[(jadr + 3 * nch) * F + f] = jn - f1 * j2
     # getsolparam, getimpedance, makeImpedance, referenceConstraint
-    var ref0 = max(mf[pf + 4], 2 * h); var ref1 = mf[pf + 5]
+    var ref0 = mf[pf + 4]; var ref1 = mf[pf + 5]
+    if ref0 > 0:  # refsafe on the standard format only; non-positive = direct (stiffness, damping)
+        ref0 = max(ref0, 2 * h)
     var s0 = min(Float32(0.9999), max(Float32(1e-4), mf[pf + 6])); var s1 = min(Float32(0.9999), max(Float32(1e-4), mf[pf + 7]))
     var s2 = max(Float32(0), mf[pf + 8]); var s3 = min(Float32(0.9999), max(Float32(1e-4), mf[pf + 9])); var s4 = max(Float32(1), mf[pf + 10])
     var imp = impedance(s0, s1, s2, s3, s4, dist - imargin)
     var tran = mf[pf + 11]
-    var K = 1 / max(Float32(1e-15), s1 * s1 * ref0 * ref0 * ref1 * ref1)
-    var B = 2 / max(Float32(1e-15), s1 * ref0)
+    var K = 1 / max(Float32(1e-15), s1 * s1 * ref0 * ref0 * ref1 * ref1) if ref0 > 0 else -ref0 / max(Float32(1e-15), s1 * s1)  # direct: -solref[0] / d_width^2
+    var B = 2 / max(Float32(1e-15), s1 * ref0) if ref1 > 0 else -ref1 / max(Float32(1e-15), s1)  # direct: -solref[1] / d_width
     comptime if ELL:  # mj_diagApprox: tran on all rows; R1 = R0 / impratio, R2 R1 f0^2 / f1^2; friction rows have K = 0
         var R0 = max(Float32(1e-15), (1 - imp) * tran / imp)
         var R1 = R0 / max(Float32(1e-15), impratio)

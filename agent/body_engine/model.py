@@ -268,6 +268,8 @@ def override(m):
             m.opt.cone = int(val)
         elif key == 'dt':  # timestep: explicit RK4 damps dofs explicitly, h B / M reaches 5.9 on the fly at h 1e-4 (stable below 2.8)
             m.opt.timestep = float(val)
+        elif key == 'solref':  # every pair's solref, 'a:b'; negative = MuJoCo's direct format (-stiffness, -damping)
+            m.pair_solref[:] = [float(x) for x in val.split(':')]
         elif key == 'kp':  # servo stiffness scale: explicit RK4 at the shipped kp (h 1e-4, light limbs) is unstable in MuJoCo itself
             joint = (m.actuator_trntype == mujoco.mjtTrn.mjTRN_JOINT) & (m.actuator_biastype == mujoco.mjtBias.mjBIAS_AFFINE)
             m.actuator_gainprm[joint, 0] *= float(val)
@@ -569,7 +571,8 @@ def feet(m, regex, couple=(), hrows=None, convex=False, hfexact=False):
             nslot, nje = nslot + ns, nje + 4 * ns * len(chain)
         chains += chain
         signs += [(c in a2) - (c in a1) for c in chain]
-        fl += [m.pair_margin[i], m.pair_gap[i], *m.pair_friction[i][:2], *m.pair_solref[i], *m.pair_solimp[i],
+        sr = m.pair_solref[i] if (m.pair_solref[i][0] > 0) == (m.pair_solref[i][1] > 0) else (0.02, 1.0)  # mixed format: MuJoCo's default (getsolparam)
+        fl += [m.pair_margin[i], m.pair_gap[i], *m.pair_friction[i][:2], *sr, *m.pair_solimp[i],
                m.body_invweight0[m.geom_bodyid[g1], 0] + m.body_invweight0[b, 0], m.geom_rbound[g2], m.geom_rbound[g1]]
     hnnz = [len(r) for r in hrow]
     hadr = list(np.cumsum([0] + hnnz[:-1]))
