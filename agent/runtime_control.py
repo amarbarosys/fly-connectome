@@ -10,7 +10,8 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 REGISTRY = ROOT / '.work/neural-flies/control-sessions'
-ACTIONS = ('status', 'pause', 'resume', 'reset_body_brain', 'step', 'stop', 'checkpoint', 'world_edit')
+ACTIONS = ('status', 'pause', 'resume', 'reset_body_brain', 'step', 'stop', 'checkpoint', 'world_edit', 'drive', 'camera')
+EDITS = ('world_edit', 'drive', 'camera')  # actions that carry an `edit` object (drive, camera: engine runners, agent/body_engine/engine_control.py)
 
 
 def peer_is_owner(sock):
@@ -57,7 +58,7 @@ class RuntimeControl:
                 steps = request.get('steps', 1)
                 if type(steps) is not int or not 1 <= steps <= 100: raise ValueError('steps must be integer in [1,100]')
                 if request['action'] != 'step' and steps != 1: raise ValueError('steps applies only to step')
-                if (request['action'] == 'world_edit') != isinstance(request.get('edit'), dict): raise ValueError('edit object goes with world_edit only')
+                if (request['action'] in EDITS) != isinstance(request.get('edit'), dict): raise ValueError('edit object goes with ' + ', '.join(EDITS) + ' only')
                 requests.append((connection, request))
             except (ValueError, OSError) as exc:
                 self.reply(connection, {'status': 'REJECTED', 'error': str(exc)})

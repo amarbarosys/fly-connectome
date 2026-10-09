@@ -194,6 +194,9 @@ def run(out, backend='gpu', seconds=0., viewer=True, audit=True, profile='diagno
                     if remote.waiting_step and command not in ('status','stop'):
                         remote.reply(connection,dict(snapshot(),status='REJECTED',error='step in progress'))
                         continue
+                    if command in ('drive','camera'):
+                        remote.reply(connection,dict(snapshot(),status='REJECTED',error=f'{command}: engine runners only'))
+                        continue
                     if command=='pause':paused=True
                     elif command=='resume':paused=False
                     elif command=='stop':stopping=True
