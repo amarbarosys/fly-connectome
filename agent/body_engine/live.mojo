@@ -117,16 +117,18 @@ def main() raises:
     # renderer: render.main's buffers, the pose tensor over the engine's output
     var pi_h = ren.load(dir + "rmi.bin", 20 * ren.NPART)
     var pf_h = ren.load(dir + "rmf.bin", 4 * ren.PFS * ren.NPART)
-    var rv_h = ren.load(dir + "rv.bin", 6 * ren.NRV)
+    var rv_h = ren.load(dir + "rv.bin", 12 * ren.NRV)
     var rt_h = ren.load(dir + "rt.bin", 2 * ren.NRT)
     var rp_h = ren.load(dir + "rp.bin", ren.NTRI)
     var pi_b = ctx.enqueue_create_buffer[DType.int32](5 * ren.NPART)
     var pf_b = ctx.enqueue_create_buffer[DType.float32](ren.PFS * ren.NPART)
-    var rv_b = ctx.enqueue_create_buffer[DType.int16](3 * ren.NRV)
+    var rv_b = ctx.enqueue_create_buffer[DType.int16](6 * ren.NRV)
     var rt_b = ctx.enqueue_create_buffer[DType.uint16](ren.NRT)
     var rp_b = ctx.enqueue_create_buffer[DType.uint8](ren.NTRI)
     var cam_b = ctx.enqueue_create_buffer[DType.float32](ren.NCAM)
     var vis_b = ctx.enqueue_create_buffer[DType.uint64](ren.W * ren.H)
+    var sm_b = ctx.enqueue_create_buffer[DType.uint64](ren.NSM)  # shadow map (render.mojo SHADOW=2)
+    var scam_b = ctx.enqueue_create_buffer[DType.float32](ren.NCAM)
     var img_b = ctx.enqueue_create_buffer[DType.uint32](ren.W * ren.H)
     var out_h = ctx.enqueue_create_host_buffer[DType.uint32](ren.W * ren.H)
     var camh = List[Float32](length=ren.NCAM, fill=0)
@@ -148,7 +150,11 @@ def main() raises:
     var kc = ctx.compile_function[ren.clear]()
     var kr = ctx.compile_function[ren.raster]()
     var ks = ctx.compile_function[ren.shade]()
+    var ksc = ctx.compile_function[ren.suncam]()
+    var kcs = ctx.compile_function[ren.clear_sm]()
     var vis = TileTensor(vis_b, ren.LVIS)
+    var sm = TileTensor(sm_b, ren.LVIS)
+    var tscam = TileTensor(scam_b, ren.LCAM)
     var img = TileTensor(img_b, ren.LVIS)
     var tpi = TileTensor(pi_b, ren.LPI)
     var tpf = TileTensor(pf_b, ren.LPF)
@@ -301,9 +307,7 @@ def main() raises:
                     except:
                         pass
                 ctx.enqueue_function(kf, tcam, tpose, troot, grid_dim=1, block_dim=1)
-            ctx.enqueue_function(kc, vis, grid_dim=(ren.W * ren.H + 255) // 256, block_dim=256)
-            ctx.enqueue_function(kr, vis, tpi, tpf, trv, trt, trp, tpose, tcam, grid_dim=(ren.F * ren.NTRI + 255) // 256, block_dim=256)
-            ctx.enqueue_function(ks, vis, img, tpi, tpf, trv, trt, trp, tpose, tcam, grid_dim=(ren.W * ren.H + 255) // 256, block_dim=256)
+            ren.frame(ctx, kc, kr, ks, ksc, kcs, vis, sm, img, tpi, tpf, trv, trt, trp, tpose, tcam, tscam)
             comptime if HUD > 0:
                 ctx.enqueue_function(kh, img, tgs, grid_dim=(spec.PANEL_W * spec.PANEL_H + 63) // 64, block_dim=64)
                 comptime if WORLD > 0:
