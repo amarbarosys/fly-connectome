@@ -27,6 +27,7 @@ from agent.eye_render import Eyes
 
 EYE_EVERY = 10  # control steps per eye frame: 100 Hz
 START = {'L': (-9.0, -4.0, 120), 'R': (-7.0, -7.0, 260)}
+OPEN = (-7.0, 0.0, 0)  # eye reference pose: open ground (wall-left 100.6/6.4 Hz L/R eye, wall-right 8.3/62.7, another open pose 6.6/4.9)
 ARMS = (('L', 'see'), ('L', 'blind'), ('R', 'see'), ('R', 'blind'), ('L', 'mirror'))
 
 
@@ -42,7 +43,7 @@ def main(repeats=1, seed=7):
 
     def start(w):
         q = q0.copy()
-        x, y, yaw = START[w]
+        x, y, yaw = START[w] if w in START else w
         q[0], q[1] = x, y
         mujoco.mju_mulQuat(q[3:7], np.array([np.cos(np.radians(yaw) / 2), 0, 0, np.sin(np.radians(yaw) / 2)]), q0[3:7].copy())  # yaw on top of the stance (pitched thorax)
         return q
@@ -53,6 +54,8 @@ def main(repeats=1, seed=7):
     ids, az, el = fv.receptors(fv.LAMINA)
     eyes = Eyes(m, ids, az, el)
     eyes_m = Eyes(m, ids, az, el, mirror=True, renderer=eyes.r)
+    for e in (eyes, eyes_m):
+        e.set_base(start(OPEN))  # darkening against the open ground, not a uniform BG (eye_render.set_base)
     legs = ls.cells()
     v = np.load('.work/agent/mcns/vision_readout.npz')
     b, f, nl, _ = brain(cols=len(cols), seed=seed)

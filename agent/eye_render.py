@@ -36,6 +36,14 @@ class Eyes:
             row = np.clip(((1 - y) / 2 * H).astype(int), 0, H - 1)
             self.pix[ok], best[ok] = k * H * W + row[ok] * W + col[ok], z[ok]
         self.seen = self.pix >= 0
+        self.base = None  # per-cell reference luminance (set_base); None = fly_vision's uniform BG
+
+    def set_base(self, q):
+        """reference = what each cell sees at pose q (open ground, no obstacle in view): darkening is then measured against
+        it, so the ground, darker than BG under both eyes, cancels and only what is not ground drives the cells. Without
+        it the ground held the lower field at 120-140 Hz in both eyes and the left-eye gain turned that into a left bias
+        (full_fly pilot seed 101: both wall sides turned the fly left)."""
+        self.base = np.maximum(self.luminance(q), 1e-3)
 
     def luminance(self, q):
         """per cell luminance in [0, 1] at body pose q (BG where no camera sees the direction)."""
@@ -51,5 +59,6 @@ class Eyes:
 
     def rates(self, q):
         """per cell Hz: darkening below the background, as fly_vision.drive (BINS levels, left-eye gain)."""
-        dark = np.clip((fv.BG - self.luminance(q)) / fv.BG, 0, 1)
+        b = fv.BG if self.base is None else self.base
+        dark = np.clip((b - self.luminance(q)) / b, 0, 1)
         return fv.RMAX * np.round(dark * fv.BINS) / fv.BINS * self.gain
