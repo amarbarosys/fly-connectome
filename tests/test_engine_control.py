@@ -17,14 +17,17 @@ NAMES = ['w', 'a', 'd', 'threat']
 
 @pytest.fixture
 def runner(tmp_path, monkeypatch):
-    """A fake engine runner: serve() once per control step on a thread, as play.loop's rates_at does."""
+    """A fake engine runner: serve() once per control step on a thread, as play.loop's rates_at does; serving waits while
+    `serving` is cleared (play's HOLD: Python busy, nobody accepts)."""
     monkeypatch.setattr(rcm, 'REGISTRY', tmp_path / 'reg')
     ec = EngineControl(tmp_path, 'test', NAMES, [100.0, 80.0, 80.0, 200.0], 3, tmp_path / 'orbit.bin', 1e-3)
     seen, done = [], threading.Event()
+    ec.serving = threading.Event()
+    ec.serving.set()
 
     def run():
         i = 0
-        while (r := ec.serve(i, np.zeros((3, len(NAMES)), np.float32))) is not None:
+        while ec.serving.wait() and (r := ec.serve(i, np.zeros((3, len(NAMES)), np.float32))) is not None:
             seen.append(r.copy())
             i += 1
             time.sleep(0.002)
@@ -33,6 +36,14 @@ def runner(tmp_path, monkeypatch):
     threading.Thread(target=run, daemon=True).start()
     yield ec, seen, done
     ec.close()
+
+
+def build_ctl(tmp_path):
+    import subprocess
+    exe = tmp_path / 'ctl'
+    subprocess.run([str(Path.home() / 'iTools/bin/mojo-cached'), 'build', '-I', str(Path.home() / 'Projects/mojo/mojo-imkit/src'),
+                    str(ROOT / 'agent/body_engine/ctl.mojo'), '-o', str(exe)], check=True, capture_output=True)
+    return exe
 
 
 def ask(ec, action, **kw):
@@ -86,13 +97,41 @@ def test_mojo_client_drives_the_runner(runner, tmp_path):
     """agent/body_engine/ctl.mojo (the engine GUI's client) through the same socket: pause, a drive toggle, step 3."""
     import subprocess
     ec, seen, done = runner
-    exe = tmp_path / 'ctl'
-    subprocess.run([str(Path.home() / 'iTools/bin/mojo-cached'), 'build', '-I', str(Path.home() / 'Projects/mojo/mojo-imkit/src'),
-                    str(ROOT / 'agent/body_engine/ctl.mojo'), '-o', str(exe)], check=True, capture_output=True)
+    exe = build_ctl(tmp_path)
     ask = lambda *a: subprocess.run([str(exe), str(tmp_path) + '/', *a], capture_output=True, text=True, timeout=60).stdout
     assert '"paused": true' in ask('pause')
     assert '{"fly": 1, "input": "w", "hz": 100.0}' in ask('drive', '{"fly": 1, "input": "w", "on": true}')
     n = len(seen)
     assert '"status": "APPLIED"' in ask('step') and len(seen) == n + 1
     ask('stop')
+    assert done.wait(2)
+
+
+def test_mojo_client_keeps_an_action_while_the_runner_is_busy(runner, tmp_path):
+    """The GUI's click must not be lost when the listener's backlog is full (play's HOLD: nobody accepts): ctl.mojo
+    keeps the action and sends it once the runner serves again (a status may be dropped, an action never)."""
+    import socket
+    import subprocess
+    ec, seen, done = runner
+    exe = build_ctl(tmp_path)
+    ec.serving.clear()
+    time.sleep(0.05)
+    fill = []
+    for _ in range(64):  # fill the listen backlog until connect would block
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+        s.setblocking(False)
+        try:
+            s.connect(ec.rc.address)
+        except BlockingIOError:
+            s.close()
+            break
+        fill.append(s)
+    p = subprocess.Popen([str(exe), str(tmp_path) + '/', 'pause'], stdout=subprocess.PIPE, text=True)
+    time.sleep(0.5)
+    for s in fill:  # the stale connections go away, then the runner serves again
+        s.close()
+    ec.serving.set()
+    out = p.communicate(timeout=30)[0]
+    assert '"paused": true' in out, f'action lost while the runner was busy: {out!r}'
+    ask(ec, 'stop')
     assert done.wait(2)

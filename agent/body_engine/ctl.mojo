@@ -1,7 +1,9 @@
 """RuntimeControl client in the engine (agent/runtime_control.py's abstract unix socket, the panel's own path), so the
 GUI's buttons act exactly as /panel does: the same actions, acknowledged by EngineControl at a control-step boundary.
 Never blocks the frame: send() connects and writes, pump() collects whatever replies have arrived (a step is
-acknowledged only after its steps ran, which needs this engine to keep stepping meanwhile). The session id comes
+acknowledged only after its steps ran, which needs this engine to keep stepping meanwhile). A listener that accepts
+nobody (play's HOLD fills its backlog) refuses the connect: an action then waits in the outbox and pump() retries it,
+in order, every frame; a status is simply skipped (the next frame asks again). The session id comes
 from DIR/control.sid (brain_watch writes it), read lazily.
 
     ctl DIR/ ACTION [EDIT_JSON]     one request and its reply on stdout (tests/test_engine_control.py drives it)
@@ -16,6 +18,7 @@ struct Ctl(Movable):
     var dir: String
     var sid: String
     var pending: List[Int]
+    var outbox: List[String]  # actions not yet accepted by the listener, oldest first
     var seq: Int
     var reply: String  # the newest reply: EngineControl's snapshot
 
@@ -23,19 +26,38 @@ struct Ctl(Movable):
         self.dir = dir.copy()
         self.sid = String()
         self.pending = List[Int]()
+        self.outbox = List[String]()
         self.seq = 0
         self.reply = String()
 
     def send(mut self, action: String, edit: String = "", steps: Int = 1):
-        """Queue one request; never waits: a socket whose listener is busy (backlog full, runner not serving yet) is
-        dropped, a status is not asked while one is pending."""
-        if action == "status" and len(self.pending):
+        """Queue one request; never waits. A status is not asked while one is pending or an action waits."""
+        if action == "status" and (len(self.pending) or len(self.outbox)):
             return
         if not self.sid:
             try:
                 self.sid = String(open(self.dir + "control.sid", "r").read().strip())
             except:
-                return
+                if action == "status":
+                    return
+        self.seq += 1
+        var h = hex(perf_counter_ns() * 1000 + self.seq)
+        var rid = String("0") * (34 - h.byte_length()) + String(h[byte=2:])
+        var req = String('{"request_id": "') + rid + '", "action": "' + action + '", "steps": ' + String(steps) + \
+            (String(', "edit": ') + edit if edit else String()) + "}"
+        if action != "status":
+            self.outbox.append(req^)
+            self.flush()
+        else:
+            _ = self.post(req)
+
+    def post(mut self, req: String) -> Bool:
+        """Connect and write one request (the session id goes in here: it may be read after the request was made)."""
+        if not self.sid:
+            try:
+                self.sid = String(open(self.dir + "control.sid", "r").read().strip())
+            except:
+                return False
         var fd = Int(external_call["socket", Int32](Int32(1), Int32(5 | 0x800), Int32(0)))  # AF_UNIX, SOCK_SEQPACKET | SOCK_NONBLOCK
         var name = String("fly-control-") + self.sid
         var addr = List[UInt8](length=110, fill=0)  # sockaddr_un: family 1, then '\0' + name (abstract)
@@ -44,16 +66,25 @@ struct Ctl(Movable):
             addr[3 + k] = ch
         if fd < 0 or external_call["connect", Int32](Int32(fd), addr.unsafe_ptr(), UInt32(3 + name.byte_length())) != 0:
             _ = external_call["close", Int32](Int32(fd))
-            return
-        self.seq += 1
-        var h = hex(perf_counter_ns() * 1000 + self.seq)
-        var rid = String("0") * (34 - h.byte_length()) + String(h[byte=2:])
-        var req = String('{"session_id": "') + self.sid + '", "request_id": "' + rid + '", "action": "' + action + '", "steps": ' + String(steps) + \
-            (String(', "edit": ') + edit if edit else String()) + "}"
-        _ = external_call["send", Int](Int32(fd), req.unsafe_ptr(), req.byte_length(), Int32(0))
+            return False
+        var full = String('{"session_id": "') + self.sid + '", ' + String(req[byte=1:])
+        _ = external_call["send", Int](Int32(fd), full.unsafe_ptr(), full.byte_length(), Int32(0))
         self.pending.append(fd)
+        return True
+
+    def flush(mut self):
+        """Send waiting actions in order; stop at the first the listener refuses."""
+        var k = 0
+        while k < len(self.outbox) and self.post(self.outbox[k].copy()):
+            k += 1
+        if k:
+            var rest = List[String]()
+            for j in range(k, len(self.outbox)):
+                rest.append(self.outbox[j])
+            self.outbox = rest^
 
     def pump(mut self):
+        self.flush()
         var buf = List[UInt8](length=65536, fill=0)
         var keep = List[Int]()
         for fd in self.pending:
@@ -119,6 +150,6 @@ def main() raises:
     var c = Ctl(String(argv()[1]))
     c.send(String(argv()[2]), String(argv()[3]) if len(argv()) > 3 else String())
     var t0 = perf_counter_ns()
-    while len(c.pending) and perf_counter_ns() - t0 < 5_000_000_000:
+    while (len(c.pending) or len(c.outbox)) and perf_counter_ns() - t0 < 20_000_000_000:
         c.pump()
     print(c.reply)
