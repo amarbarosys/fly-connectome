@@ -30,6 +30,10 @@ Slow modulation (modp.bin + modk.bin, ShiuBrain.modulate): edges of a modulatory
 m[plane] instead of g; every step m decays by its plane's factor and the target integrates g x c x max(0, 1 + sum
 k m) + c x sum b m (b: a slow depolarising (> 0) or hyperpolarising current). Levels reset with each sniff; off (no modp.bin) the arithmetic is the unmodulated model's, bit for bit. FLY_RECORD=path appends every neuron's count at every
 window of every sniff to path (int32 sniffs x windows x C x N, counts since the sniff began): the full brain.
+FLY_TAP=path (resident advance only; off by default, the run is unchanged): every FLY_TAP_EVERY-th advance (default 5)
+writes one column's activity for a live brain view (kinestride brain_view.mojo): int32 seq, column, tick, N, then N
+bytes, 255 exp(-age / 20 ms) of each neuron's last spike (0 when it never spiked or 200 ms ago); written to path.tmp
+and renamed, so a reader never sees half a frame. The column is the int32 in path.sel when it exists (else 0).
 
 Per step t, three launches in ShiuBrain's order: integrate + threshold + reset, push delivery
 of the spikes from t - DELAY (atomic adds into g; integrate clears g of refractory and just-spiked
@@ -39,6 +43,7 @@ Poisson kicks. Spikes wait in a ring of DELAY + 1 slots so step t never overwrit
 delivers. A full slot is counted and fails the run; nothing is dropped silently.
 """
 from std.atomic import Atomic
+from std.math import exp
 from std.ffi import c_ssize_t, external_call
 from std.os import getenv, remove
 from std.os.path import exists
@@ -59,6 +64,7 @@ comptime GROUPS = 256  # uint8 edge groups
 comptime KMAX = get_defined_int["SHIU_K", 8192]()  # plastic KCs per column (FlyWire: 5,177)
 comptime DGRID = 1024
 comptime LS = row_major[S]()
+comptime LN = row_major[N]()
 comptime LR = row_major[N + 1]()
 comptime LE = row_major[E]()
 comptime LSCALE = row_major[C * GROUPS]()
@@ -245,6 +251,15 @@ def reward(
         for p in range(Int(planes)):
             var f = p * C * KMAX + c * KMAX + n
             factor[f] = factor[f] * (1.0 - dopamine[p * C + c])
+
+
+def tap_glow(last: TileTensor[DType.int32, type_of(LS), MutAnyOrigin], tap: TileTensor[DType.uint8, type_of(LN), MutAnyOrigin], col: Int32, t: Int32):
+    """FLY_TAP: one column's activity byte per neuron, 255 exp(-age / 200 ticks) of its last spike."""
+    var i = Int(block_idx.x * block_dim.x + thread_idx.x)
+    if i >= N:
+        return
+    var age = Int(t) - Int(last[Int(col) * N + i])
+    tap[i] = UInt8(Float32(255) * exp(-Float32(age) / 200)) if 0 <= age < 2000 else 0
 
 
 def read_line() raises -> String:
@@ -486,6 +501,11 @@ def main() raises:
     var sums_out = List[Int32](length=window_count * group_count * C, fill=0)
     var kick_grid = max((Int(stim_count) + BLOCK - 1) // BLOCK, 1)
     var record = getenv("FLY_RECORD", "")
+    var tap_path = getenv("FLY_TAP", "")
+    var tap_every = Int(getenv("FLY_TAP_EVERY", "5"))
+    var tap_b = ctx.enqueue_create_buffer[DType.uint8](N if tap_path else 1)
+    var tap_host = List[UInt8](length=(N + 16) if tap_path else 0, fill=0)
+    var tap_n = 0
     var rec_file = open(record if record else "/dev/null", "w")
     var rec = List[Int32](length=S if record else 0, fill=0)
     var sniff = 0
@@ -610,6 +630,23 @@ def main() raises:
             window += 1
         if resident and is_advance:
             sim_t = t
+            tap_n += 1
+            if tap_path and tap_n % tap_every == 0:
+                var col = 0
+                if exists(tap_path + ".sel"):
+                    var sel = load(tap_path + ".sel", 1)
+                    col = min(max(Int(sel.unsafe_ptr().unsafe_bitcast[Int32]().unsafe_offset(0)[]), 0), C - 1)
+                ctx.enqueue_function(ctx.compile_function[tap_glow](), last_t, TileTensor(tap_b, LN), Int32(col), Int32(t),
+                    grid_dim=(N + BLOCK - 1) // BLOCK, block_dim=BLOCK)
+                ctx.enqueue_copy(tap_host.unsafe_ptr().unsafe_offset(16), tap_b)
+                ctx.synchronize()
+                var hd = tap_host.unsafe_ptr().unsafe_bitcast[Int32]()
+                hd[0], hd[1], hd[2], hd[3] = Int32(tap_n // tap_every), Int32(col), Int32(t), Int32(N)
+                with open(tap_path + ".tmp", "w") as f:
+                    f.write_bytes(Span(tap_host))
+                var tmp_c = tap_path + ".tmp"
+                var dst_c = tap_path.copy()
+                _ = external_call["rename", Int32](tmp_c.as_c_string_slice().unsafe_ptr(), dst_c.as_c_string_slice().unsafe_ptr())
         if gathered and len(out) > 0:
             ctx.enqueue_copy(out.unsafe_ptr(), got_b.create_sub_buffer[DType.int32](0, len(out)))
         if summed:
