@@ -76,8 +76,12 @@ def main(repeats=1, seed=7):
     def act(xc):
         dr = drive(f, xc[:nm], nl)
         t = float(np.clip(((xc[nm:] - v['mu']) / v['sd']) @ v['w'] + v['y0'], -1, 1))  # T > 0: away from a left disc = left drive up
-        return np.clip(dr + 0.5 * np.array([max(t, 0), max(-t, 0)]), 0, 1)
+        # differential, not mcns_link steer's one-sided add: in the world with leg sense on the left MN drive sits at ~0.98
+        # in every arm, so adding to the left clipped at 1 and a left wall could not turn the fly (trace, seed 7: T +0.26/+0.6
+        # vs blind, yaw unchanged). Same left-minus-right difference (0.5 T), headroom on both sides.
+        return np.clip(dr + 0.25 * t * np.array([1.0, -1.0]), 0, 1), t
     cum, tr = [np.zeros(len(cols) * nc)], {c: [qs[c]] for c in cols}
+    T, D = {c: [] for c in cols}, {c: [] for c in cols}  # turn readout and (left, right) drive per step, for diagnosis
     for i in range(fl.STEPS):
         for ci, c in enumerate(cols):
             if i % EYE_EVERY == 0 and c[1] != 'blind':
@@ -87,7 +91,11 @@ def main(repeats=1, seed=7):
         p.tofile(b.work / 'stim_p.bin')
         cum.append(b.advance(fl.K).astype(float))
         x = (cum[-1] - cum[-1 - min(i + 1, WINDOW)]).reshape(len(cols), nc) * (WINDOW / min(i + 1, WINDOW))
-        eng.send([gait[c].ctrl(act(x[ci]) if i + 1 >= WINDOW else np.zeros(2)) for ci, c in enumerate(cols)])
+        a = [act(x[ci]) for ci in range(len(cols))]
+        for ci, c in enumerate(cols):
+            T[c].append(a[ci][1])
+            D[c].append(a[ci][0])
+        eng.send([gait[c].ctrl(a[ci][0] if i + 1 >= WINDOW else np.zeros(2)) for ci, c in enumerate(cols)])
         q = eng.recv().reshape(len(cols), -1)
         for ci, c in enumerate(cols):
             qs[c] = q[ci]
@@ -101,7 +109,9 @@ def main(repeats=1, seed=7):
     dl, dr, dm = (float(rel[a].mean()) for a in (('L', 'see'), ('R', 'see'), ('L', 'mirror')))
     fw = float(np.mean([r[w, 'see', j]['forward'][-1] for w in 'LR' for j in range(repeats)]))
     tilt = max(r[w, 'see', j]['tilt_max'] for w in 'LR' for j in range(repeats))
-    out = {'yaw_deg': {f'{w}-{k}-{j}': y for (w, k, j), y in yaw.items()}, 'rel_mean': [dl, dr, dm], 'forward_mm': fw, 'tilt': tilt}
+    tq = {f'{w}-{k}-{j}': [float(np.mean(T[w, k, j][WINDOW + 250 * a:WINDOW + 250 * (a + 1)])) for a in range(4)] for w, k, j in cols}
+    dq = {f'{w}-{k}-{j}': np.mean(D[w, k, j][WINDOW:], 0).round(3).tolist() for w, k, j in cols}
+    out = {'T_quarters': tq, 'drive_mean': dq, 'yaw_deg': {f'{w}-{k}-{j}': y for (w, k, j), y in yaw.items()}, 'rel_mean': [dl, dr, dm], 'forward_mm': fw, 'tilt': tilt}
     print(json.dumps(out))
     ok = [(f"seeing walks {fw:.2f} mm > {fl.BODY_LENGTH}, tilt {tilt:.1f} < 20", fw > fl.BODY_LENGTH and tilt < 20),
           (f"away from the wall vs blind twin: wall-left {dl:+.1f} (t {tt['L', 'see']:+.1f}) < 0 < wall-right {dr:+.1f} (t {tt['R', 'see']:+.1f}), each >= 10, |t| >= 2.5",
