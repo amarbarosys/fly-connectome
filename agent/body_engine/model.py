@@ -1037,6 +1037,10 @@ def actuators(m):
                 or m.actuator_biastype[i] not in (mujoco.mjtBias.mjBIAS_NONE, mujoco.mjtBias.mjBIAS_AFFINE)
                 or m.actuator_dyntype[i] != mujoco.mjtDyn.mjDYN_NONE or m.actuator_actearly[i] or m.actuator_delay[i]):
             raise SystemExit(f'FAIL export: actuator {i} is not a ported kind (hinge/slide joint, adhesion body or fixed tendon, fixed gain, no dynamics)')
+        if m.actuator_trntype[i] == T.mjTRN_BODY:
+            b = m.actuator_trnid[i, 0]
+            if any(m.pair_gap[k] > 0 and b in (m.geom_bodyid[m.pair_geom1[k]], m.geom_bodyid[m.pair_geom2[k]]) for k in range(m.npair)):
+                raise SystemExit(f'FAIL export: adhesion actuator {i} on a body with a gap pair (excluded contacts in the gap band transmit adhesion in MuJoCo; not ported)')
     ints = np.array([[m.actuator_trntype[i], m.jnt_dofadr[m.actuator_trnid[i, 0]] if m.actuator_trntype[i] == T.mjTRN_JOINT else m.actuator_trnid[i, 0],  # tendon: its id
                       m.actuator_ctrllimited[i], m.actuator_forcelimited[i],
                       m.jnt_qposadr[m.actuator_trnid[i, 0]] if m.actuator_trntype[i] == T.mjTRN_JOINT else -1] for i in range(m.nu)])
@@ -1330,7 +1334,7 @@ def check(mjcf, out, stage, count=64, k=0, oracle=None):
             d.qpos[:], d.qvel[:], d.ctrl[:] = q[n], v[n], u[n]
             mujoco.mj_forward(s, d)
             want['ncon'][n] = sum(c.efc_address >= 0 for c in d.contact[:d.ncon])
-            nconv[n] = sum(c.efc_address >= 0 and s.geom_type[c.geom1] in (mujoco.mjtGeom.mjGEOM_BOX, mujoco.mjtGeom.mjGEOM_ELLIPSOID) for c in d.contact[:d.ncon])
+            nconv[n] = sum(c.efc_address >= 0 and s.geom_type[c.geom1] in (mujoco.mjtGeom.mjGEOM_BOX, mujoco.mjtGeom.mjGEOM_ELLIPSOID, mujoco.mjtGeom.mjGEOM_SPHERE, mujoco.mjtGeom.mjGEOM_CAPSULE, mujoco.mjtGeom.mjGEOM_CYLINDER) for c in d.contact[:d.ncon])  # convex-block shapes (stones, walls, flight primitives)
             jar = np.zeros(d.nefc)
             mujoco.mj_mulJacVec(s, d, jar, d.qacc)
             switch[n] = (np.abs(jar - d.efc_aref)[d.ne:].min() / max(np.abs(d.efc_aref).max(), 1e-30)) if d.nefc > d.ne and fx == FLOOR_X else 1.0  # equality rows never switch; pyramidal rows only: a cone has no row to switch

@@ -770,6 +770,15 @@ if [ "$stage" = contact ]; then  # the gate must fail with the contact spring pu
   ENGINE_OPT=solref=-2500:-100 ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo 's/if ref1 > 0 else -ref1/if ref1 > 0 else ref1/' -- \
     $M -m agent.body_engine.model check .work/agent/gpu-body-port/body-v2/body.xml $X/mutant contact 64 || fail=$((fail+1))
 fi
+if [ "$stage" = actuated ]; then  # adhesion transmission on both pair sides and condim 1 (models/adhesion_sides*.xml, Codex review B5)
+  for v in "" _c1; do
+    env ${v:+CONVEX=1} NEAR_STATES=1 $M -m agent.body_engine.model check agent/body_engine/models/adhesion_sides$v.xml $X/adh$v actuated 64 || { echo "FAIL adhesion_sides$v"; fail=$((fail+1)); }
+  done
+  NEAR_STATES=1 ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo 's/ and Int(mi\[GBODY + Int(mi\[CPH + 11 \* p\])\]) != body//g' -- \
+    $M -m agent.body_engine.model check agent/body_engine/models/adhesion_sides.xml $X/mutant actuated 64 || fail=$((fail+1))
+  env CONVEX=1 NEAR_STATES=1 ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo 's/one = one or Int(mi\[CCND + p\]) == 1/one = one/' -- \
+    $M -m agent.body_engine.model check agent/body_engine/models/adhesion_sides_c1.xml $X/mutant actuated 64 || fail=$((fail+1))
+fi
 if [ "$stage" = actuated ]; then  # the gate must fail with the servo bias (-kp q) dropped
   ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo 's/mf\[af\] \* c + mf\[af + 1\] + mf\[af + 2\] \* length/mf[af] * c + mf[af + 1]/' -- \
     $M -m agent.body_engine.model check .work/agent/gpu-body-port/body-v2/body.xml $X/mutant actuated 64 || fail=$((fail+1))

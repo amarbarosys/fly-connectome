@@ -1628,7 +1628,7 @@ def actuation(mi: TI, mf: TF, qpos: TQ, qvel: TV, ctrl: TU, res: TO, f: Int):
             var counter = 0
             for ip in range(Int(get(res, f, OPA))):
                 var p = Int(get(res, f, OPA + 1 + ip))
-                if Int(mi[CPH + 11 * p + 2]) != body:
+                if Int(mi[CPH + 11 * p + 2]) != body and Int(mi[GBODY + Int(mi[CPH + 11 * p])]) != body:  # either side (mj_transmission)
                     continue
                 for sl in range(nslot(mi, res, f, p)):
                     counter += 1 if get(res, f, OVALID + sbase(mi, res, f, p) + sl) != 0 else 0
@@ -1641,15 +1641,18 @@ def actuation(mi: TI, mf: TF, qpos: TQ, qvel: TV, ctrl: TU, res: TO, f: Int):
             var scale = -force / Float32(counter)
             for ip in range(Int(get(res, f, OPA))):
                 var p = Int(get(res, f, OPA + 1 + ip))
-                if Int(mi[CPH + 11 * p + 2]) != body:
+                if Int(mi[CPH + 11 * p + 2]) != body and Int(mi[GBODY + Int(mi[CPH + 11 * p])]) != body:
                     continue
                 var nch = Int(mi[CPH + 11 * p + 6]); var choff = Int(mi[CPH + 11 * p + 7])
+                var one = ELL  # condim 1 or elliptic: the normal is row 0 alone
+                comptime if NCV > 0:
+                    one = one or Int(mi[CCND + p]) == 1
                 for sl in range(nslot(mi, res, f, p)):
                     if get(res, f, OVALID + sbase(mi, res, f, p) + sl) == 0:
                         continue
                     var jadr = OJ + jbase(mi, res, f, p) + 4 * sl * nch
                     for k in range(nch):  # normal row = mean of the pyramid's first pair
-                        var jn = get(res, f, jadr + k) if ELL else 0.5 * (get(res, f, jadr + k) + get(res, f, jadr + nch + k))
+                        var jn = get(res, f, jadr + k) if one else 0.5 * (get(res, f, jadr + k) + get(res, f, jadr + nch + k))
                         res[(OQACT + Int(mi[CCHAIN + choff + k])) * F + f] += scale * jn
 
     comptime if GRAVCOMP and NU > 0:  # actuator-level gravcomp (engine_forward.c:770), only where mj_fwdActuation runs (nu > 0)
