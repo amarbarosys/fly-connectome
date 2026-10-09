@@ -264,6 +264,10 @@ def override(m):
         elif key == 'kv':
             joint = (m.actuator_trntype == mujoco.mjtTrn.mjTRN_JOINT) & (m.actuator_biastype == mujoco.mjtBias.mjBIAS_AFFINE)
             m.actuator_biasprm[joint, 2] = -float(val)
+        elif key == 'tkv':  # velocity feedback on every affine-bias tendon actuator (biasprm[2] = -tkv): its J' b J term in implicit qDeriv
+            tendon = m.actuator_trntype == mujoco.mjtTrn.mjTRN_TENDON  # made affine: tendon_spatial.xml's servo ships biastype none
+            m.actuator_biastype[tendon] = mujoco.mjtBias.mjBIAS_AFFINE
+            m.actuator_biasprm[tendon, 2] = -float(val)
         elif key == 'cone':  # mjtCone value: the flight model ships elliptic, gated under Euler only; its fluid-derivative gate runs it pyramidal
             m.opt.cone = int(val)
         elif key == 'dt':  # timestep: explicit RK4 damps dofs explicitly, h B / M reaches 5.9 on the fly at h 1e-4 (stable below 2.8)

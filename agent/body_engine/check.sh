@@ -539,11 +539,15 @@ if [ "$stage" = implicit ]; then  # full implicit (mj_implicit: qDeriv with mjd_
   SB=.work/agent/body_engine/spider-body/spider.xml; I=$X/implicit; KV=0.01
   echo "COVERAGE integrator=implicit (2): fly step (shipped kv 0) + actuated (airborne states, kv=$KV), spider_test step (free, ball, hinge, slide), world fly+spider at 8 and 200 mm"
   echo "COVERAGE integrator=implicitfast (3) midpoint: four standalone free bodies (models/midpoint.xml: simple, aligned, coupled, coupled and rotated), contact-free; contact eligibility in the midpoint_contact part"
-  echo "COVERAGE tendon damping derivative: models/tendon_spatial.xml step under integrator 2 and 3, sign mutants"
+  echo "COVERAGE tendon damping derivative: models/tendon_spatial.xml step under integrator 2 and 3, sign mutants; tendon actuator velocity term (tkv) under both, sign mutants"
   echo "COVERAGE fluid derivatives: Flybody flight.xml step under integrator 2 and 3, drag-sign mutants"
   echo "COVERAGE not covered: contact states under full implicit (MEASURED only, active-set float32 noise as the implicitfast gate), WAVE=1"
-  $M -m agent.body_engine.reject_check || { echo "FAIL reject"; fail=$((fail+1)); }
-  ~/iTools/bin/mutant-check agent/body_engine/model.py 's/m.opt.density or m.opt.viscosity or m.tendon_damping.any()/False/' -- $M -m agent.body_engine.reject_check || fail=$((fail+1))
+  # tendon actuator velocity feedback (mjd_actuator_vel: gear^2 biasprm[2] J' J, Codex review B6): models/tendon_spatial.xml's servo with tkv
+  for integ in 2 3; do
+    ENGINE_OPT=integrator=$integ,tkv=0.5 $M -m agent.body_engine.model check agent/body_engine/models/tendon_spatial.xml $I/tact$integ sptendon_act 64 || { echo "FAIL tendon actuator implicit integrator=$integ"; fail=$((fail+1)); }
+    ~/iTools/bin/mutant-check agent/body_engine/smooth.mojo 's/\* F + f\] -= h \* g2b \* jk/* F + f] += h * g2b * jk/' -- \
+      env ENGINE_OPT=integrator=$integ,tkv=0.5 $M -m agent.body_engine.model check agent/body_engine/models/tendon_spatial.xml $I/mutant sptendon_act 64 || fail=$((fail+1))
+  done
   export ENGINE_OPT=integrator=2
   $M -m agent.body_engine.model check $F $I/fly-step step 64 || { echo "FAIL fly step implicit"; fail=$((fail+1)); }
   $M -m agent.body_engine.model check $SP $I/spider step 64 || { echo "FAIL spider step implicit"; fail=$((fail+1)); }

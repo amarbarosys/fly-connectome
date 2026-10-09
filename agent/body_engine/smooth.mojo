@@ -3101,13 +3101,26 @@ def implicit_factor(mi: TI, mf: TF, qvel: TV, res: TO, f: Int):
     comptime if STAGE >= 7:  # as implicitfast: moment' bias_vel moment per joint actuator, skipped where forcerange clamps
         for u in range(NU):
             var a = CACT + 5 * u
-            if mi[a] != 0:
+            if mi[a] != 0 and mi[a] != 3:
                 continue
             var af = CACF + 9 * u
             var force = get(res, f, OAF + u)
             if mi[a + 3] != 0 and (force <= mf[af + 6] or force >= mf[af + 7]):
                 continue
             var dof = Int(mi[a + 1])
+            if mi[a] == 3:  # fixed tendon: moment = gear ten_J, so qDeriv += gear^2 biasprm[2] J' J onto the DPAIR pattern (mjd_actuator_vel)
+                comptime if NTEN > 0:
+                    var g2b = mf[af + 8] * mf[af + 8] * mf[af + 3]
+                    if g2b != 0:
+                        for k in range(NV):
+                            var jk = ten_j(mi, mf, res, f, dof, k)
+                            if jk == 0:
+                                continue
+                            for pp in range(NV):
+                                var e = Int(mi[DPAIR + k * NV + pp])
+                                if e >= 0:
+                                    res[(OQLU + e) * F + f] -= h * g2b * jk * ten_j(mi, mf, res, f, dof, pp)
+                continue
             res[(OQLU + Int(mi[DRA + dof]) + Int(mi[DDG + dof])) * F + f] -= h * mf[af + 8] * mf[af + 8] * mf[af + 3]
     # forward pass over bodies: Dcvel, Dcacc, then Dcfrcbody = D(cinert cacc + cvel x (cinert cvel))
     for b in range(1, NB):
@@ -3384,13 +3397,26 @@ def euler(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int):
             # mjd_actuator_vel adds moment' bias_vel moment per joint actuator (diagonal: gear^2 biasprm[2]), skipped where forcerange clamps
             for u in range(NU):
                 var a = CACT + 5 * u
-                if mi[a] != 0:
+                if mi[a] != 0 and mi[a] != 3:
                     continue
                 var af = CACF + 9 * u
                 var force = get(res, f, OAF + u)
                 if mi[a + 3] != 0 and (force <= mf[af + 6] or force >= mf[af + 7]):
                     continue
                 var dof = Int(mi[a + 1])
+                if mi[a] == 3:  # fixed tendon: moment = gear ten_J, so qDeriv += gear^2 biasprm[2] J' J onto the MPAIR pattern (mjd_actuator_vel)
+                    comptime if NTEN > 0:
+                        var g2b = mf[af + 8] * mf[af + 8] * mf[af + 3]
+                        if g2b != 0:
+                            for k in range(NV):
+                                var jk = ten_j(mi, mf, res, f, dof, k)
+                                if jk == 0:
+                                    continue
+                                for pp in range(NV):
+                                    var e = Int(mi[MPAIR + k * NV + pp])
+                                    if e >= 0:
+                                        res[(OQH + e) * F + f] -= h * g2b * jk * ten_j(mi, mf, res, f, dof, pp)
+                    continue
                 res[(OQH + Int(mi[MADR + dof]) + Int(mi[MNNZ + dof]) - 1) * F + f] -= h * mf[af + 8] * mf[af + 8] * mf[af + 3]
         factorI(mi, res, f, OQH, OQHI)
     for v in range(NV):
