@@ -1675,7 +1675,19 @@ def equality(mi: TI, mf: TF, qpos: TQ, qvel: TV, res: TO, f: Int):
         var cpos = S6(0)
         var jdv = S6(0)  # Jdot qvel of the rows, subtracted from aref
         var posn: Float32
-        if typ == 3:  # tendon limit (mj_instantiateLimit, engine_core_constraint.c:1277): dist = side (range - length), a row while dist < margin, J = -side ten_J
+        if typ == 4:  # joint limit (mj_instantiateLimit): dist = side (range - qpos), a row while dist < margin, J = -side on the joint's dof
+            var dof = Int(mi[eh + 8]); var side = Float32(Int(mi[eh + 9]))
+            var dist = side * (mf[ef + 24] - qpos[Int(mi[eh + 10]) * F + f])
+            var on = dist < mf[ef + 25]
+            for c in range(nch):
+                res[(jb + c) * F + f] = -side if on and Int(mi[CEQC + choff + c]) == dof else Float32(0)
+            if not on:
+                res[(OEQD + rbase) * F + f] = 0
+                res[(OEQA + rbase) * F + f] = 0
+                continue
+            cpos[0] = dist - mf[ef + 25]
+            posn = cpos[0]
+        elif typ == 3:  # tendon limit (mj_instantiateLimit, engine_core_constraint.c:1277): dist = side (range - length), a row while dist < margin, J = -side ten_J
             var t = Int(mi[eh + 8]); var side = Float32(Int(mi[eh + 9]))
             var L: Float32
             comptime if SPATIAL:

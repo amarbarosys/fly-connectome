@@ -271,6 +271,24 @@ if [ "$stage" = tendon_limit ]; then  # tendon limit rows (mj_instantiateLimit, 
   [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
   echo "PASS all tendon_limit checks"; exit 0
 fi
+if [ "$stage" = joint_limit ]; then  # hinge/slide joint limit rows (mj_instantiateLimit) on the equality block, unilateral in Newton: the fly and
+  # the spider with every hinge/slide limited to the 35..65 % quantiles of its qpos over nearby states (model.with_joint_limits), contacts
+  # off, solref_limit 0.1 and tolerance 0, vs mj_step (REL=2e-3 as tendon_limit's animals: the fly's light rotational dofs). The shipped fly's
+  # own two proboscis limits now export through the same rows.
+  S=agent/body_engine/smooth.mojo; mkdir -p $X/jl
+  FJ=$($M -c "from agent.body_engine.model import with_joint_limits; print(with_joint_limits('${BODY:-.work/agent/gpu-body-port/body-v2/body.xml}', '$X/jl/fly.xml', solref=0.1, tolerance=0))")
+  SJ=$($M -c "from agent.body_engine.model import with_joint_limits; print(with_joint_limits('agent/body_engine/models/spider_test.xml', '$X/jl/spider.xml', solref=0.1, tolerance=0))")
+  for B in $FJ $SJ; do
+    REL=2e-3 $M -m agent.body_engine.model check $B $X/jl/$(basename $B .xml) joint_limit 64 || { echo "FAIL joint_limit $(basename $B .xml)"; fail=$((fail+1)); }
+  done
+  # the gate must fail with: the limit side flipped, the margin dropped, the Jacobian sign flipped
+  for mut in 's/var dist = side \* (mf\[ef + 24\] - qpos/var dist = -side * (mf[ef + 24] - qpos/' \
+             's/res\[(jb + c) \* F + f\] = -side if on and/res[(jb + c) * F + f] = side if on and/'; do
+    REL=2e-3 ~/iTools/bin/mutant-check $S "$mut" -- $M -m agent.body_engine.model check $SJ $X/mutant joint_limit 64 || fail=$((fail+1))
+  done
+  [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
+  echo "PASS all joint_limit checks"; exit 0
+fi
 if [ "$stage" = flight_contacts ]; then  # the Flybody flight model's own contacts: 842 automatic capsule/ellipsoid/cylinder/sphere body-body pairs
   # (model.with_auto_pairs: the same pairs and mixed parameters as explicit pairs; tools/auto_pairs_check.py proves them against MuJoCo's dynamic
   # pairs; up to 5 contacts per capsule/cylinder pair from mjc_Convex's perturbation search, two for parallel capsules), condim 1 (frictionless rows), noslip 5, pyramidal. Narrowphase
