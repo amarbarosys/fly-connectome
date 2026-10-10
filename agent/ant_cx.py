@@ -215,7 +215,8 @@ def home_fit(seed=74):
 def home_b(seed=75, T=None, b=None):
     """A4b gate on seed 75 with the frozen T, b; also the b = 0 arm, reported."""
     from agent import seeds
-    seeds.claim('ant_cx_home_b', [seed])
+    seed = int(seed)
+    seeds.claim("ant_cx_home_b", [seed])
     print('--- reported: b = 0 (no integration)')
     home(seed, slow=(float(T), 0.0), gate=False)
     print(f'--- gate: T {T} b {b}')
