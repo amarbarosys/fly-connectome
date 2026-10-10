@@ -57,5 +57,14 @@
  ],
  "full_fly_taste_probe": [
   405
+ ],
+ "full_fly_smell_drive": [
+  406,
+  408
+ ],
+ "full_fly_smell_drive0": [
+  407,
+  409,
+  410
  ]
 }
