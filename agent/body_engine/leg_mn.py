@@ -180,10 +180,14 @@ def act_id(m, leg, j):
     return mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_ACTUATOR, f'fly/{parent}-{leg}_{j.split("-")[0]}-{j.split("-")[1]}-position')
 
 
-def watch(seed, steps=1000):
-    """What fires: forward DNs 80 Hz, no MN stimulus, all six legs' named MNs mapped to their own leg (U4a rule)."""
-    seed = int(seed)
-    seeds.claim('leg_mn_watch', [seed])
+def watch(seed, steps=1000, doses='0'):
+    """What fires: forward DNs 80 Hz, no MN stimulus, all six legs' named MNs mapped to their own leg (U4a rule).
+    doses: comma list of f, one column each: a constant background current on every neuron settling it at f x V_TH
+    (I = f V_TH / T_MBR, mV per ms; f >= 1 fires on its own). Plus 4,000 random cells read for the brain-wide rate."""
+    from agent.shiu import T_MBR, V_TH
+    seed, steps, doses = int(seed), int(steps), [float(x) for x in str(doses).split(',')]
+    F = len(doses)
+    seeds.claim('leg_mn_watch' if doses == [0.0] else 'leg_mn_watch_bg', [seed])
     a = pd.read_feather(mcns.DATA / 'body-annotations-male-cns-v1.0-minconf-0.5.feather', columns=['status', 'superclass', 'subclass', 'somaSide', 'type'])
     a = a[a['status'].isin(['Traced', 'Anchor'])].reset_index(drop=True)
     sub, sd, ty = a.subclass.fillna('').to_numpy(), a.somaSide.fillna('').str[:1].to_numpy(), a.type.fillna('').to_numpy()
@@ -197,32 +201,49 @@ def watch(seed, steps=1000):
     flip = leg_signs(m, q0)
     acts = {leg: [act_id(m, leg, j) for j in JOINTS] for leg in LEGS6}
     qadr = {leg: m.jnt_qposadr[m.actuator_trnid[acts[leg], 0]] for leg in LEGS6}
-    b, *_ = brain(cols=1, seed=seed)  # brain() drives the forward DNs at 80 Hz
-    b.start([1], allmn.astype(np.int32))
+    dn, _ = descending_name_sets()
+    b, *_ = brain(cols=F, seed=seed)  # brain() drives the forward DNs at 80 Hz
+    sample = np.random.default_rng(0).choice(np.setdiff1d(np.arange(b.n), allmn), 4000, replace=False)
+    for c, f_ in enumerate(doses):
+        if f_ > 0:
+            b.inject(np.setdiff1d(np.arange(b.n), dn['forward']), f_ * V_TH / (T_MBR * 1e3), fly=c)  # inject overwrites a cell's entry: the forward DNs keep their 80 Hz
+    R = np.r_[allmn, sample]
+    b.start([1], np.concatenate([c * b.n + R for c in range(F)]).astype(np.int32))
     pos = {x: i for i, x in enumerate(allmn)}
-    eng = fl.Engine(d, fl.K, f'legwatch{seed}', steps, F=1, q0=[q0])
-    cum, tr, counts = [np.zeros(len(allmn))], [], []
+    eng = fl.Engine(d, fl.K, f'legwatch{seed}', steps, F=F, q0=[q0] * F)
+    jsg = {leg: assign(ty[cells[leg]]) for leg in LEGS6}
+    idx = {leg: [pos[c] for c in cells[leg]] for leg in LEGS6}
+    cum, tr, counts = [np.zeros(F * len(R))], [], []
     for i in range(steps):
         cum.append(b.advance(fl.K).astype(float))
-        counts.append(cum[-1] - cum[-2])
+        counts.append((cum[-1] - cum[-2]).reshape(F, len(R)))
         w = min(i + 1, WIN)
-        rate = (cum[-1] - cum[-1 - w]) / (w * 1e-3)
-        x = held.copy()
-        for leg in LEGS6:
-            jn, sg = assign(ty[cells[leg]])
-            off = targets(rate[[pos[c] for c in cells[leg]]], jn, sg) * flip[leg]
-            x[acts[leg]] = held[acts[leg]] + off
-        eng.send(x)
-        q = eng.recv()
-        tr.append(np.r_[[q[qadr[leg]] for leg in LEGS6]].ravel())
+        rate = ((cum[-1] - cum[-1 - w]) / (w * 1e-3)).reshape(F, len(R))
+        u = []
+        for c in range(F):
+            x = held.copy()
+            for leg in LEGS6:
+                x[acts[leg]] = held[acts[leg]] + targets(rate[c, idx[leg]], *jsg[leg]) * flip[leg]
+            u.append(x)
+        eng.send(u)
+        q = eng.recv().reshape(F, -1)
+        tr.append(np.array([[q[c, qadr[leg]] for leg in LEGS6] for c in range(F)]))
     b.close()
     eng.close()
-    counts, tr = np.array(counts), np.degrees(np.array(tr)).reshape(steps, 6, 7)
+    allc, tr_all = np.array(counts), np.degrees(np.array(tr))  # (steps, F, cells), (steps, F, 6, 7)
+    for c, f_ in enumerate(doses):
+        print(f'=== background f {f_} (x V_TH): brain sample firing > 0.5 Hz {(allc[:, c, len(allmn):].sum(0) > 0.5 * steps * 1e-3).mean():.3f}, '
+              f'mean {allc[:, c, len(allmn):].sum(0).mean() / (steps * 1e-3):.1f} Hz')
+        _report(allc[:, c, :len(allmn)], tr_all[:, c], q[c], q0, allmn, sub, sd, ty, steps)
+    np.save(fl.OUT / f'leg-watch-{seed}.npy', {'counts': allc.astype(np.uint8), 'angles': tr_all.astype(np.float32), 'cells': R, 'doses': doses}, allow_pickle=True)
+
+
+def _report(counts, tr, q, q0, allmn, sub, sd, ty, steps):
     hz = counts.sum(0) / (steps * 1e-3)
     df = pd.DataFrame({'leg': sub[allmn] + sd[allmn], 'type': ty[allmn], 'hz': hz})
     fire = df[df.hz > 0.5].groupby(['leg', 'type']).hz.agg(['size', 'mean']).round(1)
     print('MNs firing > 0.5 Hz:', int((hz > 0.5).sum()), 'of', len(allmn))
-    print(fire.to_string())
+    print(fire.sort_values('mean').tail(12).to_string())
     f = np.fft.rfftfreq(steps, 1e-3)
     for li, leg in enumerate(LEGS6):
         y = tr[:, li] - tr[:, li].mean(0)
@@ -233,7 +254,6 @@ def watch(seed, steps=1000):
     print('tibia correlation with lf:', {leg: round(float(np.corrcoef(ti[:, 0], ti[:, k])[0, 1]), 2) for k, leg in enumerate(LEGS6)})
     xy = q[:2]
     print('body moved (mm):', np.round(xy - q0[:2], 2).tolist())
-    np.save(fl.OUT / f'leg-watch-{seed}.npy', {'counts': counts.astype(np.uint8), 'angles': tr.astype(np.float32), 'cells': allmn}, allow_pickle=True)
 
 
 if __name__ == '__main__' and sys.argv[1:2] == ['watch']:
