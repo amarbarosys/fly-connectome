@@ -3,6 +3,7 @@ antennae at 150 Hz vs none, 500 ms, no body. Per group (ORNs, their glomeruli's 
 mean spikes per cell per 100 ms with and without odour, so the hop where the signal dies shows.
 drive / drive0 (no forward DN drive): left antenna 150 Hz vs none (8 repeats), every cell's rate; per DN the net synaptic event rate sum_j r_j w_ij
 (events/s) against the ~V_TH / (W_SYN TAU) = 5,091 /s a cell needs to reach threshold; DNa02 / DNa01 / DNp29 inputs by type.
+cx: forward off, compass cue on EPG (ant_cx) or none, odour left vs right; PFL3 / PFL2 / DNa02 / DNa01 per side.
 side: one antenna at 150 Hz, left vs right, and the side-swapped cells; per DN the left - right paired t over 16
 repeats, and the correlation of real vs swapped differences across DNs (side-driven: negative).
   gpu-wait run --shared --vram 8 --preemptible --timeout 1200 --env PYTHONPATH=$PWD -- .venv/bin/python tools/full_fly_smell_trace.py [side] SEED"""
@@ -17,7 +18,7 @@ from agent.body_engine import fly_link as fl
 from agent.body_engine.mcns_link import FWD_HZ, brain
 from agent.mcns_mapping import descending_name_sets
 
-SIDE, DRIVE = sys.argv[1] in ('side', 'side0'), sys.argv[1] in ('drive', 'drive0')
+SIDE, DRIVE = sys.argv[1] in ('side', 'side0'), sys.argv[1] in ('drive', 'drive0', 'cx')
 FWD = 0.0 if sys.argv[1] in ('drive0', 'side0') else FWD_HZ  # drive0: no forward DN drive
 REPEATS, N = 16 if SIDE else 8, 500
 seed = int(sys.argv[1 + (SIDE or DRIVE)])
@@ -35,6 +36,39 @@ groups = {'ORN': np.r_[c['smell', 'L'], c['smell', 'R']],
           'DN': np.flatnonzero(sup.str.startswith('descending').to_numpy())}
 read = np.concatenate(list(groups.values()))
 dn, _ = descending_name_sets()
+if sys.argv[1] == 'cx':  # CX route test: compass cue on EPG (heading 0, ant_cx's cosine cue) + odour L vs R, forward off
+    from agent import ant_cx
+    keep, ctypes, phase, _, *_ = ant_cx.subgraph()
+    epg = np.flatnonzero(pd.Series(ctypes).str.startswith('EPG').to_numpy() & ~np.isnan(phase))
+    cue = ant_cx.CUE_HZ * np.maximum(0, np.cos(np.radians(phase[epg])))
+    side_ = pd.read_feather(mcns.DATA / 'body-annotations-male-cns-v1.0-minconf-0.5.feather', columns=['status', 'somaSide'])
+    side_ = side_[side_['status'].isin(['Traced', 'Anchor'])].somaSide.fillna('').to_numpy()
+    T = ty.to_numpy()
+    cellset = {f'{t_}_{s_}': np.flatnonzero((T == t_) & (side_ == s_)) for t_ in ('PFL3', 'DNa02', 'DNa01', 'PFL2') for s_ in 'LR'}
+    arms = [(sd, cu) for _ in range(REPEATS) for cu in (False, True) for sd in 'LR']
+    b, *_ = brain(cols=len(arms), seed=seed)
+    for k, (sd, cu) in enumerate(arms):
+        b.stimulate(dn['forward'], 0.0, fly=k, key=k)
+        b.stimulate(c['smell', sd], sn.RMAX, fly=k, key=k)
+        if cu:
+            for rr in np.unique(cue[cue > 0]):
+                b.stimulate(keep[epg[cue == rr]], float(rr), fly=k, key=k)
+    R = np.concatenate(list(cellset.values()))
+    b.start([1], np.concatenate([k * b.n + R for k in range(len(arms))]).astype(np.int32))
+    x = b.advance(N * fl.K).astype(float).reshape(REPEATS, 2, 2, -1) * (1000 / N)  # Hz (repeat, cue, side, cell)
+    b.close()
+    out, i0 = {}, 0
+    for k_, ids in cellset.items():
+        y = x[..., i0:i0 + len(ids)].mean(-1)
+        i0 += len(ids)
+        for cu in (0, 1):
+            d_ = y[:, cu, 0] - y[:, cu, 1]
+            out[f'{k_} cue={cu}'] = {'odourL': round(float(y[:, cu, 0].mean()), 2), 'odourR': round(float(y[:, cu, 1].mean()), 2),
+                                    't': round(float(d_.mean() / (d_.std(ddof=1) / np.sqrt(REPEATS) + 1e-9)), 1)}
+    for k_, v_ in out.items():
+        print(k_, v_)
+    (fl.OUT / f'full-fly-smell-cx-{seed}.json').write_text(json.dumps(out))
+    sys.exit(0)
 if DRIVE:
     from agent.shiu import TAU, V_TH, W_SYN
     b, *_ = brain(cols=2 * REPEATS, seed=seed)
