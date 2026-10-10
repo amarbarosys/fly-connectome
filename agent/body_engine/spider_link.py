@@ -32,10 +32,17 @@ DT = 1e-4
 BODY_MM = 5.6  # prosoma + opisthosoma, models/spider.py
 
 
+def stale(d):
+    """A mesh written by an older exporter: rv.bin must hold render.RVI = 9 int16 per vertex (position, normal, colour)."""
+    rs = d / 'rsizes.txt'
+    nrv = [int(f[6:]) for f in rs.read_text().split() if f.startswith('-DNRV=')] if rs.exists() else []
+    return not nrv or not (d / 'rv.bin').exists() or (d / 'rv.bin').stat().st_size != 18 * nrv[0]
+
+
 def files(F, name=None, prey=False):
     """Engine + mesh files for F copies of the spider standing (prepare's state), servos at the stance, drives speed 1 turn 0."""
     d = OUT / (name or f'f{F}')
-    if not (d / 'drive.bin').exists():
+    if not (d / 'drive.bin').exists() or stale(d):
         cam, m = prepare(d, mjcf=str(spider_build(prey=prey)), dist=15.0)
         for n in ('qpos', 'qvel', 'ctrl'):
             a = np.fromfile(d / f'{n}.bin', np.float32).reshape(-1, 1)
