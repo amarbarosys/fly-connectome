@@ -67,12 +67,17 @@ def with_bursts(pre, post, w, cells, het=0.0):
 
 
 def burst_cells(which, pre=None, w=None):
-    """vnc_intrinsic cells given the mechanism: all, inh (net outgoing synapse count < 0) or exc (> 0)."""
-    cells = np.flatnonzero(table().superclass.to_numpy() == 'vnc_intrinsic')
-    if which == 'all':
-        return cells
-    net = np.bincount(pre, w.astype(np.float64), minlength=len(table()))[cells]
-    return cells[net < 0] if which == 'inh' else cells[net > 0]
+    """vnc_intrinsic cells given the mechanism: all, inh (net outgoing synapse count < 0) or exc (> 0); a '+mn' suffix
+    adds the leg MNs (measured only: U6 registers interneurons)."""
+    a = table()
+    cells = np.flatnonzero(a.superclass.to_numpy() == 'vnc_intrinsic')
+    base, mn = which.split('+')[0], which.endswith('+mn')
+    if base != 'all':
+        net = np.bincount(pre, w.astype(np.float64), minlength=len(a))[cells]
+        cells = cells[net < 0] if base == 'inh' else cells[net > 0]
+    if mn:
+        cells = np.sort(np.r_[cells, np.flatnonzero((a.superclass == 'vnc_motor').to_numpy() & a.subclass.isin(['fl', 'ml', 'hl']).to_numpy())])
+    return cells
 
 
 def groups(b, cells):
