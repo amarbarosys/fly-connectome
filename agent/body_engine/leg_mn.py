@@ -180,7 +180,7 @@ def act_id(m, leg, j):
     return mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_ACTUATOR, f'fly/{parent}-{leg}_{j.split("-")[0]}-{j.split("-")[1]}-position')
 
 
-ADAPT_TAU, ADAPT_B = 0.1, -1.75  # s; slow current per unit level: strength 1 at 20 Hz steady firing gives about -3.5 mV (half V_TH)
+ADAPT_TAU, ADAPT_B = 0.1, -1.75  # s; slow current per unit level; a spike adds W_SYN (0.275) x strength, so strength 1 at 20 Hz gives about -0.96 mV (measured on CPU: 11 Hz -> -0.53)
 
 
 def adapt_brain(seed, strengths):
