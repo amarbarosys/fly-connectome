@@ -332,6 +332,9 @@ def main() raises:
             elif BRAIN == 2:
                 ctx.enqueue_function(kb, TileTensor(u_b, eng.LU), TileTensor(drive_b, brain.LD), Float32(fr * max(eng.K, 1)) * Float32(1e-4),
                     grid_dim=(eng.NU * eng.F + 63) // 64, block_dim=64)
+            comptime if eng.CPU and (BRAIN == 2 or BRAIN == 3):  # the device brain wrote u_b; the host step reads uv
+                ctx.enqueue_copy(uv.unsafe_ptr().unsafe_bitcast[Float32](), u_b)
+                ctx.synchronize()
             comptime if PROFILE > 0:
                 ctx.synchronize()
                 ms[0] += Float64(perf_counter_ns() - tp)
