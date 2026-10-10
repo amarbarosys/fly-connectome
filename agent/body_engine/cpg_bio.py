@@ -26,8 +26,9 @@ from agent import mcns, seeds
 TAU_P, TAU_A, SP, SA = 0.005, 0.08, 160.0, 5.0  # s, s, plateau and adaptation scale per spike (x W_SYN mV); FIT seed sets the final values
 VNC = ('vnc_intrinsic', 'vnc_motor', 'vnc_efferent', 'ascending_neuron')  # G2: edges with both ends in these are shuffled
 SHUFFLE_SEED = 0
-STEPS, BIN = 1000, 10  # 1 ms control steps (K = 10 ticks each); 10 ms bins
+STEPS, BIN, REPEATS = 1000, 10, 2  # 1 ms control steps (K = 10 ticks each); 10 ms bins; FIT repeats per setting
 OUT = Path('.work/agent/u6')
+ROOT_MAIN = Path(subprocess.run(['git', 'worktree', 'list', '--porcelain'], capture_output=True, text=True).stdout.split()[1])  # the main checkout
 
 
 def table():
@@ -139,22 +140,30 @@ def describe(counts, F, E, sample, steps=STEPS):
 
 
 def fit(seed, *taus):
+    """FIT sweep: one run per TP,TA (s); columns = (0, 0) then SP x SA, each setting twice (independent Poisson draws:
+    a column's own key). Writes per-setting measures and the flexor / extensor / sample counts (uint8) per run."""
     seed = int(seed)
     seeds.claim('u6_bio_fit', [seed])
     a = table()
     F, E, sample, R = readout_cells(a)
-    grid = [(0.0, 0.0)] + list(itertools.product([40.0, 80.0, 160.0, 320.0], [5.0, 10.0, 20.0, 40.0]))
+    sps, sas = (40.0, 80.0, 120.0, 160.0, 240.0), (2.5, 5.0, 10.0, 20.0)
+    grid = [(0.0, 0.0)] + list(itertools.product(sps, sas))
+    cols = grid * REPEATS
     OUT.mkdir(parents=True, exist_ok=True)
     res = {}
     for tt in taus:
         tau = tuple(float(x) for x in tt.split(','))
         t0 = time.perf_counter()
-        counts = run(bio_brain(seed, grid, tau), R)
+        counts = run(bio_brain(seed, cols, tau), R)
         sec = time.perf_counter() - t0
-        for (sp, sa), m in zip(grid, describe(counts, F, E, sample)):
+        d = describe(counts, F, E, sample)
+        for i, (sp, sa) in enumerate(grid):
+            ms = d[i::len(grid)]
+            m = {k: round(float(np.mean([x[k] for x in ms])), 3) for k in ms[0]} | {'corr_each': [x['corr'] for x in ms]}
             res[f'{tau[0]}/{tau[1]} {sp:g}/{sa:g}'] = m
             print(f'tau {tau[0]}/{tau[1]} plateau {sp:g} adapt {sa:g}:', json.dumps(m), flush=True)
-        print(f'{sec:.0f} s for {STEPS} steps x {len(grid)} columns', flush=True)
+        np.savez_compressed(OUT / f'fit-{seed}-{tau[0]}-{tau[1]}.npz', counts=np.minimum(counts, 255).astype(np.uint8), cols=np.array(cols), F=F, E=E, sample=sample)
+        print(f'{sec:.0f} s for {STEPS} steps x {len(cols)} columns', flush=True)
     (OUT / f'fit-{seed}.json').write_text(json.dumps(res, indent=1))
 
 
@@ -185,13 +194,14 @@ def gate(seed):
 
 def g3():
     """G3: with the mechanism off (cpg_bio not used: mcns_link.brain), a fixed-seed 200-step run's MN counts are
-    byte-equal to the same run from main's agent/ (git archive into .work/u6/main, data reached through a symlink)."""
+    byte-equal to the same run from main's agent/ (git archive into .work/u6/main, .work and data/ reached through symlinks)."""
     main_dir = Path('.work/u6/main').resolve()
     if main_dir.exists():
         subprocess.run(['rm', '-rf', str(main_dir)], check=True)
     main_dir.mkdir(parents=True)
     subprocess.run(f'git archive main agent | tar -x -C {main_dir}', shell=True, check=True)
-    (main_dir / '.work').symlink_to(Path('.work').resolve())
+    for d in ('.work', 'data'):
+        (main_dir / d).symlink_to(Path(d).resolve() if d == '.work' else ROOT_MAIN / d)  # data/: the main checkout's (the worktree lacks untracked annotation files)
     code = ("import sys, numpy as np\n"
             "from agent.body_engine.mcns_link import brain\n"
             "b, f, nl, nc = brain(seed=11)\n"
