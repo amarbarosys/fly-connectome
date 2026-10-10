@@ -6,7 +6,7 @@ from agent.body_engine.spider_link import files, build, run, yaw_of, CAM
 
 d = files(1)
 np.array([1, 2.0], np.float32).tofile(d / 'roots.bin')  # PROFILE traces the root (as game_check)
-arms = {'gpu': build(d, 1, 10, 2, w=640, h=360, profile=True), 'cpu': build(d, 1, 10, 2, w=640, h=360, profile=True, cpu=True)}
+arms = {'gpu': build(d, 1, 10, 2, w=640, h=360, profile=True, cpu=False), 'cpu': build(d, 1, 10, 2, w=640, h=360, profile=True, cpu=True)}
 if sys.argv[1] == 'run':
     frames = sys.argv[2] if len(sys.argv) > 2 else '300'
     for name, b in arms.items():

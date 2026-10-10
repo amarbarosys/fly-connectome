@@ -44,14 +44,24 @@ def files(F, name=None, prey=False):
     return d
 
 
-def build(d, F, k, brain, w=64, h=64, eyes=False, gaze=False, row=False, profile=False, cpu=False):
+def backend(F, eyes=False):
+    """(cpu, wave) by batch: spider_cpu_sweep.py, K=10, us per animal-step: host 54/37/12/10/43 at 1/16/64/256/1,024 animals
+    (one core per animal; 1,024 x 141 KB spills the 96 MB L3), GPU wave 3553/232/62/21/9.9, GPU thread 4912/330/90/24/7.1.
+    Eyes read the device state, so they keep the GPU."""
+    if F <= 256 and not eyes:
+        return True, True
+    return False, F < 1024
+
+
+def build(d, F, k, brain, w=64, h=64, eyes=False, gaze=False, row=False, profile=False, cpu=None, wave=None):
+    cpu, wave = backend(F, eyes) if cpu is None else (cpu, True if wave is None else wave)
     flags = (d / 'sizes.txt').read_text().split() + (d / 'rsizes.txt').read_text().split()
     nb = int([f for f in flags if f.startswith('-DNBODY=')][0][8:])
     src = [APP / f for f in ('live.mojo', 'spider_brain.mojo')] + [ENGINE / f for f in ('smooth.mojo', 'render.mojo', 'eyes.mojo')]
     tag = hashlib.sha1(b''.join(f.read_bytes() for f in src + [d / 'sizes.txt', d / 'rsizes.txt'])).hexdigest()[:8]  # content (incl. the model's sizes), not mtime: mutant-check restores old mtimes
-    b = d / f'link_b{brain}_k{k}_{w}x{h}{"_eyes" if eyes else ""}{"_gaze" if gaze else ""}{"_row" if row else ""}{"_prof" if profile else ""}{"_cpu" if cpu else ""}_{tag}'
+    b = d / f'link_b{brain}_k{k}_{w}x{h}{"_eyes" if eyes else ""}{"_gaze" if gaze else ""}{"_row" if row else ""}{"_prof" if profile else ""}{"_cpu" if cpu else ""}{"" if wave else "_w0"}_{tag}'
     if not b.is_file():
-        subprocess.run([MOJO, 'build', '-I', str(ENGINE), '-I', str(IMKIT), *flags, f'-DFLIES={F}', '-DSTAGE=7', f'-DK={k}', '-DWAVE=1', f'-DW={w}', f'-DH={h}',
+        subprocess.run([MOJO, 'build', '-I', str(ENGINE), '-I', str(IMKIT), *flags, f'-DFLIES={F}', '-DSTAGE=7', f'-DK={k}', f'-DWAVE={int(wave)}', f'-DW={w}', f'-DH={h}',
                         f'-DPROWS={7 * (nb - 1)}', '-DBOX_MM=0', f'-DBRAIN={brain}', f'-DEYES={int(eyes)}', f'-DGAZE={int(gaze)}', f'-DEYEROW={int(row)}', *(['-DPROFILE=1'] if profile else []), *(['-DCPU=1'] if cpu else []), str(APP / 'live.mojo'), '-o', str(b)], check=True,
                        capture_output=True)
     return b
@@ -62,7 +72,7 @@ def sizes(d):
     return int(s['NQ']), int(s['NV']), int(s['NSLOT'])
 
 
-def run(d, F, k, brain, steps, packet=0, ctrl=None, eyes=False, cpu=False):
+def run(d, F, k, brain, steps, packet=0, ctrl=None, eyes=False, cpu=None):
     """Run `steps` control steps; returns the packets [(u, q, v, valid)] (every `packet`-th step and the last) and seconds.
     brain 1: ctrl(step) -> (F, NU) written to stdin each step."""
     nq, nv, ns = sizes(d)
