@@ -124,7 +124,9 @@ def main(seed, steps=2000, drop=0.0):
                     'tibia_flex_ext_corr': round(float(np.mean(alt)), 2) if alt else None, 'tibia_corr_vs_lf': cor}
         print(arm, json.dumps(res[arm]))
     print(f'{sec:.0f} s for {steps} steps x {len(cols)} flies; host senses {1e3 * host / steps / len(cols):.2f} ms per fly-step')
-    (fl.OUT / f'auto-fly-{seed}{"-drop" if drop else ""}.json').write_text(json.dumps(res))
+    tag = f'auto-fly-{seed}{"-drop" if drop else ""}'
+    (fl.OUT / f'{tag}.json').write_text(json.dumps(res))
+    np.savez_compressed(fl.OUT / f'{tag}-traj.npz', arms=np.array([f'{c[0]} #{c[1]}' for c in cols]), traj=np.array([tr[c] for c in cols], np.float32))  # tools/auto_fly_video.py
 
 
 if __name__ == '__main__':
