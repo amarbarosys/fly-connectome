@@ -51,7 +51,7 @@ def command(F, g, T, k, g0):
 
 
 def run(seed, cols, cfg, k, steps=fl.STEPS, keep=()):
-    """cols: [(arm, j)]; cfg[arm] = (taste on, mutant stop set, GP). Returns per-column metrics and readout means."""
+    """cols: [(arm, j)]; cfg[arm] = (taste on, mutant stop set, GP[, senses off: 'eyes', 'smell', ...]). Returns per-column metrics and readout means."""
     params = live.WORLD[:5] + (1,) + live.WORLD[6:]
     d, m, _ = fl.prepare(fl.OUT.parent / 'full-fly-world1', mjcf=live.terrain(fl.MJCF, params)[0], flat=fl.MJCF)
     q0 = np.fromfile(d / 'qpos.bin', np.float32).astype(float)
@@ -79,15 +79,17 @@ def run(seed, cols, cfg, k, steps=fl.STEPS, keep=()):
     read = np.unique(np.r_[np.concatenate(list(leg_mn.values())), v['dn'], fwd, real, mut])
     ix = lambda x: np.searchsorted(read, x)
     i_mn, i_dn, i_fw, i_stop = {leg: ix(leg_mn[leg]) for leg in L.LEGS6}, ix(v['dn']), ix(fwd), {False: ix(real), True: ix(mut)}
-    on = {c: [kk for kk in cells if kk[0].split('_')[0] in ALL and (cfg[c[0]][0] or not kk[0].startswith('taste'))] for c in cols}
+    off = {c: cfg[c[0]][3] if len(cfg[c[0]]) > 3 else () for c in cols}
+    on = {c: [kk for kk in cells if kk[0].split('_')[0] in ALL and kk[0].split('_')[0] not in off[c] and (cfg[c[0]][0] or not kk[0].startswith('taste'))] for c in cols}
     for ci, c in enumerate(cols):
-        b.stimulate(ids, 0.0, fly=ci, key=ci)
+        if 'eyes' not in off[c]:
+            b.stimulate(ids, 0.0, fly=ci, key=ci)
         for kk in on[c]:
             b.stimulate(cells[kk], 0.0, fly=ci, key=ci)
     nr = len(read)
     b.start([1], np.concatenate([ci * b.n + read for ci in range(len(cols))]).astype(np.int32))
     pos = {e: i for i, e in enumerate(b.stim)}
-    eye_slot = {ci: np.array([pos[ci * b.n + x] for x in ids], np.int64) for ci in range(len(cols))}
+    eye_slot = {ci: np.array([pos[ci * b.n + x] for x in ids], np.int64) for ci, c in enumerate(cols) if 'eyes' not in off[c]}
     slot = {ci: {kk: np.array([pos[ci * b.n + x] for x in cells[kk]], np.int64) for kk in on[c]} for ci, c in enumerate(cols)}
     p = np.fromiter(b.stim.values(), np.float32, len(b.stim))
     eng = fl.Engine(d, fl.K, f'hybrid{seed}', steps, F=len(cols), q0=[qs[c] for c in cols])
@@ -100,7 +102,7 @@ def run(seed, cols, cfg, k, steps=fl.STEPS, keep=()):
     for i in range(steps):
         h = time.perf_counter()
         for ci, c in enumerate(cols):
-            if i % EYE_EVERY == 0:
+            if i % EYE_EVERY == 0 and ci in eye_slot:
                 p[eye_slot[ci]] = eyes.rates(qs[c]) * b.dt
             r = feel[c].rates(qs[c])
             for kk, ss in slot[ci].items():
@@ -115,7 +117,7 @@ def run(seed, cols, cfg, k, steps=fl.STEPS, keep=()):
         mr = (cur - hist[(i + 1 - w2) % (WINDOW + 1)]) / (w2 * 1e-3)  # Hz over 20 ms
         u = []
         for ci, c in enumerate(cols):
-            taste, mutant, gp = cfg[c[0]]
+            taste, mutant, gp = cfg[c[0]][:3]
             F, g = float(x[ci, i_fw].mean()), float(x[ci, i_stop[mutant]].mean())
             T = float(np.clip(((x[ci, i_dn] - v['mu']) / v['sd']) @ v['w'] + v['y0'], -1, 1))
             dr, s, z = command(F, g, T, k, k['g0_mut'] if mutant else k['g0'])
@@ -209,6 +211,17 @@ def smoke():
     summary(out, ARMS)
 
 
+def probe(seed, reps=4):
+    """measured only: which sense sets the turn readout's bias. Tasteless, one sense group off per arm."""
+    seed = int(seed)
+    seeds.claim('u6_hybrid_probe', [seed])
+    cfg = {name: (False, False, K0['GP'], o) for name, o in (('all', ()), ('blind', ('eyes',)), ('no-gravity-body', ('gravity', 'body')),
+                                                             ('anosmic', ('smell',)), ('no-legs', ('legs',)), ('none', ('eyes', 'smell', 'gravity', 'body', 'legs')))}
+    out = run(seed, [(a, j) for j in range(reps) for a in cfg], cfg, K0)
+    summary(out, cfg)
+    (fl.OUT / f'u6-hybrid-probe-{seed}.json').write_text(json.dumps({f'{a} {j}': r for (a, j), r in out.items()}))
+
+
 def check():
     """CPU preflight: stop sets, the command mapping, taste wiring keys."""
     from agent.mcns_mapping import annotation_table
@@ -229,4 +242,4 @@ def check():
 
 
 if __name__ == '__main__':
-    {'fit': fit, 'sweep': sweep, 'gate': gate, 'check': check, 'smoke': smoke}[sys.argv[1]](*sys.argv[2:])
+    {'fit': fit, 'sweep': sweep, 'gate': gate, 'check': check, 'smoke': smoke, 'probe': probe}[sys.argv[1]](*sys.argv[2:])
