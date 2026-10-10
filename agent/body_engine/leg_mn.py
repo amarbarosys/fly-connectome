@@ -180,14 +180,38 @@ def act_id(m, leg, j):
     return mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_ACTUATOR, f'fly/{parent}-{leg}_{j.split("-")[0]}-{j.split("-")[1]}-position')
 
 
-def watch(seed, steps=1000, doses='0'):
+ADAPT_TAU, ADAPT_B = 0.1, -1.75  # s; slow current per unit level: strength 1 at 20 Hz steady firing gives about -3.5 mV (half V_TH)
+
+
+def adapt_brain(seed, strengths):
+    """brain() plus spike adaptation, no engine change: one self-edge per neuron (MCNS has no autapses) in its own edge
+    group, routed to slow plane 0 (ShiuLive.modulate): each spike adds 1 to the neuron's own level m, which decays with
+    ADAPT_TAU and feeds back ADAPT_B x m as a slow current. Column c's self-edges are scaled by strengths[c]."""
+    from agent import shiu_g1
+    from agent.shiu import ShiuLive
+    pre, post, w = next(shiu_g1.arms(mcns.graph(), 'mcns'))[1]
+    n = mcns.graph()[4][0]
+    b = ShiuLive(np.r_[pre, np.arange(n)], np.r_[post, np.arange(n)], np.r_[w, np.ones(n, w.dtype)], n=n, flies=len(strengths), seed=seed)
+    epre = np.repeat(np.arange(n), np.diff(b.row))
+    b.edge_groups((b.col == epre).astype(np.uint8), np.array([[1.0, s_] for s_ in strengths], np.float32))
+    b.modulate([-1, 0], (ADAPT_TAU,), (0.0,), (ADAPT_B,))
+    dn, _ = descending_name_sets()
+    for c in range(len(strengths)):
+        b.stimulate(dn['forward'], FWD_HZ, fly=c, key=c)
+    return b
+
+
+def watch(seed, steps=1000, doses='0', adapt=None):
     """What fires: forward DNs 80 Hz, no MN stimulus, all six legs' named MNs mapped to their own leg (U4a rule).
     doses: comma list of f, one column each: a constant background current on every neuron settling it at f x V_TH
     (I = f V_TH / T_MBR, mV per ms; f >= 1 fires on its own). Plus 4,000 random cells read for the brain-wide rate."""
     from agent.shiu import T_MBR, V_TH
     seed, steps, doses = int(seed), int(steps), [float(x) for x in str(doses).split(',')]
+    strengths = None if adapt is None else [float(x) for x in str(adapt).split(',')]
+    if strengths:
+        doses = doses * len(strengths) if len(doses) == 1 else doses
     F = len(doses)
-    seeds.claim('leg_mn_watch' if doses == [0.0] else 'leg_mn_watch_bg', [seed])
+    seeds.claim('leg_mn_watch_adapt' if strengths else 'leg_mn_watch' if doses == [0.0] else 'leg_mn_watch_bg', [seed])
     a = pd.read_feather(mcns.DATA / 'body-annotations-male-cns-v1.0-minconf-0.5.feather', columns=['status', 'superclass', 'subclass', 'somaSide', 'type'])
     a = a[a['status'].isin(['Traced', 'Anchor'])].reset_index(drop=True)
     sub, sd, ty = a.subclass.fillna('').to_numpy(), a.somaSide.fillna('').str[:1].to_numpy(), a.type.fillna('').to_numpy()
@@ -202,7 +226,7 @@ def watch(seed, steps=1000, doses='0'):
     acts = {leg: [act_id(m, leg, j) for j in JOINTS] for leg in LEGS6}
     qadr = {leg: m.jnt_qposadr[m.actuator_trnid[acts[leg], 0]] for leg in LEGS6}
     dn, _ = descending_name_sets()
-    b, *_ = brain(cols=F, seed=seed)  # brain() drives the forward DNs at 80 Hz
+    b = adapt_brain(seed, strengths) if strengths else brain(cols=F, seed=seed)[0]  # both drive the forward DNs at 80 Hz
     sample = np.random.default_rng(0).choice(np.setdiff1d(np.arange(b.n), allmn), 4000, replace=False)
     for c, f_ in enumerate(doses):
         if f_ > 0:
@@ -232,7 +256,7 @@ def watch(seed, steps=1000, doses='0'):
     eng.close()
     allc, tr_all = np.array(counts), np.degrees(np.array(tr))  # (steps, F, cells), (steps, F, 6, 7)
     for c, f_ in enumerate(doses):
-        print(f'=== background f {f_} (x V_TH): brain sample firing > 0.5 Hz {(allc[:, c, len(allmn):].sum(0) > 0.5 * steps * 1e-3).mean():.3f}, '
+        print(f'=== background f {f_} (x V_TH){"" if not strengths else f", adaptation {strengths[c]}"}: brain sample firing > 0.5 Hz {(allc[:, c, len(allmn):].sum(0) > 0.5 * steps * 1e-3).mean():.3f}, '
               f'mean {allc[:, c, len(allmn):].sum(0).mean() / (steps * 1e-3):.1f} Hz')
         _report(allc[:, c, :len(allmn)], tr_all[:, c], q[c], q0, allmn, sub, sd, ty, steps)
     np.save(fl.OUT / f'leg-watch-{seed}.npy', {'counts': allc.astype(np.uint8), 'angles': tr_all.astype(np.float32), 'cells': R, 'doses': doses}, allow_pickle=True)
@@ -257,4 +281,4 @@ def _report(counts, tr, q, q0, allmn, sub, sd, ty, steps):
 
 
 if __name__ == '__main__' and sys.argv[1:2] == ['watch']:
-    watch(*sys.argv[2:])
+    watch(*sys.argv[2:])  # SEED [STEPS] [DOSES] [ADAPT strengths]
