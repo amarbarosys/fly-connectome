@@ -84,14 +84,14 @@ def trial(arms, repeats, seed):
         b.stimulate(dn['forward'], FWD_HZ, fly=ci, key=ci)
         b.stimulate(ids, 0.0, fly=ci, key=ci)
         for k, x in cells[arms[c[0]]['swap']].items():
-            if k[0] in arms[c[0]]['senses']:
+            if k[0].split('_')[0] in arms[c[0]]['senses']:
                 b.stimulate(x, 0.0, fly=ci, key=ci)
     nm = len(f['mnL']) + len(f['mnR'])
     nc = nm + len(v['dn'])
     b.start([1], np.concatenate([ci * b.n + np.r_[f['mnL'], f['mnR'], v['dn']] for ci in range(len(cols))]).astype(np.int32))
     pos = {e: i for i, e in enumerate(b.stim)}
     eye_slot = {ci: np.array([pos[ci * b.n + x] for x in ids], np.int64) for ci in range(len(cols))}
-    slot = {ci: {k: np.array([pos[ci * b.n + x] for x in xs], np.int64) for k, xs in cells[arms[c[0]]['swap']].items() if k[0] in arms[c[0]]['senses']}
+    slot = {ci: {k: np.array([pos[ci * b.n + x] for x in xs], np.int64) for k, xs in cells[arms[c[0]]['swap']].items() if k[0].split('_')[0] in arms[c[0]]['senses']}
             for ci, c in enumerate(cols)}
     p = np.fromiter(b.stim.values(), np.float32, len(b.stim))
 

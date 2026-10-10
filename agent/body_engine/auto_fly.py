@@ -61,12 +61,12 @@ def main(seed, steps=2000, drop=0.0, ring=0.0):
         if ARMS[c[0]][0]:
             b.stimulate(ids, 0.0, fly=ci, key=ci)
             for k, x in cells.items():
-                if k[0] in ALL:
+                if k[0].split('_')[0] in ALL:
                     b.stimulate(x, 0.0, fly=ci, key=ci)
     b.start([1], np.concatenate([ci * b.n + out for ci in range(len(cols))]).astype(np.int32))
     pos = {e: i for i, e in enumerate(b.stim)}
     eye_slot = {ci: np.array([pos[ci * b.n + x] for x in ids], np.int64) for ci, c in enumerate(cols) if ARMS[c[0]][0]}
-    slot = {ci: {k: np.array([pos[ci * b.n + x] for x in xs], np.int64) for k, xs in cells.items() if k[0] in ALL}
+    slot = {ci: {k: np.array([pos[ci * b.n + x] for x in xs], np.int64) for k, xs in cells.items() if k[0].split('_')[0] in ALL}
             for ci, c in enumerate(cols) if ARMS[c[0]][0]}
     p = np.fromiter(b.stim.values(), np.float32, len(b.stim))
     eng = fl.Engine(d, fl.K, f'autofly{seed}', steps, F=len(cols), q0=[qs[c] for c in cols])
