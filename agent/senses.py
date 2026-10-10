@@ -7,8 +7,9 @@ One registry: each sense is a list of (cell ids, Hz) built once per model and re
   taste    a leg's taste site over a food patch -> that leg's gustatory leg-bristle neurons (MCNS labels no sweet receptor)
   body     a non-leg fly geom touching the world -> mechanosensory bristles entering by ADMN / PDMN (notum), by side
   gravity  thorax roll -> Johnston's organ wind_gravity neurons of the downhill side, RMAX x |roll| / 30 deg
-Sensory neurons have no soma side in MCNS (somata sit outside the CNS), so each takes the side its synapses mostly go to
-(one hop, as fly_legsense does for legs). Odor and food are engineered stand-ins at fly scale (the world plume is 100 mm
+Sensory neurons have no soma side in MCNS (somata sit outside the CNS); each takes the side in its instance name
+('ORN_VA2_R'), else the side its synapses mostly go to (one hop). The vote alone is chance for ORNs (most project to
+both antennal lobes, 1.4x more synapses ipsilateral, cf. Gaudry 2013's 40 % more release). Odor and food are engineered stand-ins at fly scale (the world plume is 100 mm
 wide, so two antennae 0.5 mm apart read the same value); hygro- and thermosensory cells get nothing: the world has no
 humidity or temperature field.
   python -m agent.senses check     CPU: every sense has cells, rates are finite, and each side mutant flips on a static pose
@@ -41,11 +42,11 @@ def cells(swap=False):
     """{(sense, key): MCNS ids}; swap: every left/right label exchanged (the side mutant)."""
     from agent import mcns
     a = pd.read_feather(mcns.DATA / 'body-annotations-male-cns-v1.0-minconf-0.5.feather',
-                        columns=['status', 'class', 'subclass', 'type', 'entryNerve', 'somaSide'])
+                        columns=['status', 'class', 'subclass', 'type', 'entryNerve', 'somaSide', 'instance'])
     a = a[a['status'].isin(['Traced', 'Anchor'])].reset_index(drop=True)  # graph() order
     pre, post, w, _, _ = mcns.graph()
     side = a.somaSide.fillna('').str[:1].str.upper().to_numpy()
-    cl, sub, ty, nerve = (a[c].fillna('').to_numpy() for c in ('class', 'subclass', 'type', 'entryNerve'))
+    cl, sub, ty, nerve, inst = (a[c].fillna('').to_numpy() for c in ('class', 'subclass', 'type', 'entryNerve', 'instance'))
     out = {('legs', k): v for k, v in ls.cells().items()}
     groups = {'smell': (cl == 'olfactory') & np.isin(pd.Series(ty).str.replace('ORN_', '').to_numpy(), VINEGAR),
               'body': (cl == 'mechanosensory_tactile') & np.isin(nerve, ['ADMN', 'PDMN']),
@@ -53,7 +54,8 @@ def cells(swap=False):
     groups |= {f'taste_{g}': (cl == 'gustatory') & (sub == 'leg bristle') & (nerve == n) for g, n in LEG_NERVE.items()}
     for g, m in groups.items():
         ids = np.flatnonzero(m)
-        s = sided(ids, pre, post, w, side)
+        named = np.array([x[-2:] in ('_L', '_R') for x in inst[ids]], bool)
+        s = np.where(named, np.array([x[-1:] for x in inst[ids]]), sided(ids, pre, post, w, side))  # the instance side (the antenna / leg of origin) where named: the vote agreed with it for 46 % of ORNs and 25 % of leg GRNs
         for sd in 'LR':
             out[g, sd if not swap else {'L': 'R', 'R': 'L'}[sd]] = ids[s == sd]
     return out
