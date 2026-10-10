@@ -116,7 +116,7 @@ def paths(rng, k):
     return h, u, np.degrees(np.angle(-(u * np.exp(1j * np.radians(h))).sum(1))) % 360
 
 
-def home_trials(cols, shuffle=None, seed=73, slow=None):
+def home_trials(cols, shuffle=None, seed=73, slow=None, arm=None):
     """cols: (heading, speed, odometer on, key column or None) per column. Compass cue on EPG at the leg heading and
     odometer at ODO_HZ x speed during each leg, then both off: counts (columns, n) over HOME_READ_STEPS. CPU oracle."""
     from agent.shiu import ShiuBrain
@@ -124,6 +124,8 @@ def home_trials(cols, shuffle=None, seed=73, slow=None):
     n, s = len(keep), pd.Series(types)
     epg = np.flatnonzero(s.str.startswith('EPG').to_numpy() & ~np.isnan(phase))
     odo = np.flatnonzero(s.str.match('^(' + '|'.join(ODO) + ')').to_numpy())
+    if arm is not None:  # A4c: E = IbSpsP excitation at ODO_HZ x speed; D = LNO disinhibition at ODO_HZ x (1 - speed)
+        odo = np.flatnonzero(s.str.match(r'^IbSpsP' if arm == 'E' else r'^(LNO1|LNO2|LNOa)$').to_numpy())
     b = ShiuBrain(p, q, w, n=n, flies=len(cols), seed=seed)
     if slow is not None:  # A4b: synapses onto the memory cells feed a slow integrating current (plane 0) instead of g
         mem = np.flatnonzero(s.str.match(r'^(PFNa|PFNd|PFNv|hDelta)').to_numpy())
@@ -135,7 +137,9 @@ def home_trials(cols, shuffle=None, seed=73, slow=None):
             rate = CUE_HZ * np.maximum(0, np.cos(np.radians(phase[epg] - h[leg])))
             for r in np.unique(rate[rate > 0]):
                 b.stimulate(epg[rate == r], float(r), fly=c, key=key, window=win)
-            if on:
+            if arm == 'D':
+                b.stimulate(odo, ODO_HZ * (1 - float(u[leg])) if on else ODO_HZ / 2, fly=c, key=key, window=win)
+            elif on:
                 b.stimulate(odo, ODO_HZ * float(u[leg]), fly=c, key=key, window=win)
         b.run([win[1]])
     before = b.spikes.copy()
@@ -149,14 +153,14 @@ def home_decode(x, types, phase, fb, cand, s=1, o=0.0):
     return (s * decode(x[:, m], (phase if mp == 'PB' else fb)[m]) - o) % 360
 
 
-def home(seed=73, k=32, slow=None, gate=True):
+def home(seed=73, k=32, slow=None, gate=True, arm=None):
     """A4 (docs/plans/ANT.md): home direction from the CX after scripted outbounds; seed claimed in docs/seeds_used.json."""
     rng = np.random.default_rng(seed)
     fit, test = paths(rng, k), paths(rng, k)
     cols = [(h, u, True, None) for h, u in zip(*fit[:2])] + [(h, u, True, None) for h, u in zip(*test[:2])]
     cols += [(h, u, False, k + i) for i, (h, u) in enumerate(zip(*test[:2]))]  # no odometer, cue draws of the real column
-    x, types, phase, fb, odo = home_trials(cols, seed=seed, slow=slow)
-    xs = home_trials([(h, u, True, None) for h, u in zip(*test[:2])], shuffle=5, seed=seed, slow=slow)[0]
+    x, types, phase, fb, odo = home_trials(cols, seed=seed, slow=slow, arm=arm)
+    xs = home_trials([(h, u, True, None) for h, u in zip(*test[:2])], shuffle=5, seed=seed, slow=slow, arm=arm)[0]
     best = None
     for cand in HOME_READ:
         for s in (1, -1):
@@ -197,14 +201,15 @@ def home(seed=73, k=32, slow=None, gate=True):
     print('PASS ant CX home vector: the fly central complex holds the way home after a 3-leg outbound')
 
 
-def home_fit(seed=74):
+def home_fit(seed=74, arm=None):
     """A4b fit: T x b grid on seed 74, best real TEST hits (ANT.md); prints the grid, returns (T, b)."""
     from agent import seeds
-    seeds.claim('ant_cx_home_fit', [seed])
+    seed = int(seed)
+    seeds.claim('ant_cx_home_fit' + (f'_{arm}' if arm else ''), [seed])
     res = {}
     for T in (0.5, 1.0, 2.0, 4.0):
         for bb in (0.02, 0.05, 0.1, 0.2):
-            hits, base = home(seed, slow=(T, bb), gate=False)
+            hits, base = home(seed, slow=(T, bb), gate=False, arm=arm)
             res[T, bb] = hits['real']
             print(f'GRID T {T} b {bb}: real {hits["real"]}, no odometer {hits["no odometer"]}, shuffled {hits["shuffled CX"]}, baseline {base}', flush=True)
     best = max(res, key=res.get)
@@ -212,17 +217,17 @@ def home_fit(seed=74):
     return best
 
 
-def home_b(seed=75, T=None, b=None):
+def home_b(seed=75, T=None, b=None, arm=None):
     """A4b gate on seed 75 with the frozen T, b; also the b = 0 arm, reported."""
     from agent import seeds
     seed = int(seed)
-    seeds.claim("ant_cx_home_b", [seed])
+    seeds.claim('ant_cx_home_b' + (f'_{arm}' if arm else ''), [seed])
     print('--- reported: b = 0 (no integration)')
-    home(seed, slow=(float(T), 0.0), gate=False)
+    home(seed, slow=(float(T), 0.0), gate=False, arm=arm)
     print(f'--- gate: T {T} b {b}')
-    home(seed, slow=(float(T), float(b)))
+    home(seed, slow=(float(T), float(b)), arm=arm)
 
 
 if __name__ == '__main__':
-    {'heading': heading, 'home': home, 'home_fit': home_fit, 'home_b': home_b}[sys.argv[1]](*map(float, sys.argv[2:])) if sys.argv[1] == 'home_b' else \
-        {'heading': heading, 'home': home, 'home_fit': home_fit}[sys.argv[1]](*map(int, sys.argv[2:]))
+    num = lambda v: int(v) if v.lstrip('-').isdigit() else float(v) if v.replace('.', '', 1).lstrip('-').isdigit() else v
+    {'heading': heading, 'home': home, 'home_fit': home_fit, 'home_b': home_b}[sys.argv[1]](*map(num, sys.argv[2:]))
