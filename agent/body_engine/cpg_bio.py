@@ -7,7 +7,7 @@ spike-triggered plateau, the stand-in for a persistent inward current) and W_SYN
 cell fire a burst; the adaptation ends it and holds the cell silent until it decays. Alternation between antagonists must
 come from the connectome (13A / 13B inhibitory premotor neurons, Syed et al. 2026). MNs, sensory and brain cells unchanged.
   python -m agent.body_engine.cpg_bio cpu                 CPU: one cell bursts, a half-center alternates, its no-inhibition mutant does not
-  gpu-wait ... -- .venv/bin/python -m agent.body_engine.cpg_bio fit SEED TP,TA [TP,TA ...]   FIT sweep (SP x SA per column)
+  gpu-wait ... -- .venv/bin/python -m agent.body_engine.cpg_bio fit SEED SPEC TP,TA [TP,TA ...]   FIT sweep (SP x SA per column), SPEC cells:mode:het
   gpu-wait ... -- .venv/bin/python -m agent.body_engine.cpg_bio gate SEED                    G1 real VNC, G2 shuffled VNC
   gpu-wait ... -- .venv/bin/python -m agent.body_engine.cpg_bio g3                           G3: mechanism off == main, 200 steps
 """
@@ -23,7 +23,8 @@ import pandas as pd
 
 from agent import mcns, seeds
 
-TAU_P, TAU_A, SP, SA = 0.005, 0.08, 160.0, 5.0  # s, s, plateau and adaptation scale per spike (x W_SYN mV); FIT seed sets the final values
+TAU_P, TAU_A, SP, SA = 0.01, 0.03, 160.0, 40.0  # s, s, plateau and adaptation scale per spike (x W_SYN mV); frozen on FIT 605 (FULL_FLY.md U6)
+SPEC = 'exc:add:0'  # bio_brain: which cells (excitatory vnc_intrinsic), plateau mode, heterogeneity; frozen on FIT 605
 VNC = ('vnc_intrinsic', 'vnc_motor', 'vnc_efferent', 'ascending_neuron')  # G2: edges with both ends in these are shuffled
 SHUFFLE_SEED = 0
 STEPS, BIN, REPEATS = 1000, 10, 2  # 1 ms control steps (K = 10 ticks each); 10 ms bins; FIT repeats per setting
@@ -57,10 +58,21 @@ def graph(shuffle=False):
     return pre, post, w
 
 
-def with_bursts(pre, post, w, cells):
-    """Append two self-edges per burst cell (plateau, then adaptation); MCNS has no autapses."""
+def with_bursts(pre, post, w, cells, het=0.0):
+    """Append two self-edges per burst cell (plateau, then adaptation); MCNS has no autapses. het: the plateau self-edge
+    weight is exp(het x N(0, 1)) per cell (fixed draw, seed 0), so cells burst at different rates."""
     assert not (pre == post).any()
-    return np.r_[pre, cells, cells], np.r_[post, cells, cells], np.r_[w, np.ones(2 * len(cells), w.dtype)]
+    wp = np.exp(het * np.random.default_rng(0).standard_normal(len(cells))).astype(w.dtype)
+    return np.r_[pre, cells, cells], np.r_[post, cells, cells], np.r_[w, wp, np.ones(len(cells), w.dtype)]
+
+
+def burst_cells(which, pre=None, w=None):
+    """vnc_intrinsic cells given the mechanism: all, inh (net outgoing synapse count < 0) or exc (> 0)."""
+    cells = np.flatnonzero(table().superclass.to_numpy() == 'vnc_intrinsic')
+    if which == 'all':
+        return cells
+    net = np.bincount(pre, w.astype(np.float64), minlength=len(table()))[cells]
+    return cells[net < 0] if which == 'inh' else cells[net > 0]
 
 
 def groups(b, cells):
@@ -73,16 +85,20 @@ def groups(b, cells):
     return g
 
 
-def bio_brain(seed, scales, tau=(TAU_P, TAU_A), shuffle=False):
-    """ShiuLive with the burst mechanism on every vnc_intrinsic cell, forward DNs 80 Hz in every column.
-    scales: per column (plateau scale, adaptation scale); (0, 0) is the mechanism present but silent."""
+def bio_brain(seed, scales, tau=(TAU_P, TAU_A), shuffle=False, spec=None):
+    """ShiuLive with the burst mechanism on vnc_intrinsic cells, forward DNs 80 Hz in every column.
+    scales: per column (plateau scale, adaptation scale); (0, 0) is the mechanism present but silent.
+    spec 'cells:mode:het' (default SPEC): cells all / inh / exc; mode add (plateau is a depolarizing current) or gain
+    (plateau multiplies the cell's synaptic conductance, excitatory and inhibitory alike: 1 + level); het as with_bursts."""
     from agent.body_engine.mcns_link import FWD_HZ
     from agent.mcns_mapping import descending_name_sets
     from agent.shiu import ShiuLive
-    cells = np.flatnonzero(table().superclass.to_numpy() == 'vnc_intrinsic')
-    b = ShiuLive(*with_bursts(*graph(shuffle), cells), n=mcns.graph()[4][0], flies=len(scales), seed=seed)
+    which, mode, het = (spec or SPEC).split(':')
+    pre, post, w = graph(shuffle)
+    cells = burst_cells(which, *graph(False)[::2])  # the subset from the real wiring, also under the shuffle
+    b = ShiuLive(*with_bursts(pre, post, w, cells, float(het)), n=mcns.graph()[4][0], flies=len(scales), seed=seed)
     b.edge_groups(groups(b, cells), np.array([[1.0, sp, sa] for sp, sa in scales], np.float32))
-    b.modulate([-1, 0, 1], tau, (0.0, 0.0), (1.0, -1.0))
+    b.modulate([-1, 0, 1], tau, (0.0, 0.0) if mode == 'add' else (1.0, 0.0), (1.0, -1.0) if mode == 'add' else (0.0, -1.0))
     dn, _ = descending_name_sets()
     for c in range(len(scales)):
         b.stimulate(dn['forward'], FWD_HZ, fly=c, key=c)
@@ -139,14 +155,15 @@ def describe(counts, F, E, sample, steps=STEPS):
     return out
 
 
-def fit(seed, *taus):
+def fit(seed, spec, *taus):
     """FIT sweep: one run per TP,TA (s); columns = (0, 0) then SP x SA, each setting twice (independent Poisson draws:
     a column's own key). Writes per-setting measures and the flexor / extensor / sample counts (uint8) per run."""
     seed = int(seed)
-    seeds.claim('u6_bio_fit', [seed])
+    seeds.claim('u6_bio_fit' if spec == 'all:add:0' else f'u6_bio_fit_{spec}', [seed])
     a = table()
     F, E, sample, R = readout_cells(a)
-    sps, sas = (40.0, 80.0, 120.0, 160.0, 240.0), (2.5, 5.0, 10.0, 20.0)
+    sps = (40.0, 80.0, 160.0, 240.0, 320.0) if ':add:' in spec else (0.5, 1.0, 2.0, 4.0, 8.0)
+    sas = (2.5, 5.0, 10.0, 20.0, 40.0)
     grid = [(0.0, 0.0)] + list(itertools.product(sps, sas))
     cols = grid * REPEATS
     OUT.mkdir(parents=True, exist_ok=True)
@@ -154,17 +171,17 @@ def fit(seed, *taus):
     for tt in taus:
         tau = tuple(float(x) for x in tt.split(','))
         t0 = time.perf_counter()
-        counts = run(bio_brain(seed, cols, tau), R)
+        counts = run(bio_brain(seed, cols, tau, spec=spec), R)
         sec = time.perf_counter() - t0
         d = describe(counts, F, E, sample)
         for i, (sp, sa) in enumerate(grid):
             ms = d[i::len(grid)]
             m = {k: round(float(np.mean([x[k] for x in ms])), 3) for k in ms[0]} | {'corr_each': [x['corr'] for x in ms]}
-            res[f'{tau[0]}/{tau[1]} {sp:g}/{sa:g}'] = m
-            print(f'tau {tau[0]}/{tau[1]} plateau {sp:g} adapt {sa:g}:', json.dumps(m), flush=True)
-        np.savez_compressed(OUT / f'fit-{seed}-{tau[0]}-{tau[1]}.npz', counts=np.minimum(counts, 255).astype(np.uint8), cols=np.array(cols), F=F, E=E, sample=sample)
+            res[f'{spec} {tau[0]}/{tau[1]} {sp:g}/{sa:g}'] = m
+            print(f'{spec} tau {tau[0]}/{tau[1]} plateau {sp:g} adapt {sa:g}:', json.dumps(m), flush=True)
+        np.savez_compressed(OUT / f'fit-{seed}-{spec.replace(":", "_")}-{tau[0]}-{tau[1]}.npz', counts=np.minimum(counts, 255).astype(np.uint8), cols=np.array(cols), F=F, E=E, sample=sample)
         print(f'{sec:.0f} s for {STEPS} steps x {len(cols)} columns', flush=True)
-    (OUT / f'fit-{seed}.json').write_text(json.dumps(res, indent=1))
+    (OUT / f'fit-{seed}-{spec.replace(":", "_")}.json').write_text(json.dumps(res, indent=1))
 
 
 def gate(seed):
