@@ -21,6 +21,8 @@ CUE_HZ, ON, OFF, REPEATS = 150.0, 3000, 6000, 2  # Hz at the preferred phase; st
 FIT, TEST = (0, 90, 180, 270), (45, 135, 225, 315)
 ODO = ('LNO1', 'LNO2', 'LNOa', 'LCNOp', 'IbSpsP')  # noduli inputs onto PFN (LCNOp also matches LCNOpm): A4's odometer
 ODO_HZ, LEG, HOME_READ_STEPS, HIT = 150.0, 2000, 3000, 45.0  # Hz at speed 1; steps per outbound leg, readout after; hit bar deg
+CLASSES = ('EPG', 'PEG', 'PEN_a', 'PEN_b', 'Delta7', 'hDelta', 'PFNa', 'PFNd', 'PFNv', 'PFL2', 'PFL3', 'ER4d', 'LNO1', 'LNO2', 'LNOa', 'LCNOp', 'IbSpsP', 'TN')  # A5 gain classes
+A5_SLOW = (1.0, 0.1)
 HOME_READ = (('PFNa', 'PB'), ('PFNa', 'FB'), ('PFNd', 'PB'), ('PFNd', 'FB'), ('PFNv', 'PB'), ('PFNv', 'FB'),
              ('hDelta', 'FB'), ('PFL3', 'PB'), ('PFL3', 'FB'))
 
@@ -116,7 +118,7 @@ def paths(rng, k):
     return h, u, np.degrees(np.angle(-(u * np.exp(1j * np.radians(h))).sum(1))) % 360
 
 
-def home_trials(cols, shuffle=None, seed=73, slow=None, arm=None):
+def home_trials(cols, shuffle=None, seed=73, slow=None, arm=None, gain=None):
     """cols: (heading, speed, odometer on, key column or None) per column. Compass cue on EPG at the leg heading and
     odometer at ODO_HZ x speed during each leg, then both off: counts (columns, n) over HOME_READ_STEPS. CPU oracle."""
     from agent.shiu import ShiuBrain
@@ -129,8 +131,14 @@ def home_trials(cols, shuffle=None, seed=73, slow=None, arm=None):
     b = ShiuBrain(p, q, w, n=n, flies=len(cols), seed=seed)
     if slow is not None:  # A4b: synapses onto the memory cells feed a slow integrating current (plane 0) instead of g
         mem = np.flatnonzero(s.str.match(r'^(PFNa|PFNd|PFNv|hDelta)').to_numpy())
-        b.edge_groups(np.isin(b.col, mem).astype(np.uint8), np.ones((len(cols), 2), np.float32))
-        b.modulate([-1, 0], (slow[0],), (0.0,), (slow[1],))
+        onto = np.isin(b.col, mem).astype(np.uint8)
+        if gain is None:
+            b.edge_groups(onto, np.ones((len(cols), 2), np.float32))
+            b.modulate([-1, 0], (slow[0],), (0.0,), (slow[1],))
+        else:  # A5: group = 2 x pre type class + onto a memory cell; gain (columns or 1, 34) multiplies each group
+            cls = s.str.extract('^(' + '|'.join(CLASSES) + ')')[0].map({c: i for i, c in enumerate(CLASSES)}).to_numpy().astype(np.uint8)
+            b.edge_groups(2 * cls[np.repeat(np.arange(n), np.diff(b.row))] + onto, np.broadcast_to(np.asarray(gain, np.float32), (len(cols), 2 * len(CLASSES))))
+            b.modulate([-1, 0] * len(CLASSES), (slow[0],), (0.0,), (slow[1],))
     for leg in range(3):
         win = (leg * LEG, (leg + 1) * LEG)
         for c, (h, u, on, key) in enumerate(cols):
@@ -153,14 +161,14 @@ def home_decode(x, types, phase, fb, cand, s=1, o=0.0):
     return (s * decode(x[:, m], (phase if mp == 'PB' else fb)[m]) - o) % 360
 
 
-def home(seed=73, k=32, slow=None, gate=True, arm=None):
+def home(seed=73, k=32, slow=None, gate=True, arm=None, gain=None):
     """A4 (docs/plans/ANT.md): home direction from the CX after scripted outbounds; seed claimed in docs/seeds_used.json."""
     rng = np.random.default_rng(seed)
     fit, test = paths(rng, k), paths(rng, k)
     cols = [(h, u, True, None) for h, u in zip(*fit[:2])] + [(h, u, True, None) for h, u in zip(*test[:2])]
     cols += [(h, u, False, k + i) for i, (h, u) in enumerate(zip(*test[:2]))]  # no odometer, cue draws of the real column
-    x, types, phase, fb, odo = home_trials(cols, seed=seed, slow=slow, arm=arm)
-    xs = home_trials([(h, u, True, None) for h, u in zip(*test[:2])], shuffle=5, seed=seed, slow=slow, arm=arm)[0]
+    x, types, phase, fb, odo = home_trials(cols, seed=seed, slow=slow, arm=arm, gain=gain)
+    xs = home_trials([(h, u, True, None) for h, u in zip(*test[:2])], shuffle=5, seed=seed, slow=slow, arm=arm, gain=gain)[0]
     best = None
     for cand in HOME_READ:
         for s in (1, -1):
@@ -228,6 +236,79 @@ def home_b(seed=75, T=None, b=None, arm=None):
     home(seed, slow=(float(T), float(b)), arm=arm)
 
 
+def fitness(x, types, phase, fb, home_dir):
+    """A5 brain fitness: best over HOME_READ x sign of mean cos(home error), offset fitted on the same paths."""
+    best = -1.0
+    for cand in HOME_READ:
+        for sg in (1, -1):
+            raw = home_decode(x, types, phase, fb, cand, sg)
+            z = np.exp(1j * np.radians(raw - home_dir))
+            best = max(best, float(np.abs(z.mean())) if np.isfinite(z).all() else -1.0)  # |mean| = mean cos at the fitted offset
+    return best
+
+
+def search(seed=79, shuffle=None, gens=30, pop=16, k=32, sigma=0.5, step=0.5):
+    """A5 search (ANT.md): diagonal ES on log2 gains; fresh paths per generation; returns the final mean g."""
+    import time
+    rng, g = np.random.default_rng(seed), np.zeros(2 * len(CLASSES))
+    for gen in range(gens):
+        t0 = time.perf_counter()
+        h, u, d = paths(rng, k)
+        eps = rng.standard_normal((pop // 2, len(g)))
+        eps = np.vstack([eps, -eps])
+        G = np.clip(g + sigma * eps, -3, 3)
+        cols = [(hh, uu, True, None) for _ in range(pop) for hh, uu in zip(h, u)]
+        x, types, phase, fb, _ = home_trials(cols, shuffle, seed=seed + gen, slow=A5_SLOW, gain=np.repeat(2.0 ** G, k, 0))
+        f = np.array([fitness(x[i * k:(i + 1) * k], types, phase, fb, d) for i in range(pop)])
+        r = (np.argsort(np.argsort(f)) / (pop - 1)) - 0.5
+        g = np.clip(g + step / (pop * sigma) * (r @ eps), -3, 3)
+        print(f'GEN {gen} {"shuffled" if shuffle is not None else "real"}: fitness mean {f.mean():.3f} max {f.max():.3f} ({time.perf_counter() - t0:.0f} s)', flush=True)
+    print('GAINS', ' '.join(f'{c}{"/mem" if j else ""}={v:+.2f}' for (c, j), v in zip([(c, j) for c in CLASSES for j in (0, 1)], g)), flush=True)
+    return g
+
+
+def a5(seed=79, gate_seed=80, gens=30):
+    """A5: real and shuffled-wiring searches on `seed`, gate on `gate_seed` (ANT.md)."""
+    from agent import seeds
+    seeds.claim('ant_cx_a5_search', [int(seed)])
+    seeds.claim('ant_cx_a5_gate', [int(gate_seed)])
+    g, gs = search(seed, None, gens), search(seed, 5, gens)
+    np.savez(mcns.ROOT / '.work/agent/ant/a5-gains.npz', real=g, shuffled=gs)
+    print('--- gate: real searched gains')
+    hits, base = home(gate_seed, slow=A5_SLOW, gate=False, gain=2.0 ** g)
+    print('--- shuffled-search gains (on its own shuffled wiring is the search; here scored on the real CX procedure with shuffle 5)')
+    hs = shuffled_hits(gate_seed, 2.0 ** gs)
+    ok = [(f"real: {hits['real']}/32 >= 26 and >= baseline {base} + 8", hits['real'] >= 26 and hits['real'] >= base + 8),
+          (f"control shuffled search: {hs}/32 <= baseline {base} + 3", hs <= base + 3),
+          (f"mutant no odometer: {hits['no odometer']}/32 <= baseline {base} + 3", hits['no odometer'] <= base + 3),
+          (f"mutant shuffled CX with real gains: {hits['shuffled CX']}/32 <= 12", hits['shuffled CX'] <= 12)]
+    for msg, v in ok:
+        print(('PASS ' if v else 'FAIL ') + msg)
+    if not all(v for _, v in ok):
+        sys.exit('FAIL ant CX A5 gain search')
+    print('PASS ant CX A5: searched gains on the fixed MCNS wiring hold the way home')
+
+
+def shuffled_hits(seed, gain, k=32):
+    """the shuffled-search brain under the A4 procedure: decoder on FIT, hits on TEST, all on shuffled wiring 5."""
+    rng = np.random.default_rng(seed)
+    fit, test = paths(rng, k), paths(rng, k)
+    cols = [(h, u, True, None) for h, u in zip(*fit[:2])] + [(h, u, True, None) for h, u in zip(*test[:2])]
+    x, types, phase, fb, _ = home_trials(cols, 5, seed=seed, slow=A5_SLOW, gain=gain)
+    best = None
+    for cand in HOME_READ:
+        for sg in (1, -1):
+            raw = home_decode(x[:k], types, phase, fb, cand, sg)
+            o = float(np.degrees(np.angle(np.exp(1j * np.radians(raw - fit[2])).mean())))
+            e = float(np.median(err((raw - o) % 360, fit[2])))
+            if best is None or e < best[0]:
+                best = (e, cand, sg, o)
+    _, cand, sg, o = best
+    h = int((err(home_decode(x[k:], types, phase, fb, cand, sg, o), test[2]) < HIT).sum())
+    print(f'shuffled search brain: {cand} s {sg:+d}, hits {h}/{k}')
+    return h
+
+
 if __name__ == '__main__':
     num = lambda v: int(v) if v.lstrip('-').isdigit() else float(v) if v.replace('.', '', 1).lstrip('-').isdigit() else v
-    {'heading': heading, 'home': home, 'home_fit': home_fit, 'home_b': home_b}[sys.argv[1]](*map(num, sys.argv[2:]))
+    {'heading': heading, 'home': home, 'home_fit': home_fit, 'home_b': home_b, 'search': search, 'a5': a5}[sys.argv[1]](*map(num, sys.argv[2:]))
