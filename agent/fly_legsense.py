@@ -3,7 +3,8 @@ sensory neurons of the leg they belong to (the leg counterpart of agent/fly_visi
 
 The male CNS v1.0 gives leg sensory neurons no soma neuromere or side (their somata sit in the leg), so each takes the leg
 (T1-T3, L/R) its synapses mostly go to, among cells with a known neuromere and side (one hop, as agent/eye_map.py does for
-photoreceptors): 2,330 of 2,601 placed, median purity 0.63, left/right symmetric. Groups by subclass:
+photoreceptors), the side overridden by the instance name where one exists. Gustatory leg-bristle GRNs (LgLG*, 768)
+are excluded: they are taste (agent/senses.py); with them 175 of 975 named cells sat on the wrong side. Groups by subclass:
   touch  leg bristle + leg (tarsal)     100 Hz while the leg's tibia/tarsus touches anything outside the fly
   load   campaniform sensilla           150 Hz x the leg's normal contact force / (body weight / 3), clipped at 1
   angle  chordotonal organ + hair plate 150 Hz x the leg joints' mean |q - q_stance| / 0.5 rad, clipped at 1
@@ -27,10 +28,16 @@ def cells(shuffle=None):
     neu, side = a.somaNeuromere.fillna('').to_numpy(), a.somaSide.fillna('').str[:1].str.upper().to_numpy()
     leg = np.where(np.isin(neu, ['T1', 'T2', 'T3']) & np.isin(side, ['L', 'R']), pd.Series(neu).str.cat(side).to_numpy(), '')
     sub = a.subclass.fillna('').to_numpy()
+    f = pd.read_feather(mcns.DATA / 'body-annotations-male-cns-v1.0-minconf-0.5.feather', columns=['status', 'class', 'instance'])
+    f = f[f['status'].isin(['Traced', 'Anchor'])].reset_index(drop=True)
+    sub = np.where(f['class'].fillna('').to_numpy() == 'gustatory', '', sub)  # leg-bristle GRNs are taste (agent/senses.py), not touch
     e = np.isin(sub, list(GROUP))[pre] & (leg[post] != '')
     v = pd.DataFrame({'s': pre[e], 'leg': leg[post[e]], 'w': np.abs(w[e])}).groupby(['s', 'leg']).w.sum().reset_index()
     best = v.sort_values('w').drop_duplicates('s', keep='last')
     s, lg = best.s.to_numpy(), best.leg.to_numpy()
+    inst = f['instance'].fillna('').to_numpy()[s]
+    named = np.array([x[-2:] in ('_L', '_R') for x in inst], bool)
+    lg = np.where(named, np.char.add(np.array([x[:2] for x in lg]), np.array([x[-1:] for x in inst])), lg)  # instance side where named; neuromere from the vote
     if shuffle is not None:
         lg = shuffle.permutation(lg)
     g = np.array([GROUP[x] for x in sub[s]])
