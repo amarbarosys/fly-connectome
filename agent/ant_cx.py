@@ -116,7 +116,7 @@ def paths(rng, k):
     return h, u, np.degrees(np.angle(-(u * np.exp(1j * np.radians(h))).sum(1))) % 360
 
 
-def home_trials(cols, shuffle=None, seed=73):
+def home_trials(cols, shuffle=None, seed=73, slow=None):
     """cols: (heading, speed, odometer on, key column or None) per column. Compass cue on EPG at the leg heading and
     odometer at ODO_HZ x speed during each leg, then both off: counts (columns, n) over HOME_READ_STEPS. CPU oracle."""
     from agent.shiu import ShiuBrain
@@ -125,6 +125,10 @@ def home_trials(cols, shuffle=None, seed=73):
     epg = np.flatnonzero(s.str.startswith('EPG').to_numpy() & ~np.isnan(phase))
     odo = np.flatnonzero(s.str.match('^(' + '|'.join(ODO) + ')').to_numpy())
     b = ShiuBrain(p, q, w, n=n, flies=len(cols), seed=seed)
+    if slow is not None:  # A4b: synapses onto the memory cells feed a slow integrating current (plane 0) instead of g
+        mem = np.flatnonzero(s.str.match(r'^(PFNa|PFNd|PFNv|hDelta)').to_numpy())
+        b.edge_groups(np.isin(b.col, mem).astype(np.uint8), np.ones((len(cols), 2), np.float32))
+        b.modulate([-1, 0], (slow[0],), (0.0,), (slow[1],))
     for leg in range(3):
         win = (leg * LEG, (leg + 1) * LEG)
         for c, (h, u, on, key) in enumerate(cols):
@@ -145,14 +149,14 @@ def home_decode(x, types, phase, fb, cand, s=1, o=0.0):
     return (s * decode(x[:, m], (phase if mp == 'PB' else fb)[m]) - o) % 360
 
 
-def home(seed=73, k=32):
+def home(seed=73, k=32, slow=None, gate=True):
     """A4 (docs/plans/ANT.md): home direction from the CX after scripted outbounds; seed claimed in docs/seeds_used.json."""
     rng = np.random.default_rng(seed)
     fit, test = paths(rng, k), paths(rng, k)
     cols = [(h, u, True, None) for h, u in zip(*fit[:2])] + [(h, u, True, None) for h, u in zip(*test[:2])]
     cols += [(h, u, False, k + i) for i, (h, u) in enumerate(zip(*test[:2]))]  # no odometer, cue draws of the real column
-    x, types, phase, fb, odo = home_trials(cols, seed=seed)
-    xs = home_trials([(h, u, True, None) for h, u in zip(*test[:2])], shuffle=5, seed=seed)[0]
+    x, types, phase, fb, odo = home_trials(cols, seed=seed, slow=slow)
+    xs = home_trials([(h, u, True, None) for h, u in zip(*test[:2])], shuffle=5, seed=seed, slow=slow)[0]
     best = None
     for cand in HOME_READ:
         for s in (1, -1):
@@ -169,7 +173,20 @@ def home(seed=73, k=32):
     for arm, xx in (('real', x[k:2 * k]), ('no odometer', x[2 * k:]), ('shuffled CX', xs)):
         d = home_decode(xx, types, phase, fb, cand, s, o)
         print(f'{arm}: hits {hits[arm]}/{k}, median err {np.median(err(d, test[2])):.1f} deg, vs last heading + 180 {np.median(err(d, test[0][:, 2] + 180)):.1f}, odometer spikes {int(xx[:, odo].sum())}')
-    print(f'heading-only baseline (last leg + 180): hits {int((err(test[0][:, 2] + 180, test[2]) < HIT).sum())}/{k}')
+    base = int((err(test[0][:, 2] + 180, test[2]) < HIT).sum())
+    print(f'heading-only baseline (last leg + 180): hits {base}/{k}')
+    if not gate:
+        return hits, base
+    if slow is not None:  # A4b gate (ANT.md)
+        ok = [(f"real: {hits['real']}/{k} >= 26 and >= baseline {base} + 8", hits['real'] >= 26 and hits['real'] >= base + 8),
+              (f"mutant shuffled CX: {hits['shuffled CX']}/{k} <= 12", hits['shuffled CX'] <= 12),
+              (f"mutant no odometer: {hits['no odometer']}/{k} <= baseline {base} + 3", hits['no odometer'] <= base + 3)]
+        for msg, v in ok:
+            print(('PASS ' if v else 'FAIL ') + msg)
+        if not all(v for _, v in ok):
+            sys.exit('FAIL ant CX home vector A4b')
+        print('PASS ant CX home vector A4b: integrating memory cells hold the way home')
+        return hits, base
     ok = [(f"real: home direction within {HIT:.0f} deg in {hits['real']}/{k} >= 26", hits['real'] >= 26),
           (f"mutant shuffled CX: {hits['shuffled CX']}/{k} <= 12 (chance)", hits['shuffled CX'] <= 12),
           (f"mutant no odometer: {hits['no odometer']}/{k} <= 12 (chance)", hits['no odometer'] <= 12)]
@@ -180,5 +197,31 @@ def home(seed=73, k=32):
     print('PASS ant CX home vector: the fly central complex holds the way home after a 3-leg outbound')
 
 
+def home_fit(seed=74):
+    """A4b fit: T x b grid on seed 74, best real TEST hits (ANT.md); prints the grid, returns (T, b)."""
+    from agent import seeds
+    seeds.claim('ant_cx_home_fit', [seed])
+    res = {}
+    for T in (0.5, 1.0, 2.0, 4.0):
+        for bb in (0.02, 0.05, 0.1, 0.2):
+            hits, base = home(seed, slow=(T, bb), gate=False)
+            res[T, bb] = hits['real']
+            print(f'GRID T {T} b {bb}: real {hits["real"]}, no odometer {hits["no odometer"]}, shuffled {hits["shuffled CX"]}, baseline {base}', flush=True)
+    best = max(res, key=res.get)
+    print(f'FROZEN T {best[0]} b {best[1]} (real {res[best]}/32 on the fit seed)')
+    return best
+
+
+def home_b(seed=75, T=None, b=None):
+    """A4b gate on seed 75 with the frozen T, b; also the b = 0 arm, reported."""
+    from agent import seeds
+    seeds.claim('ant_cx_home_b', [seed])
+    print('--- reported: b = 0 (no integration)')
+    home(seed, slow=(float(T), 0.0), gate=False)
+    print(f'--- gate: T {T} b {b}')
+    home(seed, slow=(float(T), float(b)))
+
+
 if __name__ == '__main__':
-    {'heading': heading, 'home': home}[sys.argv[1]](*map(int, sys.argv[2:]))
+    {'heading': heading, 'home': home, 'home_fit': home_fit, 'home_b': home_b}[sys.argv[1]](*map(float, sys.argv[2:])) if sys.argv[1] == 'home_b' else \
+        {'heading': heading, 'home': home, 'home_fit': home_fit}[sys.argv[1]](*map(int, sys.argv[2:]))
