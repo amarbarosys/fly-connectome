@@ -139,5 +139,102 @@ def main(seed):
     print('PASS U4a: the left front leg moves by its own motor neurons')
 
 
-if __name__ == '__main__':
+if __name__ == '__main__' and sys.argv[1:2] != ['watch']:
     main(*sys.argv[1:])
+
+
+LEGS6 = ('lf', 'lm', 'lh', 'rf', 'rm', 'rh')
+METRIC = {  # U4b sign rule: the change in this quantity for +0.2 rad, sign as in lf
+    'coxa-yaw': lambda g, s: s * g['tip'][1], 'coxa-pitch': lambda g, s: -g['tip'][0], 'coxa-roll': lambda g, s: -g['tip'][0],
+    'trochanterfemur-pitch': lambda g, s: -g['cf'], 'trochanterfemur-roll': lambda g, s: 1.0,
+    'tibia-pitch': lambda g, s: g['ft'], 'tarsus1-pitch': lambda g, s: -g['tip'][2]}
+
+
+def leg_signs(m, q0):
+    """{leg: (7,) +1/-1}: each joint's direction relative to the anatomical + of MAP, from the stance pose (U4b rule)."""
+    d = mujoco.MjData(m)
+    bid = lambda n: mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, 'fly/' + n)
+    ang = lambda a, b: np.degrees(np.arccos(np.clip(a @ b / np.linalg.norm(a) / np.linalg.norm(b), -1, 1)))
+    out = {}
+    for leg in LEGS6:
+        cx, fe, ti, ta, tip = (bid(f'{leg}_{n}') for n in ('coxa', 'trochanterfemur', 'tibia', 'tarsus1', 'tarsus5'))
+        def geo(q):
+            d.qpos[:] = q
+            mujoco.mj_kinematics(m, d)
+            P, R = d.xpos, d.xmat[bid('c_thorax')].reshape(3, 3)
+            return {'tip': R.T @ (P[tip] - P[cx]), 'cf': ang(P[fe] - P[cx], P[ti] - P[fe]), 'ft': ang(P[ti] - P[fe], P[ta] - P[ti])}
+        g0, sg = geo(q0), []
+        for j in JOINTS:
+            a = act_id(m, leg, j)
+            q = q0.copy()
+            q[m.jnt_qposadr[m.actuator_trnid[a, 0]]] += 0.2
+            g = geo(q)
+            dg = {k: g[k] - g0[k] for k in g}
+            sg.append(1.0 if METRIC[j](dg, 1 if leg[0] == 'l' else -1) > 0 else -1.0)
+        out[leg] = np.array(sg)
+    return out
+
+
+def act_id(m, leg, j):
+    parent = {'coxa': 'c_thorax', 'trochanterfemur': f'{leg}_coxa', 'tibia': f'{leg}_trochanterfemur', 'tarsus1': f'{leg}_tibia'}[j.split('-')[0]]
+    return mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_ACTUATOR, f'fly/{parent}-{leg}_{j.split("-")[0]}-{j.split("-")[1]}-position')
+
+
+def watch(seed, steps=1000):
+    """What fires: forward DNs 80 Hz, no MN stimulus, all six legs' named MNs mapped to their own leg (U4a rule)."""
+    seed = int(seed)
+    seeds.claim('leg_mn_watch', [seed])
+    a = pd.read_feather(mcns.DATA / 'body-annotations-male-cns-v1.0-minconf-0.5.feather', columns=['status', 'superclass', 'subclass', 'somaSide', 'type'])
+    a = a[a['status'].isin(['Traced', 'Anchor'])].reset_index(drop=True)
+    sub, sd, ty = a.subclass.fillna('').to_numpy(), a.somaSide.fillna('').str[:1].to_numpy(), a.type.fillna('').to_numpy()
+    leg_of = {f'{s.lower()}{p[0]}': (p, s) for p in ('fl', 'ml', 'hl') for s in 'LR'}
+    cells = {leg: np.flatnonzero((a.superclass == 'vnc_motor').to_numpy() & (sub == leg_of[leg][0]) & (sd == leg_of[leg][1].upper()) & np.isin(ty, list(MAP)))
+             for leg in LEGS6}
+    allmn = np.flatnonzero((a.superclass == 'vnc_motor').to_numpy() & np.isin(sub, ['fl', 'ml', 'hl']))
+    d, m, _ = fl.prepare(fl.OUT.parent / 'full-fly-flat', mjcf=fl.MJCF)
+    q0 = np.fromfile(d / 'qpos.bin', np.float32).astype(float)
+    held = np.fromfile(d / 'ctrl.bin', np.float32).astype(np.float64)
+    flip = leg_signs(m, q0)
+    acts = {leg: [act_id(m, leg, j) for j in JOINTS] for leg in LEGS6}
+    qadr = {leg: m.jnt_qposadr[m.actuator_trnid[acts[leg], 0]] for leg in LEGS6}
+    b, *_ = brain(cols=1, seed=seed)  # brain() drives the forward DNs at 80 Hz
+    b.start([1], allmn.astype(np.int32))
+    pos = {x: i for i, x in enumerate(allmn)}
+    eng = fl.Engine(d, fl.K, f'legwatch{seed}', steps, F=1, q0=[q0])
+    cum, tr, counts = [np.zeros(len(allmn))], [], []
+    for i in range(steps):
+        cum.append(b.advance(fl.K).astype(float))
+        counts.append(cum[-1] - cum[-2])
+        w = min(i + 1, WIN)
+        rate = (cum[-1] - cum[-1 - w]) / (w * 1e-3)
+        x = held.copy()
+        for leg in LEGS6:
+            jn, sg = assign(ty[cells[leg]])
+            off = targets(rate[[pos[c] for c in cells[leg]]], jn, sg) * flip[leg]
+            x[acts[leg]] = held[acts[leg]] + off
+        eng.send(x)
+        q = eng.recv()
+        tr.append(np.r_[[q[qadr[leg]] for leg in LEGS6]].ravel())
+    b.close()
+    eng.close()
+    counts, tr = np.array(counts), np.degrees(np.array(tr)).reshape(steps, 6, 7)
+    hz = counts.sum(0) / (steps * 1e-3)
+    df = pd.DataFrame({'leg': sub[allmn] + sd[allmn], 'type': ty[allmn], 'hz': hz})
+    fire = df[df.hz > 0.5].groupby(['leg', 'type']).hz.agg(['size', 'mean']).round(1)
+    print('MNs firing > 0.5 Hz:', int((hz > 0.5).sum()), 'of', len(allmn))
+    print(fire.to_string())
+    f = np.fft.rfftfreq(steps, 1e-3)
+    for li, leg in enumerate(LEGS6):
+        y = tr[:, li] - tr[:, li].mean(0)
+        P = np.abs(np.fft.rfft(y, axis=0)) ** 2
+        pk = f[1:][P[1:].sum(1).argmax()]
+        print(leg, 'range deg', np.ptp(tr[:, li], 0).round(1).tolist(), f'peak {pk:.0f} Hz', 'power 5-15 Hz', round(float(P[(f >= 5) & (f <= 15)].sum() / P[1:].sum()), 2))
+    ti = tr[:, :, 5] - tr[:, :, 5].mean(0)
+    print('tibia correlation with lf:', {leg: round(float(np.corrcoef(ti[:, 0], ti[:, k])[0, 1]), 2) for k, leg in enumerate(LEGS6)})
+    xy = q[:2]
+    print('body moved (mm):', np.round(xy - q0[:2], 2).tolist())
+    np.save(fl.OUT / f'leg-watch-{seed}.npy', {'counts': counts.astype(np.uint8), 'angles': tr.astype(np.float32), 'cells': allmn}, allow_pickle=True)
+
+
+if __name__ == '__main__' and sys.argv[1:2] == ['watch']:
+    watch(*sys.argv[2:])
