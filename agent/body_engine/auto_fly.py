@@ -23,9 +23,9 @@ ARMS = {'all': (True, 0.0), 'all-adapt': (True, 1.0), 'none': (False, 0.0)}  # s
 REPEATS = 2
 
 
-def main(seed, steps=2000, drop=0.0):
+def main(seed, steps=2000, drop=0.0, ring=0.0):
     """drop: start this many mm above the standing height (the push-start test: does a landing jolt start a rhythm?)."""
-    seed, steps, drop = int(seed), int(steps), float(drop)
+    seed, steps, drop, ring = int(seed), int(steps), float(drop), float(ring)
     seeds.claim('auto_fly' if not drop else 'auto_fly_drop', [seed])
     cols = [(a, j) for j in range(REPEATS) for a in ARMS]
     params = live.WORLD[:5] + (1,) + live.WORLD[6:]
@@ -37,7 +37,9 @@ def main(seed, steps=2000, drop=0.0):
     q[2] += drop
     mujoco.mju_mulQuat(q[3:7], np.array([np.cos(np.radians(OPEN[2]) / 2), 0, 0, np.sin(np.radians(OPEN[2]) / 2)]), q0[3:7].copy())
     qs = {c: q.copy() for c in cols}
-    feel = {c: sn.Senses(m, q, odor=q[:2] + [8.0, 0.0], food=np.r_[q[:2], 3.0]) for c in cols}  # odour 8 mm ahead, food under the start (as full_fly all)
+    for k, c in enumerate(cols):  # ring: start each fly on a circle of this radius (mm) so one scene can show them all
+        qs[c][:2] += (ring > 0) * np.array([10.0, 0.0]) + ring * np.array([np.cos(2 * np.pi * k / len(cols)), np.sin(2 * np.pi * k / len(cols))])  # ring centre 10 mm +x: open ground, clear of world 1's stone
+    feel = {c: sn.Senses(m, qs[c], odor=qs[c][:2] + [8.0, 0.0], food=np.r_[qs[c][:2], 3.0]) for c in cols}  # odour 8 mm ahead, food under the start (as full_fly all)
     ids, az, el = fv.receptors(fv.LAMINA)
     eyes = Eyes(m, ids, az, el)
     eyes.set_base(q)
