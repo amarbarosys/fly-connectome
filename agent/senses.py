@@ -4,7 +4,7 @@ One registry: each sense is a list of (cell ids, Hz) built once per model and re
   vision   agent/eye_render.Eyes: rendered eye cams -> 6,291 R1-6 / L1-L3 cells (every EYE_EVERY steps, by the caller)
   legs     agent/fly_legsense: tarsal touch, load, joint angle -> 2,330 leg sensory cells
   smell    odor at the l/r_odor sites -> ORNs of the stand-in odor's glomeruli on that antenna (VINEGAR), RMAX x concentration
-  taste    a leg's taste site over a food patch -> that leg's gustatory leg-bristle neurons (MCNS labels no sweet receptor)
+  taste    a leg's taste site over a food patch -> that leg's LgLG4 sugar GRNs (Tastekin et al. 2025: Gr64f / Ir56b)
   body     a non-leg fly geom touching the world -> mechanosensory bristles entering by ADMN / PDMN (notum), by side
   gravity  thorax roll -> Johnston's organ wind_gravity neurons of the downhill side, RMAX x |roll| / 30 deg
 Sensory neurons have no soma side in MCNS (somata sit outside the CNS); each takes the side in its instance name
@@ -24,6 +24,7 @@ from agent import fly_legsense as ls
 
 VINEGAR = ('DM1', 'DM4', 'VM2', 'VA2', 'DP1m')  # stand-in odor: glomeruli reported for vinegar (Semmelhack & Wang 2009), not a fitted odor model
 RMAX, ODOR_SIGMA = 150.0, 6.0  # Hz; mm, the odor blob's width
+SUGAR = 'LgLG4'  # leg GRN type matched to Gr64f / Ir56b (Tastekin et al. 2025): sugar and low salt
 LEG_NERVE = {'f': 'ProLN', 'm': 'MesoLN', 'h': 'MetaLN'}
 
 
@@ -51,7 +52,7 @@ def cells(swap=False):
     groups = {'smell': (cl == 'olfactory') & np.isin(pd.Series(ty).str.replace('ORN_', '').to_numpy(), VINEGAR),
               'body': (cl == 'mechanosensory_tactile') & np.isin(nerve, ['ADMN', 'PDMN']),
               'gravity': (cl == 'mechanosensory') & (sub == 'wind_gravity')}
-    groups |= {f'taste_{g}': (cl == 'gustatory') & (sub == 'leg bristle') & (nerve == n) for g, n in LEG_NERVE.items()}
+    groups |= {f'taste_{g}': (cl == 'gustatory') & (ty == SUGAR) & (nerve == n) for g, n in LEG_NERVE.items()}
     for g, m in groups.items():
         ids = np.flatnonzero(m)
         named = np.array([x[-2:] in ('_L', '_R') for x in inst[ids]], bool)

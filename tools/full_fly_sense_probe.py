@@ -16,7 +16,49 @@ from agent.body_engine.mcns_link import FWD_HZ, brain
 from agent.mcns_mapping import descending_name_sets
 
 REPEATS, N = 16, 500
-SMELL = sys.argv[1:2] == ['smell']
+SMELL, TASTE = sys.argv[1:2] == ['smell'], sys.argv[1:2] == ['taste']
+if TASTE:  # U2 S2a: sugar GRNs (LgLG4) vs none vs count-matched LgLG2; leg-MN drive, no fitting
+    import pandas as pd
+    from agent import mcns
+    from agent.body_engine.mcns_link import drive
+    seed = int(sys.argv[2])
+    from agent import seeds
+    seeds.claim('full_fly_taste_probe', [seed])
+    a = pd.read_feather(mcns.DATA / 'body-annotations-male-cns-v1.0-minconf-0.5.feather', columns=['status', 'type'])
+    ty = a[a['status'].isin(['Traced', 'Anchor'])]['type'].fillna('').to_numpy()
+    sugar = np.flatnonzero(ty == sn.SUGAR)
+    other = np.random.default_rng(0).choice(np.flatnonzero(ty == 'LgLG2'), len(sugar), replace=False)
+    from agent.mcns_mapping import annotation_table
+    t2 = annotation_table().type.fillna('').to_numpy()
+    probe = np.r_[np.flatnonzero(t2 == 'DNg103')]
+    arms = [(g, j) for j in range(REPEATS) for g in ('none', 'sugar', 'LgLG2')]
+    dn, _ = descending_name_sets()
+    b, f, nl, nm = brain(cols=len(arms), seed=seed)
+    for k, (g, j) in enumerate(arms):
+        b.stimulate(dn['forward'], FWD_HZ, fly=k, key=k)
+        if g != 'none':
+            b.stimulate(sugar if g == 'sugar' else other, sn.RMAX, fly=k, key=k)
+    read = np.r_[f['mnL'], f['mnR'], dn['forward'], probe]
+    b.start([1], np.concatenate([k * b.n + read for k in range(len(arms))]).astype(np.int32))
+    x = b.advance(N * fl.K).astype(float).reshape(len(arms), -1) * (100 / N)
+    b.close()
+    dr = np.array([drive(f, x[k, :nm], nl).mean() for k in range(len(arms))])
+    fw, pr = x[:, nm:nm + len(dn['forward'])].mean(1), x[:, nm + len(dn['forward']):].sum(1)
+    idx = lambda g: [arms.index((g, j)) for j in range(REPEATS)]
+    def pt(v, g):
+        d = v[idx(g)] - v[idx('none')]
+        return float(d.mean()), float(d.mean() / (d.std(ddof=1) / np.sqrt(REPEATS) + 1e-12))
+    res = {f'{name} {g}': pt(v, g) for name, v in (('drive', dr), ('forward_dn', fw), ('DNg103', pr)) for g in ('sugar', 'LgLG2')}
+    for k, (m_, t_) in res.items():
+        print(f'{k} minus none: {m_:+.4f} (t {t_:+.1f})')
+    print('mean drive none / sugar / LgLG2:', [round(float(dr[idx(g)].mean()), 4) for g in ('none', 'sugar', 'LgLG2')])
+    (m1, t1), (m2, _) = res['drive sugar'], res['drive LgLG2']
+    ok = [(f'G1 sugar GRNs lower the leg drive: {m1:+.4f} (t {t1:+.1f}), t <= -2.5', t1 <= -2.5),
+          (f'G2 LgLG2 mutant drop {m2:+.4f} is less than half of sugar {m1:+.4f}', -m2 < -m1 / 2)]
+    (fl.OUT / f'full-fly-taste-probe-{seed}.json').write_text(json.dumps(res))
+    for k, v_ in ok:
+        print(('PASS ' if v_ else 'FAIL ') + k)
+    sys.exit(0 if all(v_ for _, v_ in ok) else 'FAIL full fly S2a')
 seed = int(sys.argv[1 + SMELL]) if len(sys.argv) > 1 + SMELL else 301
 from agent import seeds
 seeds.claim('full_fly_smell_probe' if SMELL else 'full_fly_sense_probe', [seed])
