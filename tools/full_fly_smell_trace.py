@@ -17,11 +17,11 @@ from agent.body_engine import fly_link as fl
 from agent.body_engine.mcns_link import FWD_HZ, brain
 from agent.mcns_mapping import descending_name_sets
 
-SIDE, DRIVE = sys.argv[1] == 'side', sys.argv[1] in ('drive', 'drive0')
-FWD = 0.0 if sys.argv[1] == 'drive0' else FWD_HZ  # drive0: no forward DN drive
+SIDE, DRIVE = sys.argv[1] in ('side', 'side0'), sys.argv[1] in ('drive', 'drive0')
+FWD = 0.0 if sys.argv[1] in ('drive0', 'side0') else FWD_HZ  # drive0: no forward DN drive
 REPEATS, N = 16 if SIDE else 8, 500
 seed = int(sys.argv[1 + (SIDE or DRIVE)])
-seeds.claim('full_fly_smell_side' if SIDE else f'full_fly_smell_{sys.argv[1]}' if DRIVE else 'full_fly_smell_trace', [seed])
+seeds.claim(f'full_fly_smell_{sys.argv[1]}' if SIDE else f'full_fly_smell_{sys.argv[1]}' if DRIVE else 'full_fly_smell_trace', [seed])
 a = pd.read_feather(mcns.DATA / 'body-annotations-male-cns-v1.0-minconf-0.5.feather', columns=['status', 'superclass', 'type'])
 a = a[a['status'].isin(['Traced', 'Anchor'])].reset_index(drop=True)
 ty, sup = pd.Series(a['type'].fillna('')), a['superclass'].fillna('')
@@ -76,7 +76,7 @@ if SIDE:
     arms = [(sd, sw) for _ in range(REPEATS) for sw in (False, True) for sd in 'LR']
     b, *_ = brain(cols=len(arms), seed=seed)
     for k, (sd, sw) in enumerate(arms):
-        b.stimulate(dn['forward'], FWD_HZ, fly=k, key=k)
+        b.stimulate(dn['forward'], FWD, fly=k, key=k)
         b.stimulate((cs if sw else c)['smell', sd], sn.RMAX, fly=k, key=k)
     D = np.concatenate([groups[g] for g in ('PN', 'LH', 'MBON', 'DN')])
     b.start([1], np.concatenate([k * b.n + D for k in range(len(arms))]).astype(np.int32))
@@ -96,10 +96,15 @@ if SIDE:
         by[g] = {'active': int(a_.sum()), 't3_real': int((np.abs(t[0, sl]) >= 3).sum()), 't3_swap': int((np.abs(t[1, sl]) >= 3).sum()),
                  'corr': round(float(np.corrcoef(d[:, 0].mean(0)[sl][a_], d[:, 1].mean(0)[sl][a_])[0, 1]), 3) if a_.sum() > 2 else None}
     print(json.dumps(by))
+    for t_ in ('DNa02', 'DNa01', 'DNp29'):
+        for s_ in 'LR':
+            j = int(np.flatnonzero((ty.to_numpy()[D] == t_) & (side[D] == s_))[0])
+            by[f'{t_}_{s_}'] = {'odourL_Hz': round(float(x[:, 0, 0, j].mean()) * 10, 2), 'odourR_Hz': round(float(x[:, 0, 1, j].mean()) * 10, 2),
+                                't_real': round(float(t[0, j]), 1), 't_swap': round(float(t[1, j]), 1)}
     out = {'groups': by, 'active_dns': int(act.sum()), 'abs_t_ge_3_real': int((np.abs(t[0]) >= 3).sum()), 'abs_t_ge_3_swap': int((np.abs(t[1]) >= 3).sum()),
            'real_vs_swap_corr': r, 'top': [(ty[D[i]], side[D[i]], round(float(d[:, 0, i].mean()), 3), round(float(t[0, i]), 1), round(float(t[1, i]), 1)) for i in top]}
     print(json.dumps(out))
-    (fl.OUT / f'full-fly-smell-side-{seed}.json').write_text(json.dumps(out))
+    (fl.OUT / f'full-fly-smell-{sys.argv[1]}-{seed}.json').write_text(json.dumps(out))
     sys.exit(0)
 cols = 2 * REPEATS
 b, *_ = brain(cols=cols, seed=seed)
