@@ -24,7 +24,7 @@ import numpy as np
 from kinestride.model import ENGINE, FEET, combine, cube, export, load, meshes, standing, terrain
 from kinestride.render_check import DIST, MJCF, MOJO
 from kinestride.verify_render_leak import sample
-from kinestride.world import height_grad
+from kinestride.model import world_height_grad as height_grad  # world.mojo CLI (world.py is its oracle)
 APP = Path(__file__).parent  # this app's Mojo sources (live, spectate, gait check); the physics core is kinestride's ENGINE
 IMKIT = Path.home() / 'Projects/mojo/mojo-imkit/src'  # the GUI package live.mojo imports (imkit: window, font, ui)
 
@@ -49,11 +49,12 @@ def world_camera(out, m, fovy):
     p = m.numeric_data[m.numeric_adr[t]:m.numeric_adr[t] + 16]
     look = np.mean([q[a:a + 3] for a in roots(m)], 0)
     dist = (max(np.linalg.norm(q[a:a + 3] - look) for a in roots(m)) + 5.0) / np.sin(np.radians(float(fovy)) / 2)
-    s = np.linspace(0, 1, 200)[:, None]
-    for az in np.radians(np.arange(-130, 230, 30)):
-        eye = look + dist * np.array([0.85 * np.cos(az), 0.85 * np.sin(az), 0.52])
-        if all((line := eye + s * (q[a:a + 3] - eye))[:-10, 2].min() > 0 and (line[:-10, 2] > height_grad(line[:-10, 0], line[:-10, 1], p)[0] + 0.2).all() for a in roots(m)):
-            break
+    az = np.radians(np.arange(-130, 230, 30))
+    eyes = look + dist * np.stack([0.85 * np.cos(az), 0.85 * np.sin(az), np.full_like(az, 0.52)], 1)
+    top = np.array([q[a:a + 3] for a in roots(m)])
+    line = eyes[:, None, None] + np.linspace(0, 1, 200)[:190, None] * (top[None, :, None] - eyes[:, None, None])  # az, root, point
+    clear = ((line[..., 2] > 0) & (line[..., 2] > height_grad(line[..., 0], line[..., 1], p)[0] + 0.2)).all((1, 2))  # one world.mojo run
+    eye = eyes[np.argmax(clear) if clear.any() else -1]
     return [*map(str, eye), *map(str, look), str(fovy)]
 
 
@@ -63,10 +64,10 @@ def lift(m, q):
     d = mujoco.MjData(m)
     d.qpos[:] = q
     mujoco.mj_kinematics(m, d)
-    for a, j in zip(roots(m), np.flatnonzero(m.jnt_type == mujoco.mjtJoint.mjJNT_FREE)):
-        b = np.flatnonzero(m.body_rootid == m.body_rootid[m.jnt_bodyid[j]])  # this animal's bodies: the ground under
-        h = height_grad(d.xpos[b, 0], d.xpos[b, 1], m.numeric_data[m.numeric_adr[t]:m.numeric_adr[t] + 16])[0]
-        q[a + 2] += float(h.max()) + 0.05  # them, not the highest within 4 mm (a 0.57 mm drop on a 0.1 ramp)
+    j = np.flatnonzero(m.jnt_type == mujoco.mjtJoint.mjJNT_FREE)
+    h = height_grad(d.xpos[:, 0], d.xpos[:, 1], m.numeric_data[m.numeric_adr[t]:m.numeric_adr[t] + 16])[0]  # one world.mojo run
+    for a, r in zip(roots(m), m.body_rootid[m.jnt_bodyid[j]]):  # this animal's bodies: the ground under them, not the
+        q[a + 2] += float(h[m.body_rootid == r].max()) + 0.05  # highest within 4 mm (a 0.57 mm drop on a 0.1 ramp)
 
 
 def prepare(out=OUT, pairs=FEET, mjcf=MJCF, dist=DIST, flat=None, convex=False, world=None):
