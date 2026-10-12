@@ -59,7 +59,9 @@ if [ "$stage" = spiderlink ]; then  # brain<->body link on the spider (docs/plan
   # under the brain's ctrl stream, closed-loop walk/turn/stand. Mutants: the ctrl write skipped; the gait kernel's yaw sign flipped
   L="$M -m agent.body_engine.spider_link check"
   $L || { echo "FAIL spiderlink"; fail=$((fail+1)); }
-  ~/iTools/bin/mutant-check agent/body_engine/live.mojo 's/ctx.enqueue_copy(u_b, ctrl_h)/pass/' -- $L || fail=$((fail+1))
+  # the ctrl write skipped on both paths: the device copy (GPU step) and the host list (CPU step; spider_link runs on the
+  # host up to 256 animals since d38a9ad, where the device copy alone is never read and its mutant survived)
+  ~/iTools/bin/mutant-check agent/body_engine/live.mojo 's/ctx.enqueue_copy(u_b, ctrl_h)/pass/;s/uv.unsafe_ptr().unsafe_bitcast\[Float32\]()\[k\] = ctrl_h\[k\]/pass/' -- $L || fail=$((fail+1))
   ~/iTools/bin/mutant-check agent/body_engine/spider_brain.mojo 's/out = side \* YAW/out = -side * YAW/' -- $L || fail=$((fail+1))
   [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
   echo "PASS all spiderlink checks"; exit 0
