@@ -21,6 +21,7 @@ import json
 import os
 import re
 import select
+import shutil
 import subprocess
 import sys
 import termios
@@ -163,19 +164,44 @@ def engine_flags(world):
     return flags + (['-DWORLD=1', '-DNSITE=2', '-DSOIL=1'] if world else [])
 
 
+def scene(params, seed, stones):
+    """(world parts for model.meshes, src rows for live.mojo -DWORLD=1) from scene.mojo; assets.py stays its oracle
+    (`scene check` holds assets.py's five checks). parts.bin: uint32 nparts, per part float64 rgba, uint32 nv, nf,
+    float64 vertices, int32 faces; src.bin: float32 rows of 5."""
+    import kinestride
+    from kinestride.model import world_full
+    out = OUT.parent / 'scene'
+    d = out / str(os.getpid())
+    d.mkdir(parents=True, exist_ok=True)
+    subprocess.run([str(Path.home() / 'iTools/bin/mojo-cached'), 'build', '-I', str(Path(kinestride.__file__).parent),
+                    str(Path(__file__).with_name('scene.mojo')), '-o', str(out / 'scene')], check=True)
+    subprocess.run([str(out / 'scene'), 'build', str(d), str(seed), *map(str, world_full(params)),
+                    *(str(float(x)) for s in stones for x in s)], check=True)
+    b, o, parts = (d / 'parts.bin').read_bytes(), 4, []
+    for _ in range(int(np.frombuffer(b, '<u4', 1)[0])):
+        rgba = tuple(np.frombuffer(b, '<f8', 4, o).tolist())
+        nv, nf = np.frombuffer(b, '<u4', 2, o + 32).tolist()
+        v = np.frombuffer(b, '<f8', 3 * nv, o + 40).reshape(nv, 3)
+        f = np.frombuffer(b, '<i4', 3 * nf, o + 40 + 24 * nv).reshape(nf, 3)
+        parts.append((v, f, rgba))
+        o += 40 + 24 * nv + 12 * nf
+    src = np.fromfile(d / 'src.bin', np.float32).reshape(-1, 5)
+    shutil.rmtree(d)
+    return parts, src
+
+
 def setup(F, render=0, out='/dev/null', seed=None, q0=None):
     """seed: the fly on live.py's seeded terrain (live.WORLD, 0.1 mm bumps and cones), dropped from the flat standing pose."""
     flags = engine_flags(seed is not None)
     if seed is None:
         d, m, _ = fl.prepare(OUT / 'fly')
-    else:  # terrain + the world's walls, stones, grass, flowers and two plume sources (agent/body_engine/assets.py), smelled at the antennae
-        from agent.body_engine import assets
+    else:  # terrain + the world's walls, stones, grass, flowers and two plume sources (agent/body_engine/scene.mojo), smelled at the antennae
         from agent.body_engine.world_check import sites_of
         params = live.WORLD[:5] + (seed,) + live.WORLD[6:]
         mjcf = live.terrain(fl.MJCF, params)[0]
         w = live.load(mjcf)
         stones = [(*w.geom_pos[g][:2], float(w.geom_size[g][:2].max())) for g in range(w.ngeom) if w.geom_type[g] == 4 and w.geom_bodyid[g] == 0]
-        parts, src = assets.scene(params, seed, stones)
+        parts, src = scene(params, seed, stones)
         assets_on = os.environ.get('PLAY_ASSETS', '1') == '1'
         d, m, _ = fl.prepare(OUT / (f'fly-world{seed}' + ('' if assets_on else '-bare')), mjcf=mjcf, flat=fl.MJCF, world=parts if assets_on else None)
         src.tofile(d / 'src.bin')

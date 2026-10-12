@@ -2,6 +2,7 @@
 (walls, stones: they collide through the engine's convex pairs), seeded grass and flowers (drawn only, no contact), and
 the food and decoy markers at the plume sources. Every part is in world mm on body 0 (render.vertex draws it fixed).
 Grouped by colour, a few parts in all: the renderer holds 255 parts, the fly uses 69.
+The reference of scene.mojo, which play.py runs (its own generator: a seed lays out different grass there).
 
   .venv/bin/python -m agent.body_engine.assets check     (CPU: part count, triangles, everything on the ground, nothing at the start)
 """
