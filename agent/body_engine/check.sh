@@ -140,8 +140,8 @@ if [ "$stage" = shiures ]; then  # the resident Shiu brain on a caller-owned Dev
   [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
   echo "PASS all shiures checks"; exit 0
 fi
-if [ "$stage" = flylink3 ]; then  # brain-driven fly, ONE DeviceContext (live.mojo -DBRAIN=3): fly_link's gates plus no host copy per step (rocprofv3 --memory-copy-trace). Submit with --vram 4.
-  # Mutants: the brain step dropped, the silence flag ignored, left and right drive merged
+if [ "$stage" = flylink3 ]; then  # brain-driven fly, ONE DeviceContext (live.mojo -DBRAIN=3): fly_link's gates on host physics, then no host copy per step on the all-GPU build (rocprofv3 --memory-copy-trace). Prebuild on the CPU: python -m agent.body_engine.fly_link3 build. Submit with --vram 4.
+  # Mutants (each stops at the behaviour gate it breaks): the brain step dropped, the silence flag ignored, left and right drive merged
   export PYTHONPATH=$PWD
   L="$M -m agent.body_engine.fly_link3 check"
   $L || { echo "FAIL flylink3"; fail=$((fail+1)); }

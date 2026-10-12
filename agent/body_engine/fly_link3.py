@@ -8,8 +8,10 @@ readout, the two drives and the FlyGym gait (fly_gait.mojo, parity-gated against
 in the same launch stream as the K-step body launch and the renderer; the host sends nothing and reads nothing per step. Conditions (one live process each, run one
 after the other): sym (both eyes 150 Hz; the reference rate of each side is measured on the card at the end of the first 50 control steps and printed), left (left
 eye strong), right, silenced (readout zeroed), held (ctrl frozen from step 500, the brain runs on). Gates, as fly_link's: walk > 1 body length with tilt < 20 deg; opposite
-yaw for left/right; silenced and held (last half) move < 25 % of sym. Plus: (nohost) memory copies seen by rocprofv3 --memory-copy-trace are the same for a 100-step and a
-300-step run with render and packets off, so none per step; cost per frame split (brain + gait / physics / render / copy) from the engine's own phase timers.
+yaw for left/right; silenced and held (last half) move < 25 % of sym. The five conditions run the body on the host (-DCPU=1, live.mojo copies the brain's u_b to the host
+step per frame): one fly on one GPU wave costs 4.4 ms per 0.1 ms step, on the host 53 us (8001610), and brain, readout and gait are the same kernels either way. A failed
+behaviour gate exits there (a mutant needs nothing more). Then, on the all-GPU build: (nohost) memory copies seen by rocprofv3 --memory-copy-trace are the same for a
+10-step and a 30-step run with render and packets off, so none per step; cost per frame split (brain + gait / physics / render / copy) from the engine's own phase timers.
 """
 import json
 import re
@@ -69,8 +71,9 @@ def write_cfg(w, ref, silence=0, freeze=-1):
     np.asarray([ref[0], ref[1], silence, freeze, WINDOW], np.float64).tofile(w / 'fly3.bin')
 
 
-def binary(d, flags, tag='fly3'):
-    return sc.build(d, tag, ['-DPROFILE=1', *flags], K, brain=3)
+def binary(d, flags, cpu):
+    """cpu: the host-physics build for the conditions; else the all-GPU build for rocprof and cost."""
+    return sc.build(d, 'fly3cpu' if cpu else 'fly3', ['-DPROFILE=1', *flags] + (['-DCPU=1'] if cpu else []), K, brain=3)
 
 
 def run(d, exe, work, graph, steps, render, packets, env_extra=None):
@@ -102,7 +105,8 @@ def check(probe=False):
     STEPS = 100 if probe else STEPS
     OUT.mkdir(parents=True, exist_ok=True)
     d, m, g, nseg, n, brain, ndn, ndnl, works = prepare()
-    exe = binary(d, shiu_flags(n, len(brain.col), ndn, ndnl, nseg))
+    flags = shiu_flags(n, len(brain.col), ndn, ndnl, nseg)
+    host = binary(d, flags, True)
     q0 = np.fromfile(d / 'qpos.bin', np.float32).astype(float)
     root = live.roots(m)[0]
     graph = brain.graph
@@ -110,7 +114,7 @@ def check(probe=False):
     for cond in CONDITIONS:
         w = works[cond][0]
         write_cfg(w, ref or (0.0, 0.0), silence=1 if cond == 'silenced' else 0, freeze=STEPS // 2 if cond == 'held' else -1)
-        qs, err = run(d, exe, w, graph, STEPS, 0, 1)
+        qs, err = run(d, host, w, graph, STEPS, 0, 1)
         tr[cond] = np.vstack([q0, qs])
         if cond == 'sym':
             r = re.search(r'REF (\S+) (\S+)', err)
@@ -131,21 +135,22 @@ def check(probe=False):
     held = abs(last['held']) < 0.25 * last['sym']
     print(('PASS' if held else 'FAIL'), f"held ctrl from 0.5 s: last-half forward {last['held']:.2f} mm vs live {last['sym']:.2f} (< 25 %)")
     print(f'reference DN rate per side measured on the card (spikes/s): {ref[0]:.0f} {ref[1]:.0f} (host loop of fly_link: 2840 2680)')
-    ok = walk and turn and sil and held
-    # no host copy per step: rocprofv3 --memory-copy-trace, 100 vs 300 steps, render and packets off
+    if not (walk and turn and sil and held or probe):
+        sys.exit('FAIL fly_link3: behaviour')
+    exe = binary(d, flags, False)
+    # no host copy per step: rocprofv3 --memory-copy-trace, 10 vs 30 steps, render and packets off
     copies = {}
     w = works['sym'][0]
     write_cfg(w, ref)
-    for steps in (100, 300):
+    for steps in (10, 30):
         out = OUT / f'rocprof-{steps}'
         subprocess.run(['/opt/rocm/bin/rocprofv3', '--memory-copy-trace', '--output-format', 'csv', '-d', str(out), '-o', 'mc', '--', 'bash', '-c',
                         f'FLY3_WORK={w}/ FLY3_GRAPH={graph}/ exec "{exe}" "{d}/" {steps} {" ".join(sc.CAM)} 0 0 4>/dev/null >/dev/null 2>/dev/null'],
                        check=True, capture_output=True)
         csv = next(out.rglob('*memory_copy_trace.csv'))
         copies[steps] = len(csv.read_text().strip().splitlines()) - 1
-    nohost = copies[100] == copies[300]
-    ok &= nohost
-    print(('PASS' if nohost else 'FAIL'), f'no host copy per step: memory copies in the whole run {copies[100]} at 100 steps, {copies[300]} at 300 steps (equal: none per step; render and packets off)')
+    ok = copies[10] == copies[30]
+    print(('PASS' if ok else 'FAIL'), f'no host copy per step: memory copies in the whole run {copies[10]} at 10 steps, {copies[30]} at 30 steps (equal: none per step; render and packets off)')
     # cost split, one fly, render each step, 100 steps
     _, err = run(d, exe, w, graph, 100, 1, 0)
     cm = re.search(r'COST physics (\S+) neural_control (\S+) render (\S+) copy (\S+) display (\S+) frames (\d+)', err)
@@ -164,6 +169,8 @@ def check(probe=False):
 if __name__ == '__main__':
     if (sys.argv[1] if len(sys.argv) > 1 else 'check') == 'build':
         d, m, g, nseg, n, brain, ndn, ndnl, works = prepare()
-        print('built', binary(d, shiu_flags(n, len(brain.col), ndn, ndnl, nseg)))
+        from concurrent.futures import ThreadPoolExecutor  # both builds side by side, on the CPU before the gpu-wait job
+        with ThreadPoolExecutor(2) as ex:
+            print('built', *ex.map(lambda c: binary(d, shiu_flags(n, len(brain.col), ndn, ndnl, nseg), c), (True, False)))
     else:
         check(probe=len(sys.argv) > 2 and sys.argv[2] == 'probe')
