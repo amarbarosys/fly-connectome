@@ -64,7 +64,7 @@ def build(d, F, k, brain, w=64, h=64, eyes=False, gaze=False, row=False, profile
     cpu, wave = backend(F, eyes) if cpu is None else (cpu, True if wave is None else wave)
     flags = (d / 'sizes.txt').read_text().split() + (d / 'rsizes.txt').read_text().split()
     nb = int([f for f in flags if f.startswith('-DNBODY=')][0][8:])
-    src = [APP / f for f in ('live.mojo', 'spider_brain.mojo')] + [ENGINE / f for f in ('smooth.mojo', 'render.mojo', 'eyes.mojo')]
+    src = [APP / f for f in ('live.mojo', 'spider_brain.mojo')] + [ENGINE / f for f in ('smooth.mojo', 'render.mojo', 'viewer.mojo', 'eyes.mojo')]
     tag = hashlib.sha1(b''.join(f.read_bytes() for f in src + [d / 'sizes.txt', d / 'rsizes.txt'])).hexdigest()[:8]  # content (incl. the model's sizes), not mtime: mutant-check restores old mtimes
     b = d / f'link_b{brain}_k{k}_{w}x{h}{"_eyes" if eyes else ""}{"_gaze" if gaze else ""}{"_row" if row else ""}{"_prof" if profile else ""}{"_cpu" if cpu else ""}{"" if wave else "_w0"}_{tag}'
     if not b.is_file():

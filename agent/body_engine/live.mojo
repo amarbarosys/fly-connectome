@@ -34,13 +34,13 @@ usage: live DIR/ FRAMES ex ey ez tx ty tz fovy_deg [OUT]
 """
 import smooth as eng
 import render as ren
+from viewer import Viewer, write_all
 import imkit.window as gw
 from imkit import ui as uim
 from imkit.font import Font
 from imkit.layer import Layer
 from ctl import Ctl
 from brain_panel import BrainPanel
-from max.algorithm import parallelize
 from std.ffi import external_call
 from std.os import getenv
 from std.math import tan
@@ -68,18 +68,6 @@ comptime EYEROW = get_defined_int["EYEROW", 0]() == 1  # EYES: render AM_L only 
 comptime NPKR = eyes.F * eyes.W if EYEROW else NRET
 
 
-def write_all(fd: Int, p: Pointer[UInt8, MutUntrackedOrigin], n: Int) -> Bool:
-    var left = n
-    var q = p
-    while left > 0:
-        var w = external_call["write", Int](fd, q.unsafe_bitcast[NoneType](), left)
-        if w <= 0:
-            return False
-        q = q.unsafe_offset(w)
-        left -= w
-    return True
-
-
 def read_all(fd: Int, p: Pointer[UInt8, MutUntrackedOrigin], n: Int) -> Bool:
     var left = n
     var q = p
@@ -99,63 +87,18 @@ def main() raises:
     var frames = Int(String(a[2]))
     _ = external_call["setenv", Int32]("MODULAR_DEVICE_CONTEXT_MEMORY_MANAGER_SIZE_PERCENT".unsafe_ptr(), "0".unsafe_ptr(), Int32(0))
     var ctx = DeviceContext(0)
-    # engine: smooth.main's buffers
-    var mi_b = ctx.enqueue_create_buffer[DType.int32](eng.NI)
-    var mf_b = ctx.enqueue_create_buffer[DType.float32](eng.NFL)
-    var q_b = ctx.enqueue_create_buffer[DType.float32](eng.NQ * eng.F)
-    var v_b = ctx.enqueue_create_buffer[DType.float32](eng.NV * eng.F)
-    var u_b = ctx.enqueue_create_buffer[DType.float32](max(eng.NU, 1) * eng.F)
-    var o_b = ctx.enqueue_create_buffer[DType.float32](eng.NROW * eng.F)
-    o_b.enqueue_fill(0)  # warm start reads OWARM before the first step writes it
-    var mi = eng.load(dir + "mi.bin", eng.NI)
-    var mf = eng.load(dir + "mf.bin", eng.NFL)
-    var qp = eng.load(dir + "qpos.bin", eng.NQ * eng.F)
-    var qv = eng.load(dir + "qvel.bin", eng.NV * eng.F)
-    var uv = eng.load(dir + "ctrl.bin", eng.NU * eng.F)
-    ctx.enqueue_copy(mi_b, mi.unsafe_ptr().unsafe_bitcast[Int32]())
-    ctx.enqueue_copy(mf_b, mf.unsafe_ptr().unsafe_bitcast[Float32]())
-    ctx.enqueue_copy(q_b, qp.unsafe_ptr().unsafe_bitcast[Float32]())
-    ctx.enqueue_copy(v_b, qv.unsafe_ptr().unsafe_bitcast[Float32]())
-    ctx.enqueue_copy(u_b, uv.unsafe_ptr().unsafe_bitcast[Float32]())
+    # engine + renderer: kinestride viewer.Viewer owns the buffers, uploads and camera (the pose rows reach the renderer
+    # uncopied); the names below alias its fields so this loop reads as before
+    var camv = List[Float32]()
+    for k in range(7):
+        camv.append(Float32(atof(String(a[3 + k]))))
+    var vw = Viewer(ctx, dir, camv)
+    ref q_b = vw.q_b; ref v_b = vw.v_b; ref u_b = vw.u_b; ref o_b = vw.o_b
+    ref qp = vw.qp; ref qv = vw.qv; ref uv = vw.uv; ref ob = vw.ob
+    ref pi_b = vw.pi_b; ref pf_b = vw.pf_b; ref rv_b = vw.rv_b; ref rt_b = vw.rt_b; ref rp_b = vw.rp_b
+    ref cam_b = vw.cam_b; ref vis_b = vw.vis_b; ref sm_b = vw.sm_b; ref scam_b = vw.scam_b; ref img_b = vw.img_b
+    ref out_h = vw.out_h; ref camh = vw.camh
     var step = ctx.compile_function[eng.smooth]()
-    # -DCPU=1: the step runs on the host over these (one interactive animal: GPU latency is 4.4 ms per 0.1 ms step, host 53 us);
-    # the device copies are refreshed after each step, so render, packets and HUD read them unchanged
-    var ob = List[UInt8](length=4 * eng.NROW * eng.F, fill=0)
-    var hi = eng.host[DType.int32](mi, eng.LI); var hf = eng.host[DType.float32](mf, eng.LF); var hq = eng.host[DType.float32](qp, eng.LQ)
-    var hv = eng.host[DType.float32](qv, eng.LV); var hu = eng.host[DType.float32](uv, eng.LU); var ho = eng.host[DType.float32](ob, eng.LO)
-    # renderer: render.main's buffers, the pose tensor over the engine's output
-    var pi_h = ren.load(dir + "rmi.bin", 20 * ren.NPART)
-    var pf_h = ren.load(dir + "rmf.bin", 4 * ren.PFS * ren.NPART)
-    var rv_h = ren.load(dir + "rv.bin", 2 * ren.RVI * ren.NRV)
-    var rt_h = ren.load(dir + "rt.bin", 2 * ren.NRT)
-    var rp_h = ren.load(dir + "rp.bin", ren.NTRI)
-    var pi_b = ctx.enqueue_create_buffer[DType.int32](5 * ren.NPART)
-    var pf_b = ctx.enqueue_create_buffer[DType.float32](ren.PFS * ren.NPART)
-    var rv_b = ctx.enqueue_create_buffer[DType.int16](ren.RVI * ren.NRV)
-    var rt_b = ctx.enqueue_create_buffer[DType.uint16](ren.NRT)
-    var rp_b = ctx.enqueue_create_buffer[DType.uint8](ren.NTRI)
-    var cam_b = ctx.enqueue_create_buffer[DType.float32](ren.NCAM)
-    var vis_b = ctx.enqueue_create_buffer[DType.uint64](ren.W * ren.H)
-    var sm_b = ctx.enqueue_create_buffer[DType.uint64](ren.NSM)  # shadow map (render.mojo SHADOW=2)
-    var scam_b = ctx.enqueue_create_buffer[DType.float32](ren.NCAM)
-    var img_b = ctx.enqueue_create_buffer[DType.uint32](ren.W * ren.H)
-    var out_h = ctx.enqueue_create_host_buffer[DType.uint32](ren.W * ren.H)
-    var camh = List[Float32](length=ren.NCAM, fill=0)
-    for k in range(6):
-        camh[k] = Float32(atof(String(a[3 + k])))
-    var fovy = Float32(atof(String(a[9]))) * 3.14159265 / 180
-    camh[6] = fovy
-    camh[7] = Float32(ren.H) * 0.5 / tan(fovy * 0.5)
-    comptime if eng.HFG >= 0:  # the renderer draws the engine's own terrain
-        var mfp = mf.unsafe_ptr().unsafe_bitcast[Float32]()
-        for k in range(eng.NP):
-            camh[16 + k] = mfp[eng.HFO + k]
-    ctx.enqueue_copy(pi_b, pi_h.unsafe_ptr().unsafe_bitcast[Int32]())
-    ctx.enqueue_copy(pf_b, pf_h.unsafe_ptr().unsafe_bitcast[Float32]())
-    ctx.enqueue_copy(rv_b, rv_h.unsafe_ptr().unsafe_bitcast[Int16]())
-    ctx.enqueue_copy(rt_b, rt_h.unsafe_ptr().unsafe_bitcast[UInt16]())
-    ctx.enqueue_copy(rp_b, rp_h.unsafe_ptr().unsafe_bitcast[UInt8]())
-    ctx.enqueue_copy(cam_b, camh.unsafe_ptr())
     var kc = ctx.compile_function[ren.clear]()
     var kr = ctx.compile_function[ren.raster]()
     var ks = ctx.compile_function[ren.shade]()
@@ -339,13 +282,7 @@ def main() raises:
                 ctx.synchronize()
                 ms[0] += Float64(perf_counter_ns() - tp)
                 tp = perf_counter_ns()
-            comptime if eng.CPU:  # one host thread per animal (each writes only its own columns, as the GPU kernel's threads do)
-                def step_animal(f: Int) {imm hi, imm hf, imm hq, imm hv, imm hu, imm ho}:
-                    eng.smooth_at(hi, hf, hq, hv, hu, ho, f)
-                parallelize(step_animal, eng.F)
-            else:
-                ctx.enqueue_function(step, TileTensor(mi_b, eng.LI), TileTensor(mf_b, eng.LF), TileTensor(q_b, eng.LQ), TileTensor(v_b, eng.LV),
-                    TileTensor(u_b, eng.LU), TileTensor(o_b, eng.LO), grid_dim=eng.GRID, block_dim=eng.BLOCK)
+            vw.step(ctx, step)  # -DCPU=1: one host thread per animal over the host lists (viewer.mojo)
             comptime if PROFILE > 0:
                 ctx.synchronize()
                 ms[1] += Float64(perf_counter_ns() - tp)

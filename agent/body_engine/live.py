@@ -103,7 +103,7 @@ def build(out, m, k, box=0):
     flags += ['-DWAVE=1']  # one animal on a 32-lane wave (smooth.mojo WAVE): the live step is latency, not throughput
     flags += ['-DTERRAIN=1'] if any(f.startswith('-DHFGEOM') for f in flags) else []
     binary = out / f'live_k{k}_b{box}'
-    src = [APP / 'live.mojo'] + [ENGINE / f for f in ('smooth.mojo', 'render.mojo')] + [out / 'sizes.txt', out / 'rsizes.txt']
+    src = [APP / 'live.mojo'] + [ENGINE / f for f in ('smooth.mojo', 'render.mojo', 'viewer.mojo')] + [out / 'sizes.txt', out / 'rsizes.txt']
     if binary.is_file() and binary.stat().st_mtime > max(f.stat().st_mtime for f in src):
         return binary  # built on the CPU before the GPU job
     subprocess.run([MOJO, 'build', '-I', str(ENGINE), '-I', str(IMKIT), *flags, '-DFLIES=1', '-DSTAGE=7', f'-DK={k}', f'-DW={W}', f'-DH={H}',
