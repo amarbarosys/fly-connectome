@@ -9,7 +9,8 @@ Gates, frozen before the claim run (held-out 6-9 deg/s, test seed 9 as spider_bl
   E1 evolve best after GEN generations < 1.5 x hand
   E2 shuffle best >= 2 x evolve best
   E3 evolve generation-0 best > 2 x hand (selection did the work, not a lucky start)
-Seeds claimed in docs/seeds_used.json (spider_evolve). --smoke: 2 generations of 4, no seed claim, no gates.
+Seeds claimed in docs/seeds_used.json (spider_evolve); --seeds E S replicates with fresh seeds (receipt evolve-E.json).
+--smoke: 2 generations of 4, no seed claim, no gates.
 usage: .venv/bin/python tools/spider_evolve_test.py  -> .work/agent/spider/evolve.json
 """
 import copy
@@ -26,7 +27,8 @@ from agent.seeds import claim  # noqa: E402
 
 SMOKE = '--smoke' in sys.argv
 POP, ELITE, GEN, SIG, MOVE = (4, 2, 2, 0.05, 10) if SMOKE else (32, 8, 150, 0.05, 10)
-SEEDS = {'evolve': 501, 'shuffle': 502}
+ARG = sys.argv[sys.argv.index('--seeds') + 1:][:2] if '--seeds' in sys.argv else []
+SEEDS = {'evolve': int(ARG[0]), 'shuffle': int(ARG[1])} if ARG else {'evolve': 501, 'shuffle': 502}
 REC = []
 
 
@@ -81,7 +83,7 @@ def main():
     gates = {'E1': e['after'] < 1.5 * hand, 'E2': sh['after'] >= 2 * e['after'], 'E3': e['gen0'] > 2 * hand}
     out['gates'] = gates
     (bp.ROOT / '.work/agent/spider').mkdir(parents=True, exist_ok=True)
-    (bp.ROOT / '.work/agent/spider/evolve.json').write_text(json.dumps(out, indent=2) + '\n')
+    (bp.ROOT / f".work/agent/spider/evolve{'-' + ARG[0] if ARG else ''}.json").write_text(json.dumps(out, indent=2) + '\n')
     print(f"E1 evolved {e['after']:.2f} deg vs hand {hand:.2f} -> {'PASS' if gates['E1'] else 'FAIL'}")
     print(f"E2 shuffled-fitness control {sh['after']:.2f} -> {'PASS' if gates['E2'] else 'FAIL'}")
     print(f"E3 generation-0 best {e['gen0']:.2f} -> {'PASS' if gates['E3'] else 'FAIL'}")
