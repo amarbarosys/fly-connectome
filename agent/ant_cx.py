@@ -573,7 +573,14 @@ def a6c(probe=85, gate=86):
     print('PASS ant CX A6c: MCNS CX wiring + M with a calibrated readout holds the way home')
 
 
+def a6d(probe=87, gate=88):
+    """A6d (ANT.md): A6b with M fed by the EPG compass cells only."""
+    global M_EXC, M_PRE
+    M_EXC, M_PRE = True, r'^EPG'
+    a6(probe, gate, 'a6d')
+
+
 if __name__ == '__main__':
     num = lambda v: int(v) if v.lstrip('-').isdigit() else float(v) if v.replace('.', '', 1).lstrip('-').isdigit() else v
     {'heading': heading, 'home': home, 'home_fit': home_fit, 'home_b': home_b, 'search': search, 'a5': a5,
-     'audit': lambda: report(audit(), 'P0 audit'), 'a6': a6, 'a6b': a6b, 'a6c': a6c}[sys.argv[1]](*map(num, sys.argv[2:]))
+     'audit': lambda: report(audit(), 'P0 audit'), 'a6': a6, 'a6b': a6b, 'a6c': a6c, 'a6d': a6d}[sys.argv[1]](*map(num, sys.argv[2:]))
