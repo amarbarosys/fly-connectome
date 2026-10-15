@@ -335,7 +335,7 @@ def audit():
     return ok
 
 
-def m_trials(cols, shuffle=None, seed=81, b=0.1, read=3000, exc=None):
+def m_trials(cols, shuffle=None, seed=81, b=0.1, read=3000, exc=None, bias=0.0):
     """A6 brain with M (ANT.md): cols = (headings, speed multipliers, key) per column, one SEG-step segment per entry;
     cue on EPG at each heading; M edges (M_PRE -> PFNd / PFNv) feed slow plane 0 scaled by the segment's speed, then
     scale 0 and cue off for `read` steps. Returns counts in the last 1000 cue steps, counts in the read window, the
@@ -364,6 +364,8 @@ def m_trials(cols, shuffle=None, seed=81, b=0.1, read=3000, exc=None):
         br.run([win[1]])
     c1 = br.spikes.copy()
     br.scale[:, 1] = 0.0
+    if bias > 0:  # A6c: constant, heading-free current (mV / ms) on the memory cells during the read window
+        br.inject(np.flatnonzero(s.str.match(MEM6).to_numpy()), float(bias), window=(segs * SEG, segs * SEG + read))
     br.run([segs * SEG + read])
     return (c1 - c0).T, (br.spikes - c1).T, br.m[0].reshape(len(cols), n), types, phase, fb
 
@@ -490,7 +492,88 @@ def a6b(probe=83, gate=84):
     a6(probe, gate, 'a6b')
 
 
+A6C_R = (0.2, 0.4, 0.8, 1.6)  # mV / ms constant current
+
+
+def calibrate(seed, b, bias, shuffle=None):
+    """A6c: preferred heading per memory cell from 16 single legs (u 1, bias); NaN for silent cells; and the held-out
+    style check: single-leg decode error with those phases (median, deg)."""
+    az = np.arange(0, 360, 22.5)
+    _, off, _, types, _, _ = m_trials([([h], [1.0], None) for h in az], shuffle, seed, b, bias=bias)
+    mem = pd.Series(types).str.match(MEM6).to_numpy()
+    z = (off * np.exp(1j * np.radians(az))[:, None]).sum(0)
+    pref = np.where(mem & (np.abs(z) > 0), np.degrees(np.angle(z)), np.nan)
+    e = float(np.median(err(fit_off(vec(off, pref), az), az)))
+    return pref, e
+
+
+def bias_probe(seed, b):
+    """A6c P3: smallest R whose post-leg memory spikes are > 0 at u 0.2 and rise with u at every heading."""
+    hs, us = (0.0, 90.0, 180.0, 270.0), (0.2, 0.4, 0.6, 0.8, 1.0)
+    for R in A6C_R:
+        _, off, _, types, _, _ = m_trials([([h], [u], None) for h in hs for u in us], None, seed, b, bias=R)
+        S = off[:, pd.Series(types).str.match(MEM6).to_numpy()].sum(1).reshape(len(hs), len(us))
+        rho = [round(float(pd.Series(r).corr(pd.Series(us), method='spearman')), 9) for r in S]
+        print(f'P3 R {R}: spikes per heading x speed {S.tolist()}, Spearman {rho}', flush=True)
+        if (S[:, 0] > 0).all() and min(rho) >= 0.9:
+            return R
+    return None
+
+
+def g6c(seed, b, R, pref, prefs, k=K6):
+    """A6c G6: calibrated-phase memory decoder; prefs = the shuffled wiring's own calibration."""
+    rng = np.random.default_rng(seed)
+    fit, test = paths6(rng, k), paths6(rng, k)
+    cols = [(h, u, None) for h, u in zip(*fit[:2])] + [(h, u, None) for h, u in zip(*test[:2])]
+    cols += [(h, np.full(3, 0.6), k + i) for i, h in enumerate(test[0])]
+    tc = [(h, u, None) for h, u in zip(*test[:2])]
+    x = m_trials(cols, None, seed, b, bias=R)[1]
+    arms = {'real': (x[k:2 * k], pref), 'no odometer': (x[2 * k:], pref),
+            'M off': (m_trials(tc, None, seed, 0.0, bias=R)[1], pref), 'shuffled CX': (m_trials(tc, 5, seed, b, bias=R)[1], prefs)}
+    zf = vec(x[:k], pref)
+    best = None
+    for sg in (1, -1):
+        raw = sg * np.degrees(np.angle(zf))
+        o = float(np.degrees(np.angle(np.exp(1j * np.radians(raw - fit[2])).mean())))
+        e = float(np.median(err((raw - o) % 360, fit[2])))
+        if best is None or e < best[0]:
+            best = (e, sg, o)
+    e, sg, o = best
+    print(f'G6c decoder: memory cells, calibrated phases, s {sg:+d} offset {o:.1f} (FIT median {e:.1f} deg)')
+    hits = {}
+    for arm, (xx, pp) in arms.items():
+        z = vec(xx, pp)
+        d = np.where(np.abs(z) > 0, (sg * np.degrees(np.angle(z)) - o) % 360, np.nan)
+        hits[arm] = int((e6(d, test[2]) < HIT).sum())
+        print(f'G6c {arm}: hits {hits[arm]}/{k}, median err {np.median(e6(d, test[2])):.1f} deg', flush=True)
+    bound = 41 * k // 128
+    return [(f"G6c real: {hits['real']}/{k} >= {3 * k // 4}", hits['real'] >= 3 * k // 4)] + \
+           [(f'G6c {a}: {hits[a]}/{k} <= {bound}', hits[a] <= bound) for a in ('no odometer', 'M off', 'shuffled CX')]
+
+
+def a6c(probe=85, gate=86):
+    """A6c (ANT.md): A6b + readout bias R (P3) + calibrated memory-cell phases; stops at the first FAIL."""
+    from agent import seeds
+    global M_EXC
+    M_EXC = True
+    report(audit(), 'P0 audit')
+    seeds.claim('ant_cx_a6c_probe', [int(probe)])
+    p1 = persistence(probe)
+    b = next((bb for bb in M_B if p1[bb][0] >= 7 and p1[bb][1] >= 0.5), None)
+    report([(f'P1 frozen b {b}', b is not None)], 'P1 persistence')
+    report(conjunction(probe, b), 'P2 conjunction')
+    R = bias_probe(probe, b)
+    report([(f'P3 bias R in {A6C_R}: frozen {R}', R is not None)], 'P3 bias')
+    pref, e = calibrate(probe, b, R)
+    prefs, es = calibrate(probe, b, R, 5)
+    print(f'P3 calibration: {int(np.isfinite(pref).sum())} memory cells tuned; single-leg error {e:.1f} deg (shuffled {es:.1f})')
+    report([(f'P3 single-leg decode with calibrated phases {e:.1f} < 20 deg', e < 20)], 'P3 calibration')
+    seeds.claim('ant_cx_a6c_gate', [int(gate)])
+    report(g6c(gate, b, R, pref, prefs), 'G6c home vector')
+    print('PASS ant CX A6c: MCNS CX wiring + M with a calibrated readout holds the way home')
+
+
 if __name__ == '__main__':
     num = lambda v: int(v) if v.lstrip('-').isdigit() else float(v) if v.replace('.', '', 1).lstrip('-').isdigit() else v
     {'heading': heading, 'home': home, 'home_fit': home_fit, 'home_b': home_b, 'search': search, 'a5': a5,
-     'audit': lambda: report(audit(), 'P0 audit'), 'a6': a6, 'a6b': a6b}[sys.argv[1]](*map(num, sys.argv[2:]))
+     'audit': lambda: report(audit(), 'P0 audit'), 'a6': a6, 'a6b': a6b, 'a6c': a6c}[sys.argv[1]](*map(num, sys.argv[2:]))
