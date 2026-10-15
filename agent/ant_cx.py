@@ -309,6 +309,179 @@ def shuffled_hits(seed, gain, k=32):
     return h
 
 
+MEM6, M_PRE = r'^(PFNd|PFNv)', r'^(EPG|PEG|PEN_a|PEN_b|Delta7|PFNa|PFNd|PFNv)'  # A6: memory cells, CX pres feeding M
+M_T, M_B, SEG, K6 = 4.0, (0.02, 0.05, 0.1, 0.2), 2000, 128  # level decay s, b grid (P1), steps per probe segment, paths
+
+
+def audit():
+    """A6 P0: every MCNS type synapsing onto PFNd / PFNv / hDelta / PFL3 (signed synapses), and whether M's pres are CX."""
+    a = pd.read_feather(mcns.DATA / 'body-annotations-male-cns-v1.0-minconf-0.5.feather', columns=['status', 'type', 'superclass'])
+    a = a[a['status'].isin(['Traced', 'Anchor'])].reset_index(drop=True)
+    t, sc = a['type'].fillna('').to_numpy(), a['superclass'].fillna('').to_numpy()
+    pre, post, w, *_ = mcns.graph()
+    tgt = pd.Series(t).str.extract(r'^(PFNd|PFNv|hDelta|PFL3)')[0].to_numpy()
+    e = pd.notna(tgt[post])
+    df = pd.DataFrame({'pre': t[pre[e]], 'sc': sc[pre[e]], 'onto': tgt[post[e]], 'w': w[e]})
+    tab = df.pivot_table(index=['pre', 'sc'], columns='onto', values='w', aggfunc='sum', fill_value=0)
+    tab['cells'] = [int((t == p).sum()) for p, _ in tab.index]
+    tab = tab.loc[tab.drop(columns='cells').abs().sum(1).sort_values(ascending=False).index]
+    print(tab.head(40).to_string())
+    m = df[df['onto'].isin(['PFNd', 'PFNv']) & df['pre'].str.match(M_PRE)]
+    exc = m.groupby('pre')['w'].sum()
+    print('M pres onto PFNd / PFNv:', exc.round(0).to_dict())
+    ok = [(f"M pres are all CX-internal (subgraph types): {sorted(set(m['pre']))}", bool(m['pre'].str.match(TYPES).all())),
+          (f"memory cells get excitatory M input: {int(exc[exc > 0].sum())} synapses", bool((exc > 0).any()))]
+    return ok
+
+
+def m_trials(cols, shuffle=None, seed=81, b=0.1, read=3000):
+    """A6 brain with M (ANT.md): cols = (headings, speed multipliers, key) per column, one SEG-step segment per entry;
+    cue on EPG at each heading; M edges (M_PRE -> PFNd / PFNv) feed slow plane 0 scaled by the segment's speed, then
+    scale 0 and cue off for `read` steps. Returns counts in the last 1000 cue steps, counts in the read window, the
+    final levels m (columns, n) and the subgraph."""
+    from agent.shiu import ShiuBrain
+    keep, types, phase, side, p, q, w, fb = subgraph(shuffle)
+    n, s = len(keep), pd.Series(types)
+    epg = np.flatnonzero(s.str.startswith('EPG').to_numpy() & ~np.isnan(phase))
+    br = ShiuBrain(p, q, w, n=n, flies=len(cols), seed=seed)
+    pre = np.repeat(np.arange(n), np.diff(br.row))
+    grp = (s.str.match(M_PRE).to_numpy()[pre] & s.str.match(MEM6).to_numpy()[br.col]).astype(np.uint8)
+    br.edge_groups(grp, np.ones((len(cols), 2), np.float32))
+    br.modulate([-1, 0], (M_T,), (0.0,), (b,))
+    segs = len(cols[0][0])
+    for j in range(segs):
+        win = (j * SEG, (j + 1) * SEG)
+        for c, (h, u, key) in enumerate(cols):
+            br.scale[c, 1] = u[j]
+            rate = CUE_HZ * np.maximum(0, np.cos(np.radians(phase[epg] - h[j])))
+            for r in np.unique(rate[rate > 0]):
+                br.stimulate(epg[rate == r], float(r), fly=c, key=key, window=win)
+        if j == segs - 1:
+            br.run([win[1] - 1000])
+            c0 = br.spikes.copy()
+        br.run([win[1]])
+    c1 = br.spikes.copy()
+    br.scale[:, 1] = 0.0
+    br.run([segs * SEG + read])
+    return (c1 - c0).T, (br.spikes - c1).T, br.m[0].reshape(len(cols), n), types, phase, fb
+
+
+def vec(x, phase):
+    ok = ~np.isnan(phase)
+    return (x[..., ok] * np.exp(1j * np.radians(phase[ok]))).sum(-1)
+
+
+def fit_off(z, target):
+    """one circular offset (deg) fitted on the same trials, and the decoded angles after it."""
+    raw = np.degrees(np.angle(z))
+    o = float(np.degrees(np.angle(np.exp(1j * np.radians(raw - target)).mean())))
+    return (raw - o) % 360
+
+
+def dec6(x, types, phase, fb, cand, s=1, o=0.0):
+    """home_decode, NaN (a miss) for a column whose read cells never spiked: a zero vector has no direction."""
+    d = home_decode(x, types, phase, fb, cand, s, o)
+    return np.where(x[:, pd.Series(types).str.startswith(cand[0]).to_numpy()].sum(1) > 0, d, np.nan)
+
+
+def e6(a, b):
+    return np.nan_to_num(err(a, b), nan=180.0)
+
+
+def persistence(seed=81, shuffle=None):
+    """A6 P1: 8 azimuths, cue 200 ms at speed 1; per b: hits (decode within 45 deg 300 ms after cue off) and norm ratio."""
+    az = np.arange(0, 360, 45.0)
+    out = {}
+    for b in M_B:
+        on, off, _, types, phase, _ = m_trials([([h], [1.0], None) for h in az], shuffle, seed, b)
+        mem = pd.Series(types).str.match(MEM6).to_numpy()
+        zo, zf = vec(on[:, mem], phase[mem]), vec(off[:, mem], phase[mem])
+        hits = int((err(fit_off(zf, az), az) < HIT).sum())
+        ratio = float(np.median(np.abs(zf) / np.maximum(np.abs(zo) / 3, 1e-9)))  # on window 100 ms, read window 300 ms
+        out[b] = (hits, ratio)
+        print(f'P1 {"shuffled" if shuffle is not None else "real"} b {b}: {hits}/8 within 45 deg 300 ms after cue off, norm ratio {ratio:.2f}, memory spikes after {int(off[:, mem].sum())}', flush=True)
+    return out
+
+
+def conjunction(seed=81, b=0.1):
+    """A6 P2: headings 0/90/180/270 x speeds 0.2-1.0, one segment each; level sum vs speed and level phase vs heading."""
+    hs, us = (0.0, 90.0, 180.0, 270.0), (0.2, 0.4, 0.6, 0.8, 1.0)
+    cols = [([h], [u], None) for h in hs for u in us]
+    _, _, m, types, phase, _ = m_trials(cols, None, seed, b, read=0)
+    mem = pd.Series(types).str.match(MEM6).to_numpy()
+    tot = m[:, mem].sum(1).reshape(len(hs), len(us))
+    rho = [float(pd.Series(r).corr(pd.Series(us), method='spearman')) for r in tot]
+    ph = fit_off(vec(m[:, mem], phase[mem]), np.repeat(hs, len(us))).reshape(len(hs), len(us))[:, -1]
+    good = int((err(ph, hs) < HIT).sum())
+    print(f'P2 level sum per heading x speed:\n{np.round(tot, 1)}\nSpearman per heading {np.round(rho, 2)}; phase error at u 1 {np.round(err(ph, hs), 1)}')
+    return [(f'P2 level rises with speed: Spearman {min(rho):.2f} >= 0.9 at every heading', round(min(rho), 9) >= 0.9),
+            (f'P2 level phase tracks heading: {good}/4 within 45 deg >= 3', good >= 3)]
+
+
+def paths6(rng, k):
+    """3-leg outbounds as paths(), rejection-sampled so last leg + 180 misses home by > 90 deg (heading baseline 0)."""
+    h, u, d = np.zeros((0, 3)), np.zeros((0, 3)), np.zeros(0)
+    while len(d) < k:
+        hh, uu, dd = paths(rng, 4 * k)
+        ok = err(hh[:, 2] + 180, dd) > 90
+        h, u, d = np.vstack([h, hh[ok]]), np.vstack([u, uu[ok]]), np.r_[d, dd[ok]]
+    return h[:k], u[:k], d[:k]
+
+
+def g6(seed=82, b=0.1, k=K6):
+    """A6 G6: decoder on k FIT paths, hits on k TEST paths; arms real, no odometer (u 0.6), M off (b 0), shuffled with M."""
+    rng = np.random.default_rng(seed)
+    fit, test = paths6(rng, k), paths6(rng, k)
+    cols = [(h, u, None) for h, u in zip(*fit[:2])] + [(h, u, None) for h, u in zip(*test[:2])]
+    cols += [(h, np.full(3, 0.6), k + i) for i, h in enumerate(test[0])]
+    _, x, _, types, phase, fb = m_trials(cols, None, seed, b)
+    arms = {'real': x[k:2 * k], 'no odometer': x[2 * k:]}
+    arms['M off'] = m_trials([(h, u, None) for h, u in zip(*test[:2])], None, seed, 0.0)[1]
+    arms['shuffled CX'] = m_trials([(h, u, None) for h, u in zip(*test[:2])], 5, seed, b)[1]
+    best = None
+    for cand in HOME_READ:
+        for sg in (1, -1):
+            raw = dec6(x[:k], types, phase, fb, cand, sg)
+            o = float(np.degrees(np.angle(np.nanmean(np.exp(1j * np.radians(raw - fit[2]))))))
+            e = float(np.median(e6((raw - o) % 360, fit[2])))
+            if np.isfinite(o) and (best is None or e < best[0]):
+                best = (e, cand, sg, o)
+    e, cand, sg, o = best
+    print(f'G6 frozen decoder: {cand} s {sg:+d} offset {o:.1f} (FIT median {e:.1f} deg)')
+    hits = {}
+    for arm, xx in arms.items():
+        d = dec6(xx, types, phase, fb, cand, sg, o)
+        hits[arm] = int((e6(d, test[2]) < HIT).sum())
+        print(f'G6 {arm}: hits {hits[arm]}/{k}, median err {np.median(e6(d, test[2])):.1f} deg')
+    print(f'G6 heading-only baseline: {int((err(test[0][:, 2] + 180, test[2]) < HIT).sum())}/{k}')
+    bound = 41 * k // 128
+    return [(f"G6 real: {hits['real']}/{k} >= {3 * k // 4}", hits['real'] >= 3 * k // 4)] + \
+           [(f'G6 {a}: {hits[a]}/{k} <= {bound}', hits[a] <= bound) for a in ('no odometer', 'M off', 'shuffled CX')]
+
+
+def report(ok, name):
+    for msg, v in ok:
+        print(('PASS ' if v else 'FAIL ') + msg, flush=True)
+    if not all(v for _, v in ok):
+        sys.exit(f'FAIL ant CX A6 {name}')
+
+
+def a6(probe=81, gate=82):
+    """A6 (ANT.md): P0 audit, P1 persistence (freezes b), P2 conjunction, G6 home vector; stops at the first FAIL."""
+    from agent import seeds
+    report(audit(), 'P0 audit')
+    seeds.claim('ant_cx_a6_probe', [int(probe)])
+    p1 = persistence(probe)
+    persistence(probe, 5)  # reported
+    b = next((bb for bb in M_B if p1[bb][0] >= 7 and p1[bb][1] >= 0.5), None)
+    report([(f'P1 some b in {M_B} holds the heading 300 ms (>= 7/8, norm >= 0.5): frozen b {b}', b is not None)], 'P1 persistence')
+    report(conjunction(probe, b), 'P2 conjunction')
+    seeds.claim('ant_cx_a6_gate', [int(gate)])
+    report(g6(gate, b), 'G6 home vector')
+    print('PASS ant CX A6: MCNS CX wiring + the named integrator M holds the way home; shuffled wiring with M does not')
+
+
 if __name__ == '__main__':
     num = lambda v: int(v) if v.lstrip('-').isdigit() else float(v) if v.replace('.', '', 1).lstrip('-').isdigit() else v
-    {'heading': heading, 'home': home, 'home_fit': home_fit, 'home_b': home_b, 'search': search, 'a5': a5}[sys.argv[1]](*map(num, sys.argv[2:]))
+    {'heading': heading, 'home': home, 'home_fit': home_fit, 'home_b': home_b, 'search': search, 'a5': a5,
+     'audit': lambda: report(audit(), 'P0 audit'), 'a6': a6}[sys.argv[1]](*map(num, sys.argv[2:]))
