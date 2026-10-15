@@ -129,5 +129,11 @@
  ],
  "ant_cx_a6_probe": [
   81
+ ],
+ "ant_cx_a6b_probe": [
+  83
+ ],
+ "ant_cx_a6b_gate": [
+  84
  ]
 }
