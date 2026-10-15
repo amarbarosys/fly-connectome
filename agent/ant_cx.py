@@ -310,6 +310,7 @@ def shuffled_hits(seed, gain, k=32):
 
 
 MEM6, M_PRE = r'^(PFNd|PFNv)', r'^(EPG|PEG|PEN_a|PEN_b|Delta7|PFNa|PFNd|PFNv)'  # A6: memory cells, CX pres feeding M
+M_EXC = False  # A6b sets True: M takes positive edges only
 M_T, M_B, SEG, K6 = 4.0, (0.02, 0.05, 0.1, 0.2), 2000, 128  # level decay s, b grid (P1), steps per probe segment, paths
 
 
@@ -334,18 +335,19 @@ def audit():
     return ok
 
 
-def m_trials(cols, shuffle=None, seed=81, b=0.1, read=3000):
+def m_trials(cols, shuffle=None, seed=81, b=0.1, read=3000, exc=None):
     """A6 brain with M (ANT.md): cols = (headings, speed multipliers, key) per column, one SEG-step segment per entry;
     cue on EPG at each heading; M edges (M_PRE -> PFNd / PFNv) feed slow plane 0 scaled by the segment's speed, then
     scale 0 and cue off for `read` steps. Returns counts in the last 1000 cue steps, counts in the read window, the
     final levels m (columns, n) and the subgraph."""
     from agent.shiu import ShiuBrain
+    exc = M_EXC if exc is None else exc
     keep, types, phase, side, p, q, w, fb = subgraph(shuffle)
     n, s = len(keep), pd.Series(types)
     epg = np.flatnonzero(s.str.startswith('EPG').to_numpy() & ~np.isnan(phase))
     br = ShiuBrain(p, q, w, n=n, flies=len(cols), seed=seed)
     pre = np.repeat(np.arange(n), np.diff(br.row))
-    grp = (s.str.match(M_PRE).to_numpy()[pre] & s.str.match(MEM6).to_numpy()[br.col]).astype(np.uint8)
+    grp = (s.str.match(M_PRE).to_numpy()[pre] & s.str.match(MEM6).to_numpy()[br.col] & ((br.w > 0) | (not exc))).astype(np.uint8)  # A6b exc: positive edges only
     br.edge_groups(grp, np.ones((len(cols), 2), np.float32))
     br.modulate([-1, 0], (M_T,), (0.0,), (b,))
     segs = len(cols[0][0])
@@ -466,22 +468,29 @@ def report(ok, name):
         sys.exit(f'FAIL ant CX A6 {name}')
 
 
-def a6(probe=81, gate=82):
+def a6(probe=81, gate=82, tag='a6'):
     """A6 (ANT.md): P0 audit, P1 persistence (freezes b), P2 conjunction, G6 home vector; stops at the first FAIL."""
     from agent import seeds
     report(audit(), 'P0 audit')
-    seeds.claim('ant_cx_a6_probe', [int(probe)])
+    seeds.claim(f'ant_cx_{tag}_probe', [int(probe)])
     p1 = persistence(probe)
     persistence(probe, 5)  # reported
     b = next((bb for bb in M_B if p1[bb][0] >= 7 and p1[bb][1] >= 0.5), None)
     report([(f'P1 some b in {M_B} holds the heading 300 ms (>= 7/8, norm >= 0.5): frozen b {b}', b is not None)], 'P1 persistence')
     report(conjunction(probe, b), 'P2 conjunction')
-    seeds.claim('ant_cx_a6_gate', [int(gate)])
+    seeds.claim(f'ant_cx_{tag}_gate', [int(gate)])
     report(g6(gate, b), 'G6 home vector')
-    print('PASS ant CX A6: MCNS CX wiring + the named integrator M holds the way home; shuffled wiring with M does not')
+    print(f'PASS ant CX {tag}: MCNS CX wiring + the named integrator M holds the way home; shuffled wiring with M does not')
+
+
+def a6b(probe=83, gate=84):
+    """A6b (ANT.md): A6 with M on excitatory edges only."""
+    global M_EXC
+    M_EXC = True
+    a6(probe, gate, 'a6b')
 
 
 if __name__ == '__main__':
     num = lambda v: int(v) if v.lstrip('-').isdigit() else float(v) if v.replace('.', '', 1).lstrip('-').isdigit() else v
     {'heading': heading, 'home': home, 'home_fit': home_fit, 'home_b': home_b, 'search': search, 'a5': a5,
-     'audit': lambda: report(audit(), 'P0 audit'), 'a6': a6}[sys.argv[1]](*map(num, sys.argv[2:]))
+     'audit': lambda: report(audit(), 'P0 audit'), 'a6': a6, 'a6b': a6b}[sys.argv[1]](*map(num, sys.argv[2:]))
