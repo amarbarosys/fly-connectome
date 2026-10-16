@@ -440,10 +440,10 @@ def paths6(rng, k):
     return h[:k], u[:k], d[:k]
 
 
-def g6(seed=82, b=0.1, k=K6):
+def g6(seed=82, b=0.1, k=K6, pf=None):
     """A6 G6: decoder on k FIT paths, hits on k TEST paths; arms real, no odometer (u 0.6), M off (b 0), shuffled with M."""
-    rng = np.random.default_rng(seed)
-    fit, test = paths6(rng, k), paths6(rng, k)
+    rng, pf = np.random.default_rng(seed), pf or paths6
+    fit, test = pf(rng, k), pf(rng, k)
     cols = [(h, u, None) for h, u in zip(*fit[:2])] + [(h, u, None) for h, u in zip(*test[:2])]
     cols += [(h, np.full(3, 0.6), k + i) for i, h in enumerate(test[0])]
     _, x, _, types, phase, fb = m_trials(cols, None, seed, b)
@@ -465,7 +465,10 @@ def g6(seed=82, b=0.1, k=K6):
         d = dec6(xx, types, phase, fb, cand, sg, o)
         hits[arm] = int((e6(d, test[2]) < HIT).sum())
         print(f'G6 {arm}: hits {hits[arm]}/{k}, median err {np.median(e6(d, test[2])):.1f} deg')
-    print(f'G6 heading-only baseline: {int((err(test[0][:, 2] + 180, test[2]) < HIT).sum())}/{k}')
+    eq = np.degrees(np.angle(-np.exp(1j * np.radians(test[0])).sum(1))) % 360
+    print(f'G6 heading-only baseline: {int((err(test[0][:, 2] + 180, test[2]) < HIT).sum())}/{k}; speed-blind: {int((err(eq, test[2]) < HIT).sum())}/{k}', flush=True)
+    global LAST_HITS
+    LAST_HITS = hits
     bound = 41 * k // 128
     return [(f"G6 real: {hits['real']}/{k} >= {3 * k // 4}", hits['real'] >= 3 * k // 4)] + \
            [(f'G6 {a}: {hits[a]}/{k} <= {bound}', hits[a] <= bound) for a in ('no odometer', 'M off', 'shuffled CX')]
@@ -475,7 +478,7 @@ def report(ok, name):
     for msg, v in ok:
         print(('PASS ' if v else 'FAIL ') + msg, flush=True)
     if not all(v for _, v in ok):
-        sys.exit(f'FAIL ant CX A6 {name}')
+        sys.exit(f'FAIL ant CX {name}')
 
 
 def a6(probe=81, gate=82, tag='a6'):
@@ -588,7 +591,36 @@ def a6d(probe=87, gate=88):
     a6(probe, gate, 'a6d')
 
 
+def paths7(rng, k):
+    """A7: 3-leg outbounds whose true home differs by > 90 deg from the speed-blind home and from last leg + 180."""
+    h, u, d = np.zeros((0, 3)), np.zeros((0, 3)), np.zeros(0)
+    while len(d) < k:
+        hh, uu, dd = paths(rng, 200 * k)
+        eq = np.degrees(np.angle(-np.exp(1j * np.radians(hh)).sum(1))) % 360
+        ok = (err(eq, dd) > 90) & (err(hh[:, 2] + 180, dd) > 90)
+        h, u, d = np.vstack([h, hh[ok]]), np.vstack([u, uu[ok]]), np.r_[d, dd[ok]]
+    return h[:k], u[:k], d[:k]
+
+
+def a7(probe=89, gate=90):
+    """A7 (ANT.md): full CX + excitatory M; b fitted on `probe` by real TEST hits, gate on `gate`, A7 paths."""
+    from agent import seeds
+    global M_EXC, SUB
+    M_EXC, SUB = True, cx_types()
+    seeds.claim('ant_cx_a7_fit', [int(probe)])
+    res = {}
+    for b in M_B:
+        g6(probe, b, pf=paths7)
+        res[b] = LAST_HITS['real']
+        print(f'A7 FIT b {b}: real {res[b]}/{K6}', flush=True)
+    b = max(M_B, key=lambda x: (res[x], -x))
+    print(f'A7 frozen b {b}', flush=True)
+    seeds.claim('ant_cx_a7_gate', [int(gate)])
+    report(g6(gate, b, pf=paths7), 'A7 distance')
+    print('PASS ant CX A7: the full fly CX + M integrates distance-weighted legs into the way home')
+
+
 if __name__ == '__main__':
     num = lambda v: int(v) if v.lstrip('-').isdigit() else float(v) if v.replace('.', '', 1).lstrip('-').isdigit() else v
     {'heading': heading, 'home': home, 'home_fit': home_fit, 'home_b': home_b, 'search': search, 'a5': a5,
-     'audit': lambda: report(audit(), 'P0 audit'), 'a6': a6, 'a6b': a6b, 'a6c': a6c, 'a6d': a6d}[sys.argv[1]](*map(num, sys.argv[2:]))
+     'audit': lambda: report(audit(), 'P0 audit'), 'a6': a6, 'a6b': a6b, 'a6c': a6c, 'a6d': a6d, 'a7': a7}[sys.argv[1]](*map(num, sys.argv[2:]))
