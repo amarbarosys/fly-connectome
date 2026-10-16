@@ -602,18 +602,18 @@ def paths7(rng, k):
     return h[:k], u[:k], d[:k]
 
 
-def a7(probe=89, gate=90, tag='a7', pre=None):
+def a7(probe=89, gate=90, tag='a7', pre=None, grid=None):
     """A7 (ANT.md): full CX + excitatory M; b fitted on `probe` by real TEST hits, gate on `gate`, A7 paths."""
     from agent import seeds
     global M_EXC, SUB, M_PRE
     M_EXC, SUB, M_PRE = True, cx_types(), pre or M_PRE
     seeds.claim(f'ant_cx_{tag}_fit', [int(probe)])
-    res = {}
-    for b in M_B:
+    res, grid = {}, grid or M_B
+    for b in grid:
         g6(probe, b, pf=paths7)
         res[b] = LAST_HITS['real']
         print(f'A7 FIT b {b}: real {res[b]}/{K6}', flush=True)
-    b = max(M_B, key=lambda x: (res[x], -x))
+    b = max(grid, key=lambda x: (res[x], -x))
     print(f'A7 frozen b {b}', flush=True)
     seeds.claim(f'ant_cx_{tag}_gate', [int(gate)])
     report(g6(gate, b, pf=paths7), 'A7 distance')
@@ -625,7 +625,12 @@ def a7c(probe=91, gate=92):
     a7(probe, gate, 'a7c', r'^(EPG|PEG|PEN_a|PEN_b|Delta7)')
 
 
+def a7e(probe=93, gate=94):
+    """A7e (ANT.md): A7c with b grid {0.2, 0.3, 0.5, 0.8}."""
+    a7(probe, gate, 'a7e', r'^(EPG|PEG|PEN_a|PEN_b|Delta7)', (0.2, 0.3, 0.5, 0.8))
+
+
 if __name__ == '__main__':
     num = lambda v: int(v) if v.lstrip('-').isdigit() else float(v) if v.replace('.', '', 1).lstrip('-').isdigit() else v
     {'heading': heading, 'home': home, 'home_fit': home_fit, 'home_b': home_b, 'search': search, 'a5': a5,
-     'audit': lambda: report(audit(), 'P0 audit'), 'a6': a6, 'a6b': a6b, 'a6c': a6c, 'a6d': a6d, 'a7': a7, 'a7c': a7c}[sys.argv[1]](*map(num, sys.argv[2:]))
+     'audit': lambda: report(audit(), 'P0 audit'), 'a6': a6, 'a6b': a6b, 'a6c': a6c, 'a6d': a6d, 'a7': a7, 'a7c': a7c, 'a7e': a7e}[sys.argv[1]](*map(num, sys.argv[2:]))
