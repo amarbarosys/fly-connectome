@@ -690,7 +690,63 @@ def a7d(fit=95, gate=96, gens=30):
     print('PASS ant CX A7d: calibrated column gains on the full fly CX bring the distance-weighted home vector to the bar')
 
 
+def train7f(seed, eta, shuffle=None, batches=60, k=32):
+    """A7f: three-factor rule on M column gains; returns g (log2 gains)."""
+    import time
+    rng, g = np.random.default_rng(seed), np.zeros(n_column_groups())
+    rbar, abar = None, None
+    for t in range(batches):
+        t0 = time.perf_counter()
+        h, u, d = paths7(rng, k)
+        _, x, m, types, phase, fb = m_trials([(hh, uu, None) for hh, uu in zip(h, u)], shuffle, seed + t, A7D['b'], gain=2.0 ** g)
+        _, _, _, side, *_ = subgraph(shuffle, SUB)
+        cg = column_groups(types, phase, side)
+        lev = np.stack([np.clip(m[:, cg == c], 0, None).sum(1) for c in range(1, len(g) + 1)], 1)
+        a = lev / np.maximum(lev.sum(1, keepdims=True), 1e-9)
+        best, r = -2.0, None
+        for cand in HOME_READ:
+            for sg in (1, -1):
+                z = np.exp(1j * np.radians(home_decode(x, types, phase, fb, cand, sg) - d))
+                if np.isfinite(z).all() and np.abs(z.mean()) > best:
+                    best, r = float(np.abs(z.mean())), np.real(z * np.conj(z.mean()) / np.abs(z.mean()))
+        if r is None:
+            r = np.zeros(k)
+        rbar = r.mean() if rbar is None else 0.9 * rbar + 0.1 * r.mean()
+        abar = a.mean(0) if abar is None else 0.9 * abar + 0.1 * a.mean(0)
+        g = np.clip(g + eta * ((r - rbar)[:, None] * (a - abar)).mean(0) * len(g), -2, 2)
+        if t % 10 == 9 or t == batches - 1:
+            print(f'TRAIN eta {eta} {"shuffled" if shuffle is not None else "real"} batch {t + 1}: outcome {r.mean():.3f}, |g| {np.abs(g).mean():.3f} ({time.perf_counter() - t0:.0f} s)', flush=True)
+    return g
+
+
+def a7f(fit=97, gate=98, batches=60):
+    """A7f (ANT.md): eta chosen on `fit`, shuffled control trained identically, gate on `gate`."""
+    from agent import seeds
+    global M_EXC, SUB, M_PRE
+    M_EXC, SUB, M_PRE = True, cx_types(), A7D['pre']
+    seeds.claim('ant_cx_a7f_fit', [int(fit)])
+    res, gs_ = {}, {}
+    for eta in (0.1, 0.3, 1.0):
+        gs_[eta] = train7f(fit, eta, None, batches)
+        g6(fit, A7D['b'], pf=paths7, gain=2.0 ** gs_[eta])
+        res[eta] = LAST_HITS['real']
+        print(f'A7f FIT eta {eta}: real {res[eta]}/{K6}', flush=True)
+    eta = max(res, key=lambda e: (res[e], -e))
+    g, gs = gs_[eta], train7f(fit, eta, 5, batches)
+    np.savez(mcns.ROOT / '.work/agent/ant/a7f-gains.npz', real=g, shuffled=gs, eta=eta)
+    print(f'A7f frozen eta {eta}', flush=True)
+    seeds.claim('ant_cx_a7f_gate', [int(gate)])
+    print('--- rule-trained shuffled brain on its own wiring')
+    g6(gate, A7D['b'], pf=paths7, gain=2.0 ** gs, sh=5)
+    hs = LAST_HITS['real']
+    print('--- gate: rule-trained real gains')
+    ok = g6(gate, A7D['b'], pf=paths7, gain=2.0 ** g)
+    report(ok + [(f"A7f real >= 79 (A7d 89 - 10): {LAST_HITS['real']}", LAST_HITS['real'] >= 79),
+                 (f'A7f rule-trained shuffled brain: {hs}/{K6} <= 41', hs <= 41)], 'A7f local rule')
+    print('PASS ant CX A7f: a local three-factor rule calibrates the fly CX integrator to the bar')
+
+
 if __name__ == '__main__':
     num = lambda v: int(v) if v.lstrip('-').isdigit() else float(v) if v.replace('.', '', 1).lstrip('-').isdigit() else v
     {'heading': heading, 'home': home, 'home_fit': home_fit, 'home_b': home_b, 'search': search, 'a5': a5,
-     'audit': lambda: report(audit(), 'P0 audit'), 'a6': a6, 'a6b': a6b, 'a6c': a6c, 'a6d': a6d, 'a7': a7, 'a7c': a7c, 'a7e': a7e, 'a7d': a7d}[sys.argv[1]](*map(num, sys.argv[2:]))
+     'audit': lambda: report(audit(), 'P0 audit'), 'a6': a6, 'a6b': a6b, 'a6c': a6c, 'a6d': a6d, 'a7': a7, 'a7c': a7c, 'a7e': a7e, 'a7d': a7d, 'a7f': a7f}[sys.argv[1]](*map(num, sys.argv[2:]))
