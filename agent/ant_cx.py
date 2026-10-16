@@ -310,6 +310,14 @@ def shuffled_hits(seed, gain, k=32):
 
 
 MEM6, M_PRE = r'^(PFNd|PFNv)', r'^(EPG|PEG|PEN_a|PEN_b|Delta7|PFNa|PFNd|PFNv)'  # A6: memory cells, CX pres feeding M
+def cx_types():
+    """A7a: regex for every MCNS type of class CX (2,950 traced cells), exact names."""
+    a = pd.read_feather(mcns.DATA / 'body-annotations-male-cns-v1.0-minconf-0.5.feather', columns=['status', 'type', 'class'])
+    t = a.loc[a['status'].isin(['Traced', 'Anchor']) & (a['class'] == 'CX'), 'type'].dropna().unique()
+    return '^(' + '|'.join(re.escape(x) for x in sorted(t)) + ')$'
+
+
+SUB = TYPES  # m_trials' subgraph; A7a sets cx_types()
 M_EXC = False  # A6b sets True: M takes positive edges only
 M_T, M_B, SEG, K6 = 4.0, (0.02, 0.05, 0.1, 0.2), 2000, 128  # level decay s, b grid (P1), steps per probe segment, paths
 
@@ -342,7 +350,7 @@ def m_trials(cols, shuffle=None, seed=81, b=0.1, read=3000, exc=None, bias=0.0):
     final levels m (columns, n) and the subgraph."""
     from agent.shiu import ShiuBrain
     exc = M_EXC if exc is None else exc
-    keep, types, phase, side, p, q, w, fb = subgraph(shuffle)
+    keep, types, phase, side, p, q, w, fb = subgraph(shuffle, SUB)
     n, s = len(keep), pd.Series(types)
     epg = np.flatnonzero(s.str.startswith('EPG').to_numpy() & ~np.isnan(phase))
     br = ShiuBrain(p, q, w, n=n, flies=len(cols), seed=seed)
