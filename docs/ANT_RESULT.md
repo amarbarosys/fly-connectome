@@ -49,7 +49,8 @@ between real and shuffled under the identical search.
 
 - That ant wiring does this. It is fly wiring, plus a hand-added integrator.
 - That an ant learns this way. The calibration is an outer evolution-strategy search, not plasticity in the brain.
-  A local three-factor rule (A7f) was designed and not run.
+  A local three-factor rule (A7f: homing outcome x column activity, 1,920 walks) made the real brain worse, 53 / 128,
+  with its shuffled control clean at 31.
 - Exact vector addition. Legs still add at 0.5-0.7 of their true weight (`.work/agent/ant/a7-error-diag.log`), with some
   compass lag at leg onset (`a7d-lag-probe.log`).
 - A walk home. Outbounds and readout are scripted; the closed-loop row is still open.
@@ -63,4 +64,4 @@ The claim fails if any of the following happens:
 - a degree-preserving shuffle other than seed 5 matches real.
 
 The decisive open question is whether a local rule inside the brain can reach 89 / 128 while keeping the shuffled
-search at chance.
+search at chance. The first rule tried, A7f, keeps the control clean (31) but falls to 53.
