@@ -343,7 +343,7 @@ def audit():
     return ok
 
 
-def m_trials(cols, shuffle=None, seed=81, b=0.1, read=3000, exc=None, bias=0.0):
+def m_trials(cols, shuffle=None, seed=81, b=0.1, read=3000, exc=None, bias=0.0, gain=None):
     """A6 brain with M (ANT.md): cols = (headings, speed multipliers, key) per column, one SEG-step segment per entry;
     cue on EPG at each heading; M edges (M_PRE -> PFNd / PFNv) feed slow plane 0 scaled by the segment's speed, then
     scale 0 and cue off for `read` steps. Returns counts in the last 1000 cue steps, counts in the read window, the
@@ -356,13 +356,17 @@ def m_trials(cols, shuffle=None, seed=81, b=0.1, read=3000, exc=None, bias=0.0):
     br = ShiuBrain(p, q, w, n=n, flies=len(cols), seed=seed)
     pre = np.repeat(np.arange(n), np.diff(br.row))
     grp = (s.str.match(M_PRE).to_numpy()[pre] & s.str.match(MEM6).to_numpy()[br.col] & ((br.w > 0) | (not exc))).astype(np.uint8)  # A6b exc: positive edges only
-    br.edge_groups(grp, np.ones((len(cols), 2), np.float32))
-    br.modulate([-1, 0], (M_T,), (0.0,), (b,))
+    gain = np.ones((len(cols), 1), np.float32) if gain is None else np.broadcast_to(np.asarray(gain, np.float32), (len(cols), np.shape(gain)[-1]))
+    if gain.shape[1] > 1:  # A7d: M edges grouped by target column (column_groups), one gain each
+        grp = np.where(grp > 0, column_groups(types, phase, side)[br.col], 0).astype(np.uint8)
+    G = gain.shape[1]
+    br.edge_groups(grp, np.ones((len(cols), G + 1), np.float32))
+    br.modulate([-1] + [0] * G, (M_T,), (0.0,), (b,))
     segs = len(cols[0][0])
     for j in range(segs):
         win = (j * SEG, (j + 1) * SEG)
         for c, (h, u, key) in enumerate(cols):
-            br.scale[c, 1] = u[j]
+            br.scale[c, 1:] = u[j] * gain[c]
             rate = CUE_HZ * np.maximum(0, np.cos(np.radians(phase[epg] - h[j])))
             for r in np.unique(rate[rate > 0]):
                 br.stimulate(epg[rate == r], float(r), fly=c, key=key, window=win)
@@ -371,7 +375,7 @@ def m_trials(cols, shuffle=None, seed=81, b=0.1, read=3000, exc=None, bias=0.0):
             c0 = br.spikes.copy()
         br.run([win[1]])
     c1 = br.spikes.copy()
-    br.scale[:, 1] = 0.0
+    br.scale[:, 1:] = 0.0
     if bias > 0:  # A6c: constant, heading-free current (mV / ms) on the memory cells during the read window
         br.inject(np.flatnonzero(s.str.match(MEM6).to_numpy()), float(bias), window=(segs * SEG, segs * SEG + read))
     br.run([segs * SEG + read])
@@ -440,16 +444,16 @@ def paths6(rng, k):
     return h[:k], u[:k], d[:k]
 
 
-def g6(seed=82, b=0.1, k=K6, pf=None):
+def g6(seed=82, b=0.1, k=K6, pf=None, gain=None, sh=None):
     """A6 G6: decoder on k FIT paths, hits on k TEST paths; arms real, no odometer (u 0.6), M off (b 0), shuffled with M."""
     rng, pf = np.random.default_rng(seed), pf or paths6
     fit, test = pf(rng, k), pf(rng, k)
     cols = [(h, u, None) for h, u in zip(*fit[:2])] + [(h, u, None) for h, u in zip(*test[:2])]
     cols += [(h, np.full(3, 0.6), k + i) for i, h in enumerate(test[0])]
-    _, x, _, types, phase, fb = m_trials(cols, None, seed, b)
+    _, x, _, types, phase, fb = m_trials(cols, sh, seed, b, gain=gain)
     arms = {'real': x[k:2 * k], 'no odometer': x[2 * k:]}
-    arms['M off'] = m_trials([(h, u, None) for h, u in zip(*test[:2])], None, seed, 0.0)[1]
-    arms['shuffled CX'] = m_trials([(h, u, None) for h, u in zip(*test[:2])], 5, seed, b)[1]
+    arms['M off'] = m_trials([(h, u, None) for h, u in zip(*test[:2])], sh, seed, 0.0, gain=gain)[1]
+    arms['shuffled CX'] = m_trials([(h, u, None) for h, u in zip(*test[:2])], 5, seed, b, gain=gain)[1]
     best = None
     for cand in HOME_READ:
         for sg in (1, -1):
@@ -630,7 +634,63 @@ def a7e(probe=93, gate=94):
     a7(probe, gate, 'a7e', r'^(EPG|PEG|PEN_a|PEN_b|Delta7)', (0.2, 0.3, 0.5, 0.8))
 
 
+def column_groups(types, phase, side):
+    """A7d: group id per cell, 1.. for each memory (type, PB side, glomerulus), 0 otherwise."""
+    t = pd.Series(types).str.extract('^(PFNd|PFNv)')[0]
+    key = t + side + pd.Series(phase).astype(str)
+    ok = t.notna().to_numpy() & ~np.isnan(phase)
+    ids = {kk: i + 1 for i, kk in enumerate(sorted(set(key[ok])))}
+    return np.array([ids.get(kk, 0) if o else 0 for kk, o in zip(key, ok)], np.int64)
+
+
+def n_column_groups():
+    keep, types, phase, side, *_ = subgraph(None, SUB)
+    return int(column_groups(types, phase, side).max())
+
+
+A7D = dict(b=0.3, pre=r'^(EPG|PEG|PEN_a|PEN_b|Delta7)', sigma=0.3, pop=16, k=32, step=0.5)
+
+
+def search7d(seed, shuffle=None, gens=30):
+    """A7d: diagonal ES on log2 gains per memory column (in [-2, 2]); fresh paths7 per generation."""
+    import time
+    o = A7D
+    rng, g = np.random.default_rng(seed), np.zeros(n_column_groups())
+    for gen in range(gens):
+        t0 = time.perf_counter()
+        h, u, d = paths7(rng, o['k'])
+        eps = rng.standard_normal((o['pop'] // 2, len(g)))
+        eps = np.vstack([eps, -eps])
+        G = np.clip(g + o['sigma'] * eps, -2, 2)
+        cols = [(hh, uu, None) for _ in range(o['pop']) for hh, uu in zip(h, u)]
+        _, x, _, types, phase, fb = m_trials(cols, shuffle, seed + gen, o['b'], gain=np.repeat(2.0 ** G, o['k'], 0))
+        f = np.array([fitness(x[i * o['k']:(i + 1) * o['k']], types, phase, fb, d) for i in range(o['pop'])])
+        r = (np.argsort(np.argsort(f)) / (o['pop'] - 1)) - 0.5
+        g = np.clip(g + o['step'] / (o['pop'] * o['sigma']) * (r @ eps), -2, 2)
+        print(f'GEN {gen} {"shuffled" if shuffle is not None else "real"}: fitness mean {f.mean():.3f} max {f.max():.3f} ({time.perf_counter() - t0:.0f} s)', flush=True)
+    return g
+
+
+def a7d(fit=95, gate=96, gens=30):
+    """A7d (ANT.md): calibration search on M column gains, real and shuffled wiring; gate on `gate`."""
+    from agent import seeds
+    global M_EXC, SUB, M_PRE
+    M_EXC, SUB, M_PRE = True, cx_types(), A7D['pre']
+    seeds.claim('ant_cx_a7d_fit', [int(fit)])
+    g, gs = search7d(fit, None, gens), search7d(fit, 5, gens)
+    np.savez(mcns.ROOT / '.work/agent/ant/a7d-gains.npz', real=g, shuffled=gs)
+    print('GAINS real', np.round(g, 2).tolist(), '\nGAINS shuffled', np.round(gs, 2).tolist(), flush=True)
+    seeds.claim('ant_cx_a7d_gate', [int(gate)])
+    print('--- shuffled-search brain on its own wiring')
+    g6(gate, A7D['b'], pf=paths7, gain=2.0 ** gs, sh=5)
+    hs = LAST_HITS['real']
+    print('--- gate: real searched gains')
+    ok = g6(gate, A7D['b'], pf=paths7, gain=2.0 ** g)
+    report(ok + [(f'A7d shuffled-search brain: {hs}/{K6} <= 41', hs <= 41)], 'A7d calibration')
+    print('PASS ant CX A7d: calibrated column gains on the full fly CX bring the distance-weighted home vector to the bar')
+
+
 if __name__ == '__main__':
     num = lambda v: int(v) if v.lstrip('-').isdigit() else float(v) if v.replace('.', '', 1).lstrip('-').isdigit() else v
     {'heading': heading, 'home': home, 'home_fit': home_fit, 'home_b': home_b, 'search': search, 'a5': a5,
-     'audit': lambda: report(audit(), 'P0 audit'), 'a6': a6, 'a6b': a6b, 'a6c': a6c, 'a6d': a6d, 'a7': a7, 'a7c': a7c, 'a7e': a7e}[sys.argv[1]](*map(num, sys.argv[2:]))
+     'audit': lambda: report(audit(), 'P0 audit'), 'a6': a6, 'a6b': a6b, 'a6c': a6c, 'a6d': a6d, 'a7': a7, 'a7c': a7c, 'a7e': a7e, 'a7d': a7d}[sys.argv[1]](*map(num, sys.argv[2:]))
