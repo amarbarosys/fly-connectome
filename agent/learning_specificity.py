@@ -8,13 +8,14 @@ change reach descending neurons through the existing MBON path).
 
 Arms: real wiring; degree-preserving shuffles (pre permuted globally: in- and out-degree exact, self-loops repaired);
 block shuffles (pre permuted within each (pre class, post class) block: class-pair edge counts and both degrees exact);
+type-block shuffles typeblock:K (same within (pre cell_type, post cell_type), blank type -> class: the 8,846-type table exact);
 Dale shuffles dale:K (pre permuted within excitatory and within inhibitory slots: degrees exact, every source keeps its sign);
 random (pre drawn uniformly); causal cuts of the real graph: cut:kc_mbon (KC -> MBON edges removed), cut:mbon_out (every
 MBON output edge removed). Edge groups (ALLN inhibition, KC -> approach/avoid) are recomputed on each arm's edges.
 A and the held-out odours are also tested at 0.5x and 2x the odour rate (intensity generalisation).
 
     python -m agent.learning_specificity noise SEEDS               # no reward anywhere: learner-twin gap = column noise
-    python -m agent.learning_specificity run ARM FIRST [SEEDS]     # ARM real | shuffle:K | block:K | random:K | cut:kc_mbon | cut:mbon_out
+    python -m agent.learning_specificity run ARM FIRST [SEEDS]     # ARM real | shuffle:K | block:K | typeblock:K | random:K | cut:kc_mbon | cut:mbon_out
 Writes .work/agent/shiu/specificity/<mode>-<arm>-<first>.json, one record per seed, per-column arrays.
 """
 import hashlib
@@ -44,7 +45,7 @@ INTENSITIES = (0.5, 2.0)
 def arm_edges(pre, post, arm, names, w=None):
     if arm == 'real' or arm.startswith('cut:'): return pre
     kind, k = arm.split(':')
-    if kind not in ('shuffle', 'block', 'random', 'dale'): raise SystemExit(f'FAIL arm {arm!r}')
+    if kind not in ('shuffle', 'block', 'typeblock', 'random', 'dale'): raise SystemExit(f'FAIL arm {arm!r}')
     rng = np.random.default_rng(1000 + int(k))
     n = int(max(pre.max(), post.max())) + 1
     if kind == 'shuffle': new = rng.permutation(pre)
@@ -55,7 +56,7 @@ def arm_edges(pre, post, arm, names, w=None):
             idx = np.flatnonzero(block == s)
             new[idx] = pre[idx][rng.permutation(len(idx))]
     elif kind == 'random': new = rng.integers(0, n, len(pre)).astype(pre.dtype)
-    else:  # permute pre inside each (pre class, post class) block
+    else:  # permute pre inside each (pre label, post label) block; typeblock passes cell types as names
         _, cls = np.unique(names, return_inverse=True)
         block = cls[pre].astype(np.int64) * (cls.max() + 1) + cls[post]
         order = np.argsort(block, kind='stable')
@@ -64,7 +65,7 @@ def arm_edges(pre, post, arm, names, w=None):
         for idx in np.split(order, bounds): new[idx] = pre[idx][rng.permutation(len(idx))]
     # Self-loops: swap each, one at a time, with a random edge of the same block (any edge for shuffle/random) whose swap
     # makes no new loop. One-at-a-time keeps the pre multiset exact; vectorised swaps hit one partner twice and lost values.
-    pool = (lambda i: np.flatnonzero(block == block[i])) if kind in ('block', 'dale') else (lambda i: None)
+    pool = (lambda i: np.flatnonzero(block == block[i])) if kind in ('block', 'typeblock', 'dale') else (lambda i: None)
     for i in np.flatnonzero(new == post):
         cand = pool(i)
         for _ in range(100):
@@ -83,7 +84,8 @@ def setup(arm):
     names, n = c.klass, len(c.klass)
     approach, avoid = mbons(c)
     kc = np.flatnonzero(names == 'Kenyon_Cell')
-    pre = arm_edges(pre, post, arm, names, w)
+    types = np.where(np.isin(np.asarray(c.type).astype(str), ['', 'nan', 'None']), names, np.asarray(c.type).astype(str))
+    pre = arm_edges(pre, post, arm, types if arm.startswith('typeblock') else names, w)
     keep = {'cut:kc_mbon': ~((names[pre] == 'Kenyon_Cell') & (names[post] == 'MBON')),
             'cut:mbon_out': names[pre] != 'MBON'}.get(arm)
     if keep is not None: pre, post, w = pre[keep], post[keep], w[keep]
