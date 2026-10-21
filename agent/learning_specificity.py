@@ -15,7 +15,7 @@ MBON output edge removed). Edge groups (ALLN inhibition, KC -> approach/avoid) a
 A and the held-out odours are also tested at 0.5x and 2x the odour rate (intensity generalisation).
 
     python -m agent.learning_specificity noise SEEDS               # no reward anywhere: learner-twin gap = column noise
-    python -m agent.learning_specificity run ARM FIRST [SEEDS]     # ARM real | shuffle:K | block:K | typeblock:K | random:K | cut:kc_mbon | cut:mbon_out
+    python -m agent.learning_specificity run ARM FIRST [SEEDS]     # ARM real | shuffle:K | block:K | typeblock:K | labels:LEVEL.K | random:K | cut:kc_mbon | cut:mbon_out
 Writes .work/agent/shiu/specificity/<mode>-<arm>-<first>.json, one record per seed, per-column arrays.
 """
 import hashlib
@@ -45,6 +45,7 @@ INTENSITIES = (0.5, 2.0)
 def arm_edges(pre, post, arm, names, w=None):
     if arm == 'real' or arm.startswith('cut:'): return pre
     kind, k = arm.split(':')
+    if kind == 'labels': kind, k = 'typeblock', k.split('.')[-1]  # labels:LEVEL.K: same block shuffle over a label array
     if kind not in ('shuffle', 'block', 'typeblock', 'random', 'dale'): raise SystemExit(f'FAIL arm {arm!r}')
     rng = np.random.default_rng(1000 + int(k))
     n = int(max(pre.max(), post.max())) + 1
@@ -85,7 +86,9 @@ def setup(arm):
     approach, avoid = mbons(c)
     kc = np.flatnonzero(names == 'Kenyon_Cell')
     types = np.where(np.isin(np.asarray(c.type).astype(str), ['', 'nan', 'None']), names, np.asarray(c.type).astype(str))
-    pre = arm_edges(pre, post, arm, types if arm.startswith('typeblock') else names, w)
+    if arm.startswith('labels:'):  # labels:LEVEL.K, LEVEL a key of .work/agent/shiu/ladder-labels.npz (TYPEBLOCK_PREREG.md)
+        types = np.load(ROOT / '.work/agent/shiu/ladder-labels.npz')[arm.split(':')[1].split('.')[0]]
+    pre = arm_edges(pre, post, arm, types if arm.startswith(('typeblock', 'labels:')) else names, w)
     keep = {'cut:kc_mbon': ~((names[pre] == 'Kenyon_Cell') & (names[post] == 'MBON')),
             'cut:mbon_out': names[pre] != 'MBON'}.get(arm)
     if keep is not None: pre, post, w = pre[keep], post[keep], w[keep]
