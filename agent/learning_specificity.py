@@ -78,6 +78,24 @@ def arm_edges(pre, post, arm, names, w=None):
     return new
 
 
+def unpin(new, pre, post, labels, k):
+    """Rewire edges a block shuffle left in place: swap sources between two edges with the same post label. (L_pre, L_post)
+    counts and both degrees stay exact, because the two edges only exchange which post neuron of that label they hit."""
+    rng = np.random.default_rng(2000 + int(k))
+    _, lab = np.unique(labels, return_inverse=True)
+    pl = lab[post]
+    order = np.argsort(pl, kind='stable')
+    bounds = np.searchsorted(pl[order], np.arange(lab.max() + 2))
+    new = new.copy()
+    for i in np.flatnonzero(new == pre):
+        cand = order[bounds[pl[i]]:bounds[pl[i] + 1]]
+        for j in rng.choice(cand, min(200, len(cand))):
+            if new[j] not in (new[i], post[i], pre[i]) and new[i] not in (post[j], pre[j]):
+                new[i], new[j] = new[j], new[i]
+                break
+    return new
+
+
 def setup(arm):
     pre, post, w, _ = _reference_graph()
     pre, post, w = np.asarray(pre), np.asarray(post), np.asarray(w)
@@ -86,9 +104,12 @@ def setup(arm):
     approach, avoid = mbons(c)
     kc = np.flatnonzero(names == 'Kenyon_Cell')
     types = np.where(np.isin(np.asarray(c.type).astype(str), ['', 'nan', 'None']), names, np.asarray(c.type).astype(str))
+    rigid = arm.startswith('rigid:')  # rigid:LEVEL.K = labels:LEVEL.K then unpin() (prereg 4)
+    if rigid: arm = 'labels:' + arm.split(':')[1]
     if arm.startswith('labels:'):  # labels:LEVEL.K, LEVEL a key of .work/agent/shiu/ladder-labels.npz (TYPEBLOCK_PREREG.md)
         types = np.load(ROOT / '.work/agent/shiu/ladder-labels.npz')[arm.split(':')[1].split('.')[0]]
     pre = arm_edges(pre, post, arm, types if arm.startswith(('typeblock', 'labels:')) else names, w)
+    if rigid: pre = unpin(pre, _reference_graph()[0].__array__(), post, types, arm.split('.')[-1])
     keep = {'cut:kc_mbon': ~((names[pre] == 'Kenyon_Cell') & (names[post] == 'MBON')),
             'cut:mbon_out': names[pre] != 'MBON'}.get(arm)
     if keep is not None: pre, post, w = pre[keep], post[keep], w[keep]
