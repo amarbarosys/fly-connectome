@@ -109,6 +109,7 @@ def run(seed, cols, cfg, k, steps=fl.STEPS, keep=()):
                 p[ss] = r.get(kk, 0.0) * b.dt
         host += time.perf_counter() - h
         p.tofile(b.work / 'stim_p.bin')
+        if i == 0: dnsum = np.zeros((len(cols), len(i_dn)))
         cur = b.advance(fl.K).astype(np.float32).reshape(len(cols), nr)
         hist[(i + 1) % (WINDOW + 1)] = cur
         w = min(i + 1, WINDOW)
@@ -119,6 +120,7 @@ def run(seed, cols, cfg, k, steps=fl.STEPS, keep=()):
         for ci, c in enumerate(cols):
             taste, mutant, gp = cfg[c[0]][:3]
             F, g = float(x[ci, i_fw].mean()), float(x[ci, i_stop[mutant]].mean())
+            dnsum[ci] += x[ci, i_dn]
             T = float(np.clip(((x[ci, i_dn] - v['mu']) / v['sd']) @ v['w'] + v['y0'] - k.get('T0', 0.0), -1, 1))
             dr, s, z = command(F, g, T, k, k['g0_mut'] if mutant else k['g0'])
             rec[i, ci] = F, g, T, s, z
@@ -147,6 +149,7 @@ def run(seed, cols, cfg, k, steps=fl.STEPS, keep=()):
         tag = keep[0]
         sel = [ci for ci, c in enumerate(cols) if c[1] < keep[1]]
         np.savez_compressed(fl.OUT / f'{tag}-traj.npz', arms=np.array([f'{cols[ci][0]} #{cols[ci][1]}' for ci in sel]), traj=tr[:, sel].transpose(1, 0, 2))  # tools/auto_fly_video.py
+    np.savez_compressed(fl.OUT / f'hybrid-dn-{seed}.npz', arms=np.array([c[0] for c in cols]), dn=dnsum / steps)  # mean DN rate per column
     return out
 
 
