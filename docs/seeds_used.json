@@ -197,5 +197,34 @@
  ],
  "u6_hybrid_probe": [
   433
+ ],
+ "u6_bio_fit": [
+  601,
+  603
+ ],
+ "u6_bio_fit_all:add:0.5": [
+  604
+ ],
+ "u6_bio_fit_all:add:1": [
+  604
+ ],
+ "u6_bio_fit_inh:add:0": [
+  604
+ ],
+ "u6_bio_fit_exc:add:0": [
+  604,
+  605
+ ],
+ "u6_bio_fit_all:gain:0": [
+  604
+ ],
+ "u6_bio_fit_inh:gain:0": [
+  604
+ ],
+ "u6_bio_gate": [
+  602
+ ],
+ "u6_bio_fit_exc+mn:add:0": [
+  606
  ]
 }
