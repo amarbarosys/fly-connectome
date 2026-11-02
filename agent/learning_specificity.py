@@ -78,6 +78,25 @@ def arm_edges(pre, post, arm, names, w=None):
     return new
 
 
+def post_shuffle(pre, post, labels, k):
+    """Permute post inside each post label, pre and w untouched: label table (counts and summed weight), both degrees and
+    every neuron's sign stay exact; a neuron's count per source label does not (prereg 5). Self-loops swapped out."""
+    rng = np.random.default_rng(3000 + int(k))
+    _, lab = np.unique(labels, return_inverse=True)
+    pl = lab[post]
+    order = np.argsort(pl, kind='stable')
+    new = post.copy()
+    for idx in np.split(order, np.flatnonzero(np.diff(pl[order])) + 1): new[idx] = post[idx][rng.permutation(len(idx))]
+    for i in np.flatnonzero(new == pre):
+        cand = order[np.searchsorted(pl[order], pl[i]):np.searchsorted(pl[order], pl[i], 'right')]
+        for j in rng.choice(cand, min(200, len(cand))):
+            if new[j] != pre[i] and new[i] != pre[j]:
+                new[i], new[j] = new[j], new[i]
+                break
+    if (new == pre).any(): raise SystemExit('FAIL tableonly: self-loops left')
+    return new
+
+
 def unpin(new, pre, post, labels, k):
     """Rewire edges a block shuffle left in place: swap sources between two edges with the same post label. (L_pre, L_post)
     counts and both degrees stay exact, because the two edges only exchange which post neuron of that label they hit."""
@@ -104,6 +123,10 @@ def setup(arm):
     approach, avoid = mbons(c)
     kc = np.flatnonzero(names == 'Kenyon_Cell')
     types = np.where(np.isin(np.asarray(c.type).astype(str), ['', 'nan', 'None']), names, np.asarray(c.type).astype(str))
+    if arm.startswith('tableonly:'):
+        level, k = arm.split(':')[1].split('.')
+        post = post_shuffle(pre, post, np.load(ROOT / '.work/agent/shiu/ladder-labels.npz')[level], k)
+        arm = 'real'
     rigid = arm.startswith('rigid:')  # rigid:LEVEL.K = labels:LEVEL.K then unpin() (prereg 4)
     if rigid: arm = 'labels:' + arm.split(':')[1]
     if arm.startswith('labels:'):  # labels:LEVEL.K, LEVEL a key of .work/agent/shiu/ladder-labels.npz (TYPEBLOCK_PREREG.md)
