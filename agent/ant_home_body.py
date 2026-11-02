@@ -29,16 +29,19 @@ def model():
 
 def steer(m, d, target, t, secs=None, mm=None, nest=None):
     """Walk on compass target (deg) until secs or mm of path. Returns (t, closest distance to nest)."""
-    p0, path, best, end = d.qpos[:2].copy(), 0.0, np.inf, t + (secs or 30.0)
+    path, best, end = 0.0, np.inf, t + (secs or 30.0)
+    run = np.zeros(2)  # displacement while aligned: the straight-run odometer
     while t < end and (mm is None or path < mm):
         last = d.qpos[:2].copy()
         e = (target - yaw_of(d.qpos) + 180) % 360 - 180
         d.ctrl[:] = gait(np.array(t), np.array([1.0 if abs(e) < 15 else 0.6]), np.array([np.clip(e / 15.0, -1, 1)]))[0]
         for _ in range(STEP): mujoco.mj_step(m, d)
         t += STEP * m.opt.timestep
-        if abs(e) < 15: path += float(np.linalg.norm(d.qpos[:2] - last))
+        if abs(e) < 15:
+            run += d.qpos[:2] - last
+            path += float(np.linalg.norm(d.qpos[:2] - last))
         if nest is not None: best = min(best, float(np.linalg.norm(d.qpos[:2] - nest)))
-    return t, best
+    return t, best, run
 
 
 def outbound(job):
@@ -47,9 +50,8 @@ def outbound(job):
     for _ in range(2000): mujoco.mj_step(m, d)
     nest, t, pts = d.qpos[:2].copy(), 0.0, []
     for hh, uu in zip(h, u):
-        s = d.qpos[:2].copy()
-        t, _ = steer(m, d, hh, t, mm=uu * LEG_MM)
-        pts.append(d.qpos[:2] - s)
+        t, _, run = steer(m, d, hh, t, mm=uu * LEG_MM)
+        pts.append(run)
     pts = np.array(pts)
     return d.qpos.copy(), d.qvel.copy(), t, nest, np.degrees(np.arctan2(pts[:, 1], pts[:, 0])) % 360, np.linalg.norm(pts, axis=1) / LEG_MM
 
@@ -58,14 +60,14 @@ def homing(job):
     q, v, t, nest, target, length = job
     m = model(); d = mujoco.MjData(m); d.qpos[:], d.qvel[:] = q, v
     start = float(np.linalg.norm(q[:2] - nest))
-    _, best = steer(m, d, target, t, mm=2 * length, nest=nest)
+    _, best, _ = steer(m, d, target, t, mm=2 * length, nest=nest)
     return best / max(start, 1e-9), start
 
 
 def run_body(pool, h, u):
     r = pool.map(outbound, list(zip(h, u)))
     H, U = np.array([x[4] for x in r]), np.array([x[5] for x in r])
-    return r, H, np.clip(U / 2.41, 0.0, 1.0)  # 2.41: smoke chord / scripted length, brain trained on u <= 1
+    return r, H, np.clip(U, 0.0, 1.0)  # straight-run length: speed counted only while aligned
 
 
 def setup():
@@ -104,6 +106,10 @@ def gate(seed, k=32):
     with mp.Pool(14) as p:
         r, H, U = run_body(p, *test[:2])
         home = np.array([np.degrees(np.arctan2(*(x[3] - x[0][:2])[::-1])) % 360 for x in r])
+        rf, Hf, Uf = run_body(p, *fit[:2])
+        fit = (Hf, Uf, np.array([np.degrees(np.arctan2(*(x[3] - x[0][:2])[::-1])) % 360 for x in rf]))  # decoder fit on body walks
+        pi = np.degrees(np.angle(-(U * np.exp(1j * np.radians(H))).sum(1))) % 360
+        print(f'odometer-only ideal home vs true home: median {np.median(cx.err(pi, home)):.1f} deg', flush=True)
         cols = [(a, c, None) for a, c in zip(*fit[:2])] + [(a, c, None) for a, c in zip(H, U)]
         cols += [(a, np.full(3, .6), k + i) for i, a in enumerate(H)]
         _, x, _, types, phase, fb = cx.m_trials(cols, None, seed, b, gain=gain)
