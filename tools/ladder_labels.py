@@ -40,6 +40,12 @@ def main():
     cv = out['cell_class'].astype(object).copy()
     cv[approach], cv[avoid] = 'MBON_approach', 'MBON_avoid'
     out['class_valence'] = cv.astype(str)
+    is_kc, is_pn = out['cell_class'] == 'Kenyon_Cell', out['cell_class'] == 'ALPN'  # prereg 3 arms
+    is_orn = out['cell_class'] == 'olfactory'
+    for name, mask in (('kc_valence', is_kc), ('input_valence', is_pn | is_orn), ('path_valence', is_kc | is_pn | is_orn)):
+        lab = cv.copy()
+        lab[mask] = out['cell_type'].astype(object)[mask]
+        out[name] = lab.astype(str)
     np.savez(ROOT / '.work/agent/shiu/ladder-labels.npz', **out)
     print({k: len(np.unique(v)) for k, v in out.items()})
 
