@@ -28,7 +28,7 @@ from agent.body_engine.mcns_link import WINDOW, brain
 from agent.eye_render import Eyes
 
 KT, FOOD_R = 0.25, 8.0  # turn differential (full_fly act); sugar patch radius under the start, mm (U2 S2)
-K0 = {'F0': 9.449, 'g0': 11.545, 'g0_mut': 8.239, 'GS': 6.220, 'GP': 0.3, 'T0': -0.373}  # fit seed 430 (GP: sweep seed 431), FULL_FLY.md U6-hybrid mapping
+K0 = {'F0': 9.449, 'g0': 11.545, 'g0_mut': 8.239, 'GS': 6.220, 'GP': 0.3, 'T0': 0.0}  # fit seed 430 (GP: sweep seed 431), FULL_FLY.md U6-hybrid mapping
 ARMS = {'taste': (True, False), 'tasteless': (False, False), 'mut-taste': (True, True), 'mut-tasteless': (False, True)}  # taste on, mutant stop set
 GPS = (0.0, 0.1, 0.3, 1.0)
 
@@ -78,6 +78,7 @@ def run(seed, cols, cfg, k, steps=fl.STEPS, keep=()):
     fwd = np.setdiff1d(descending_name_sets()[0]['forward'], real)
     read = np.unique(np.r_[np.concatenate(list(leg_mn.values())), v['dn'], fwd, real, mut])
     ix = lambda x: np.searchsorted(read, x)
+    dng = np.load(fl.OUT / 'dn-gain.npy') if k.get('T0', 0.0) == 0.0 and (fl.OUT / 'dn-gain.npy').exists() else 1.0
     i_mn, i_dn, i_fw, i_stop = {leg: ix(leg_mn[leg]) for leg in L.LEGS6}, ix(v['dn']), ix(fwd), {False: ix(real), True: ix(mut)}
     off = {c: cfg[c[0]][3] if len(cfg[c[0]]) > 3 else () for c in cols}
     on = {c: [kk for kk in cells if kk[0].split('_')[0] in ALL and kk[0].split('_')[0] not in off[c] and (cfg[c[0]][0] or not kk[0].startswith('taste'))] for c in cols}
@@ -121,7 +122,7 @@ def run(seed, cols, cfg, k, steps=fl.STEPS, keep=()):
             taste, mutant, gp = cfg[c[0]][:3]
             F, g = float(x[ci, i_fw].mean()), float(x[ci, i_stop[mutant]].mean())
             dnsum[ci] += x[ci, i_dn]
-            T = float(np.clip(((x[ci, i_dn] - v['mu']) / v['sd']) @ v['w'] + v['y0'] - k.get('T0', 0.0), -1, 1))
+            T = float(np.clip(((x[ci, i_dn] * dng - v['mu']) / v['sd']) @ v['w'] + v['y0'] - k.get('T0', 0.0), -1, 1))
             dr, s, z = command(F, g, T, k, k['g0_mut'] if mutant else k['g0'])
             rec[i, ci] = F, g, T, s, z
             ctl = gait[c].ctrl(dr if i + 1 >= WINDOW else np.zeros(2))
