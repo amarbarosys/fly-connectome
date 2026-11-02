@@ -119,7 +119,7 @@ def run(seed, cols, cfg, k, steps=fl.STEPS, keep=()):
         for ci, c in enumerate(cols):
             taste, mutant, gp = cfg[c[0]][:3]
             F, g = float(x[ci, i_fw].mean()), float(x[ci, i_stop[mutant]].mean())
-            T = float(np.clip(((x[ci, i_dn] - v['mu']) / v['sd']) @ v['w'] + v['y0'], -1, 1))
+            T = float(np.clip(((x[ci, i_dn] - v['mu']) / v['sd']) @ v['w'] + v['y0'] - k.get('T0', 0.0), -1, 1))
             dr, s, z = command(F, g, T, k, k['g0_mut'] if mutant else k['g0'])
             rec[i, ci] = F, g, T, s, z
             ctl = gait[c].ctrl(dr if i + 1 >= WINDOW else np.zeros(2))
