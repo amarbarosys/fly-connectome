@@ -102,12 +102,14 @@ def main() raises:
     var kc = ctx.compile_function[ren.clear]()
     var kr = ctx.compile_function[ren.raster]()
     var ks = ctx.compile_function[ren.shade]()
+    var ku = ctx.compile_function[ren.upscale]()
     var ksc = ctx.compile_function[ren.suncam]()
     var kcs = ctx.compile_function[ren.clear_sm]()
     var vis = TileTensor(vis_b, ren.LVIS)
     var sm = TileTensor(sm_b, ren.LVIS)
     var tscam = TileTensor(scam_b, ren.LCAM)
     var img = TileTensor(img_b, ren.LVIS)
+    var low = TileTensor(vw.low_b, ren.LLOW)
     var tpi = TileTensor(pi_b, ren.LPI)
     var tpf = TileTensor(pf_b, ren.LPF)
     var trv = TileTensor(rv_b, ren.LRV)
@@ -320,7 +322,7 @@ def main() raises:
                         camh[11 + k] = orbit[k]
                     ctx.enqueue_copy(cam_b, camh.unsafe_ptr())
                 ctx.enqueue_function(kf, tcam, tpose, troot, grid_dim=1, block_dim=1)
-            ren.frame(ctx, kc, kr, ks, ksc, kcs, vis, sm, img, tpi, tpf, trv, trt, trp, tpose, tcam, tscam)
+            ren.frame(ctx, kc, kr, ks, ku, ksc, kcs, vis, sm, img, low, tpi, tpf, trv, trt, trp, tpose, tcam, tscam)
             comptime if HUD > 0 and not GUI:  # the GUI draws its own panels
                 ctx.enqueue_function(kh, img, tgs, grid_dim=(spec.PANEL_W * spec.PANEL_H + 63) // 64, block_dim=64)
                 comptime if WORLD > 0:
