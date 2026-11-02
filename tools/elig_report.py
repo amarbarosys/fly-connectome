@@ -1,4 +1,4 @@
-"""Score prereg in LEARNING_FIX_PLAN.md: elig receipts, gap = control valence - learner valence, per odour.
+"""Score prereg in LEARNING_FIX_PLAN.md: elig receipts, gap = learner valence - control valence, per odour.
     python tools/elig_report.py FIRST
 """
 import json
@@ -11,7 +11,7 @@ recs = json.load(open(f'.work/agent/shiu/specificity/elig-{first}.json'))['recor
 ok = True
 for win in ([500], [500, 2000]):
     r = [x for x in recs if x['windows'] == win]
-    gap = lambda o: np.array([np.mean(x['after_A'][o]['valence'][8:]) - np.mean(x['after_A'][o]['valence'][:8]) for x in r])
+    gap = lambda o: np.array([np.mean(x['after_A'][o]['valence'][:8]) - np.mean(x['after_A'][o]['valence'][8:]) for x in r])
     a = gap('o1')
     held = {o: float(np.median(np.abs(gap(o)))) for o in ('o2', 'o3', 'o4', 'o5')}
     g1, g2 = int((a > 0.3).sum()) >= 7, all(v < min(0.5 * np.median(a), 0.15) for v in held.values())
