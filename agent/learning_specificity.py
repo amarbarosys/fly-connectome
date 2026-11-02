@@ -246,6 +246,36 @@ def eligibility(g, seed, windows):
     return rec
 
 
+def dose(g, seed, d):
+    """LEARNING_FIX_PLAN step 2: 50 ms eligibility, learner dopamine d on A then on B. d = 0 is the noise arm."""
+    pre, post, w, n, grp, kc, approach, avoid, dn, odour = g
+    live = ShiuLive(pre, post, w, n=n, flies=FLIES, seed=seed)
+    for f in range(FLIES):
+        for ids in odour: live.stimulate(ids, HZ, fly=f)
+    live.edge_groups(grp, np.tile(np.float32([1, LN, GAIN, GAIN]), (FLIES, 1)))
+    live.plastic(3, kc)
+    groups = [approach, avoid]
+    readout = (np.arange(FLIES)[None] * n + np.concatenate(groups)[:, None]).reshape(-1)
+    live.start([500], readout)
+    entries, p0 = live._stim_arrays()
+    only = [np.where(np.isin(entries % n, ids), p0, 0).astype(np.float32) for ids in odour]
+    dop = np.where(np.arange(FLIES) < FLIES // 2, d, 0).astype(np.float32)
+
+    def test(i):
+        y = live.sniff(only[i])[0].reshape(-1, FLIES).astype(float)
+        ap, av = y[:len(approach)].sum(0), y[len(approach):].sum(0)
+        return {'valence': ((ap - av) / np.maximum(ap + av, 1)).tolist()}
+
+    live.sniff(only[A])
+    live.reward(dop)
+    rec = {'seed': seed, 'd': d, 'after_A': {f'o{i}': test(i) for i in range(len(odour))}}
+    live.sniff(only[B])
+    live.reward(dop)
+    rec['after_B'] = {f'o{i}': test(i) for i in (A, B)}
+    live.close()
+    return rec
+
+
 def save(name, payload, g):
     """Receipt with provenance, written twice: an immutable copy under runs/<utc time>/ (exclusive create, never
     overwritten) and the latest copy at <name>.json that the report reads. Provenance: git head, hash of the
@@ -269,6 +299,13 @@ def main(mode, *args):
         g = setup('real')
         recs = [eligibility(g, 9000 + s, win) for win in ((500,), (500, 2000)) for s in range(first, first + seeds)]
         save(f'elig-{first}', {'mode': 'elig', 'flies': FLIES, 'records': recs}, g)
+        return
+    if mode == 'dose':  # dose FIRST SEEDS
+        first, seeds = int(args[0]), int(args[1])
+        OUT.mkdir(parents=True, exist_ok=True)
+        g = setup('real')
+        recs = [dose(g, 9200 + s, d) for d in (0, 0.3, 0.6, 1) for s in range(first, first + seeds)]
+        save(f'dose-{first}', {'mode': 'dose', 'flies': FLIES, 'records': recs}, g)
         return
     if mode == 'acq':  # acq X FIRST SEEDS: every schedule, second odour index X
         x, first, seeds = int(args[0]), int(args[1]), int(args[2])
