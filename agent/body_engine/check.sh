@@ -55,7 +55,7 @@ print(f'MEASURED MuJoCo merged vs separate qfrc_constraint per animal: max rel e
   [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
   echo "PASS all world checks"; exit 0
 fi
-if [ "$stage" = spiderlink ]; then  # brain<->body link on the spider (docs/plans/SPIDER_BRAIN.md unit 1): kernel gait vs oracle, engine vs MuJoCo
+if [ "$stage" = spiderlink ]; then  # brain<->body link on the spider (private note SPIDER_BRAIN unit 1): kernel gait vs oracle, engine vs MuJoCo
   # under the brain's ctrl stream, closed-loop walk/turn/stand. Mutants: the ctrl write skipped; the gait kernel's yaw sign flipped
   L="$M -m agent.body_engine.spider_link check"
   $L || { echo "FAIL spiderlink"; fail=$((fail+1)); }
@@ -66,7 +66,7 @@ if [ "$stage" = spiderlink ]; then  # brain<->body link on the spider (docs/plan
   [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
   echo "PASS all spiderlink checks"; exit 0
 fi
-if [ "$stage" = spectate ]; then  # spectator hooks in live.mojo (docs/plans/RENDERER.md, -DFOLLOW=1 -DHUD=1): camera follows the walking spider, HUD bars show the
+if [ "$stage" = spectate ]; then  # spectator hooks in live.mojo (private note RENDERER, -DFOLLOW=1 -DHUD=1): camera follows the walking spider, HUD bars show the
   # state buffer, hooks off changes no byte, frame cost split + leak receipt through spectator_integration_check.py. Mutants: camera target offset,
   # HUD fill off by one pixel, the follow hook compiled in by default (the hooks-off frame must differ from the pre-hook live.mojo)
   S="$M -m agent.body_engine.spectate_check"
@@ -78,7 +78,7 @@ if [ "$stage" = spectate ]; then  # spectator hooks in live.mojo (docs/plans/REN
   [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
   echo "PASS all spectate checks"; exit 0
 fi
-if [ "$stage" = game ]; then  # game layer per step (-DGAME=1, docs/plans/GAME_LAYER.md) on fly and spider: engine energy/stamina rows == game_events.replay on
+if [ "$stage" = game ]; then  # game layer per step (-DGAME=1, private note GAME_LAYER) on fly and spider: engine energy/stamina rows == game_events.replay on
   # MuJoCo's per-step work, death at the oracle's step, servos and adhesion exactly 0 after it, HUD bars show the engine rows.
   # Mutants: the work term skipped; the dead gate removed
   G="$M -m agent.body_engine.game_check check"
@@ -88,7 +88,7 @@ if [ "$stage" = game ]; then  # game layer per step (-DGAME=1, docs/plans/GAME_L
   [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
   echo "PASS all game checks"; exit 0
 fi
-if [ "$stage" = flylink ]; then  # brain-driven fly in live, host transport (BRAIN=1; docs/plans/BRAIN_BODY_LOOP.md): resident Shiu -> 2 DN drives -> FlyGym gait mapping -> 50 ctrl.
+if [ "$stage" = flylink ]; then  # brain-driven fly in live, host transport (BRAIN=1; private note BRAIN_BODY_LOOP): resident Shiu -> 2 DN drives -> FlyGym gait mapping -> 50 ctrl.
   # Gates: walks > 1 body length with tilt < 20 deg, opposite turn drives give opposite yaw, silenced DN and held ctrl differ from the live brain. Needs the Shiu worker:
   # submit with --vram 4. Mutants: ctrl write skipped, DN counts zeroed before the readout, left and right drive merged
   export PYTHONPATH=$PWD
@@ -100,7 +100,7 @@ if [ "$stage" = flylink ]; then  # brain-driven fly in live, host transport (BRA
   [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
   echo "PASS all flylink checks"; exit 0
 fi
-if [ "$stage" = world_hud ]; then  # plume world in the live frame (-DWORLD=1, docs/plans/WORLD.md): odor sites sample the plume on the card, the HUD prints the
+if [ "$stage" = world_hud ]; then  # plume world in the live frame (-DWORLD=1, private note WORLD): odor sites sample the plume on the card, the HUD prints the
   # concentrations and draws the sources from the same descriptor, fly (fly/l_odor, fly/r_odor) and spider (leg I tarsus tips), decoy present and absent.
   # Mutants: food/decoy swapped in the sampler, the presence flag ignored, mini-map y flipped, text colour back to white (illegible on the pale scene)
   export PYTHONPATH=$PWD
@@ -163,7 +163,7 @@ if [ "$stage" = hudclip ]; then  # one 300-frame clip with every HUD overlay on 
   [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
   echo "PASS all hudclip checks"; exit 0
 fi
-if [ "$stage" = spidereye ]; then  # native vision (docs/plans/SPIDER_BRAIN.md unit 2): rendered prey vs an independent analytic pinhole,
+if [ "$stage" = spidereye ]; then  # native vision (private note SPIDER_BRAIN unit 2): rendered prey vs an independent analytic pinhole,
   # own-body occlusion vs MuJoCo ray casting, per-animal separation, environment-moved prey. Mutants: eye axis yaw flipped in the kernel,
   # prey path sign flipped, eye table yaw flipped (caught against the gate's own hand-written INTENDED geometry)
   L="$M -m agent.body_engine.spider_eyes check"
@@ -174,7 +174,7 @@ if [ "$stage" = spidereye ]; then  # native vision (docs/plans/SPIDER_BRAIN.md u
   [ $fail -eq 0 ] || { echo "FAIL $fail checks"; exit 1; }
   echo "PASS all spidereye checks"; exit 0
 fi
-if [ "$stage" = jump ]; then  # spider jump (docs/plans/SPIDER_BRAIN.md unit 3): engine vs MuJoCo on the same ctrl stream, published take-off ranges,
+if [ "$stage" = jump ]; then  # spider jump (private note SPIDER_BRAIN unit 3): engine vs MuJoCo on the same ctrl stream, published take-off ranges,
   # ballistic flight and distance. Mutants: burst scaled to 0, weak servos (JUMP_S 1), ctrl write skipped
   L="$M -m agent.body_engine.spider_jump check"
   $L || { echo "FAIL jump"; fail=$((fail+1)); }

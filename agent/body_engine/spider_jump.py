@@ -1,4 +1,4 @@
-"""Jumping for the model spider (docs/plans/SPIDER_BRAIN.md unit 3): a ballistic jump of the spider body in the engine, checked
+"""Jumping for the model spider (private note SPIDER_BRAIN unit 3): a ballistic jump of the spider body in the engine, checked
 against MuJoCo on the same rollout and against published jump numbers.
 
 Mechanism (a MODEL, not anatomy): the jump variant of models/spider.py (`build(jump=True)`) gives the first four servos of every leg

@@ -1,4 +1,4 @@
-"""U6-bio: a walking rhythm from the MCNS nerve cord, by giving its interneurons a bursting mechanism (docs/plans/FULL_FLY.md U6).
+"""U6-bio: a walking rhythm from the MCNS nerve cord, by giving its interneurons a bursting mechanism (private note FULL_FLY U6).
 
 Mechanism, no engine change: every vnc_intrinsic cell gets two self-edges on the slow modulation planes (ShiuLive.modulate,
 as leg_mn.adapt_brain does): each spike adds W_SYN x SP to a fast depolarizing level (plane 0, tau TAU_P, b +1: a
@@ -23,7 +23,7 @@ import pandas as pd
 
 from agent import mcns, seeds
 
-TAU_P, TAU_A, SP, SA = 0.01, 0.03, 160.0, 40.0  # s, s, plateau and adaptation scale per spike (x W_SYN mV); frozen on FIT 605 (FULL_FLY.md U6)
+TAU_P, TAU_A, SP, SA = 0.01, 0.03, 160.0, 40.0  # s, s, plateau and adaptation scale per spike (x W_SYN mV); frozen on FIT 605 (private note FULL_FLY U6)
 SPEC = 'exc:add:0'  # bio_brain: which cells (excitatory vnc_intrinsic), plateau mode, heterogeneity; frozen on FIT 605
 VNC = ('vnc_intrinsic', 'vnc_motor', 'vnc_efferent', 'ascending_neuron')  # G2: edges with both ends in these are shuffled
 SHUFFLE_SEED = 0

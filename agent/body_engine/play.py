@@ -1,4 +1,4 @@
-"""Play the fly by firing its neurons (docs/plans/PLAY.md): keys inject Poisson input into named neurons of the resident
+"""Play the fly by firing its neurons (private note PLAY): keys inject Poisson input into named neurons of the resident
 Shiu brain (agent/body_engine/keymap.toml), the brain's descending neurons drive the body through fly_link's readout and
 gait, and the brain's own drives can outvote the player.
 
@@ -41,7 +41,7 @@ PRESETS = fl.OUT.parents[2] / 'shiu/presets'
 OUT = fl.OUT.parent / 'play'
 RENDER = int(os.environ.get('PLAY_RENDER', 24))  # control steps per frame: 24 = 41.7 fps of sim time; world terrain 0.89x real time vs 0.85x at 16 (62.5 fps), 0.31x at 4
 CPU = os.environ.get('PLAY_CPU', '1') == '1'  # physics on the host (smooth.mojo -DCPU=1): one fly, 53 us per 0.1 ms step vs 4.4 ms on one GPU wave
-WORK_RATE = float(os.environ.get("PLAY_WORK_RATE", 2e-6))  # stamina + energy per unit of actuator work: W walking does about 7.3e3 per sim second (check 2), so about 70 s to exhaustion; see docs/plans/PLAY.md
+WORK_RATE = float(os.environ.get("PLAY_WORK_RATE", 2e-6))  # stamina + energy per unit of actuator work: W walking does about 7.3e3 per sim second (check 2), so about 70 s to exhaustion; see private note PLAY
 EYES = os.environ.get('PLAY_EYES', '0') == '1'  # the world's proximity reaches the brain's looming cells (class Eyes, keymap [loom]); off: walls gate FAILs
 EYE_EVERY = 20  # control steps per eye frame: 50 Hz
 CAL = 250  # control steps (0.25 s) of W held after fl.WINDOW: the drive reference is their mean DN rate per side; the first 50 ms
@@ -217,7 +217,7 @@ def loop(brain, eng, gaits, rates_at, steps, on_step=None):
     fire `w` in every column; the last 2 CAL of them calibrate the decoder per side: W alone -> HEADROOM (ref_w), then W + symmetric loom -> 1
     (ref_l, fly_link's recipe: the symmetric eye drive is the top of the scale). The map is piecewise linear through (0, 0), (ref_w, HEADROOM),
     (ref_l, 1), so a one-sided loom leaves the other side near HEADROOM instead of clipping both at 1 (2026-10-07: with W alone as the only
-    reference a forced one-sided loom was swap-invariant; with the loom reference alone W decoded to 0.1, docs/plans/PLAY.md); then rates_at(i, game)."""
+    reference a forced one-sided loom was swap-invariant; with the loom reference alone W decoded to 0.1, private note PLAY); then rates_at(i, game)."""
     j, lm = brain.names.index('w'), [brain.names.index('loom-' + s) for s in ('left', 'right')]
     zero = np.zeros((brain.cols, 2), np.int64)
     cum, split, held = deque([zero], fl.WINDOW + 1), deque([zero], fl.WINDOW + 1), gaits[0].held  # one window of history, fixed size

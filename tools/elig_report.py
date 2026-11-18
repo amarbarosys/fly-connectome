@@ -1,4 +1,4 @@
-"""Score prereg in LEARNING_FIX_PLAN.md: elig receipts, gap = learner valence - control valence, per odour.
+"""Score prereg in private note LEARNING_FIX_PLAN: elig receipts, gap = learner valence - control valence, per odour.
     python tools/elig_report.py FIRST
 """
 import json

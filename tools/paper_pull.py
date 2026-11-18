@@ -1,6 +1,6 @@
-"""Pull the most-cited relevant papers per topic from OpenAlex, fetched through the local crawl4ai server (CLAUDE.md §4c).
+"""Pull the most-cited relevant papers per topic from OpenAlex, fetched through the local crawl4ai server (private note CLAUDE §4c).
 
-    python tools/paper_pull.py OUT.md "label=query" ["label=query" ...]
+    python tools/paper_pull.py private note OUT "label=query" ["label=query" ...]
 
 Per topic: OpenAlex relevance search, 25 hits, the 10 most cited kept, written as a markdown table with DOI links.
 """

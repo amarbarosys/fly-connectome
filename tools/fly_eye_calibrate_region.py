@@ -1,5 +1,5 @@
 """Per-region left-eye gain for agent/fly_vision.py (FULL_FLY U1 option 1). A scalar left gain cannot balance the male CNS
-eyes: the left path is weaker by an amount that depends on field position (MCNS.md Unit 4; tools/fly_eye_calibrate.py,
+eyes: the left path is weaker by an amount that depends on field position (private note MCNS Unit 4; tools/fly_eye_calibrate.py,
 1.6 at its calibration disc overshoots at the test disc). Here the left eye is split into four regions (frontal/lateral x
 lower/upper, split at az 72.5 and el 5 deg) and each gets its own gain, fitted at the level the loop reads: the mirrored DN
 turn readout T (mcns_link steer, .work/agent/mcns/vision_readout.npz), forward DNs 80 Hz, 0.5 s.

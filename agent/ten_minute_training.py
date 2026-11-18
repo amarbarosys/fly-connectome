@@ -25,7 +25,7 @@ def run(preflight=False):
     spec=importlib.util.spec_from_file_location('archived_skillopt_patch',Path('.work/agent/skillopt-pilot/skillopt_skill.py'))
     skillopt=importlib.util.module_from_spec(spec);spec.loader.exec_module(skillopt)
     skill='# Shared fly training supervisor\n\ntraining_examples: 10\n\nAccept only strict improvement on selection worlds; preserve final-test worlds.\n'
-    (output/'best_skill.md').write_text(skill)
+    (output/'private note best_skill').write_text(skill)
     current,_=fit(np.asarray(features),np.asarray(rewards),output/'initial.npz')
     current.save(output/'latest.npz')
     brain=CPUBrain(flies=1) if preflight else Worker(binary=BINARY,flies=10)
@@ -61,7 +61,7 @@ def run(preflight=False):
                 if accepted:
                     current=model;skill=candidate_skill;accepted_updates+=1
                     temporary=output/'latest.pending.npz';current.save(temporary);temporary.replace(output/'latest.npz')
-                    (output/'best_skill.md').write_text(skill)
+                    (output/'private note best_skill').write_text(skill)
                 (output/f'skillopt-{batch:03d}.json').write_text(json.dumps({'patch':patch,'application':application,
                     'candidate_skill':candidate_skill,'accepted':accepted,'old_successes':old_score,
                     'candidate_successes':new_score,'selection_worlds':validation,

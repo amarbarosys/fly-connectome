@@ -4,7 +4,7 @@ Per control step (K physics steps, 1 ms): every EYE_EVERY steps the pose is rend
 lamina cells; every step the non-visual senses (legs, smell, taste, body touch, gravity) read the engine qpos; the
 resident MCNS Shiu brain advances K ticks; leg-MN ridge readout + mirrored DN turn readout (mcns_link steer) -> FlyGym
 gait -> engine. The only fixed stimulus is the forward DNs at 80 Hz (the urge to walk, as in every mcns_link mode).
-Scenarios (gates pre-registered in docs/plans/FULL_FLY.md):
+Scenarios (gates pre-registered in private note FULL_FLY):
   u1     wall ahead-left / ahead-right, seeing vs blind twin, mirrored-eye mutant (U1)
   smell  odor blob 12 mm ahead, 45 deg left or right; smelling vs anosmic twin, antennae-swapped mutant (U2 S1)
   taste  food patch under the start; tasting vs tasteless twin (U2 S2)

@@ -6,7 +6,7 @@ and a GPU perturbation kernel (AMD RX 7900 XTX). It is a research record: negati
 
 ## Results
 
-Matched comparison, [docs/plans/CONNECTOME_BENEFIT.md](docs/plans/CONNECTOME_BENEFIT.md), numbers from
+Matched comparison, private note CONNECTOME_BENEFIT (private note: CONNECTOME_BENEFIT), numbers from
 [docs/releases/v0.5.0.md](docs/releases/v0.5.0.md):
 
 - Across 32 independent seed clusters (64 mirrored odor-steering layouts), the real graph did not outperform

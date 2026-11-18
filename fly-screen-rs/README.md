@@ -75,7 +75,7 @@ runner did not forward its environment into `gpu-wait` job specs. That runner
 now passes `--env` explicitly. The earlier 50-condition release build matched
 the corrected Python reference and produced the five-pair benchmark. The current
 complete-ladder build emits 48 conditions and has exact five-field telemetry
-parity for those rows; see the root `../data/screening_claim_fixes_20260930.md`
+parity for those rows; see the root private note `screening_claim_fixes_20260930`
 and referenced `../.work/runs/` receipt for current-binary evidence. This demonstrates
 software parity for the tested workload; it does not validate biological
 predictions. The project as a whole is not converted: see the root README and

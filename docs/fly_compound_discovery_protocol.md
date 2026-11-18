@@ -118,4 +118,4 @@ A separate 100-step sweep ran neutral gain (1.0) and ACh gains 1.5, 2.0, 3.0, an
 ## References
 
 - Martelli et al. (2020), *Low doses of the neonicotinoid insecticide imidacloprid induce ROS triggering neurological and metabolic impairments in Drosophila*. [Primary article](https://pmc.ncbi.nlm.nih.gov/articles/PMC7568275/).
-- Denecke et al. (2017), *Multiple P450s and Variation in Neuronal Genes Underpins the Response to the Insecticide Imidacloprid in a Population of Drosophila melanogaster*. [Primary article](https://pmc.ncbi.nlm.nih.gov/articles/PMC5596007/); local raw-data provenance is documented in `data/references/denecke_2017_imidacloprid_dgrp/README.md`.
+- Denecke et al. (2017), *Multiple P450s and Variation in Neuronal Genes Underpins the Response to the Insecticide Imidacloprid in a Population of Drosophila melanogaster*. [Primary article](https://pmc.ncbi.nlm.nih.gov/articles/PMC5596007/); local raw-data provenance is documented in private note `README`.

@@ -1,4 +1,4 @@
-"""Live world edits for a running fly (docs/plans/CONTROL_PANEL.md phase 3).
+"""Live world edits for a running fly (private note CONTROL_PANEL phase 3).
 
 One food patch lives in three places that must move together: the odour/taste model
 (`Environment.food`, a FoodPatch), the arena's contact list (`arena.food_patches`, dicts the

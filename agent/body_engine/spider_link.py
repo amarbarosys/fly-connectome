@@ -1,4 +1,4 @@
-"""Brain<->body link for the spider (docs/plans/SPIDER_BRAIN.md unit 1): live.mojo -DBRAIN=1 (ctrl over stdin, host brain)
+"""Brain<->body link for the spider (private note SPIDER_BRAIN unit 1): live.mojo -DBRAIN=1 (ctrl over stdin, host brain)
 and -DBRAIN=2 (spider_brain.mojo gait kernel on the card), sensor packets on stdout.
 
   python -m agent.body_engine.spider_link check     gates 1-3 below (under gpu-wait)

@@ -32,7 +32,7 @@ def prepare():
     patch={'edits':[{'op':'replace','target':'training_examples: 2','content':'training_examples: 10'}]}
     candidate,report=module.apply_patch_with_report(initial,patch)
     assert report[0]['status']=='applied_replace'
-    (ROOT/'initial_skill.md').write_text(initial);(ROOT/'candidate_skill.md').write_text(candidate)
+    (ROOT/'private note initial_skill').write_text(initial);(ROOT/'private note candidate_skill').write_text(candidate)
     (ROOT/'patch.json').write_text(json.dumps({'proposal_source':'current assistant','patch':patch,'application':report},indent=2)+'\n')
     data=np.load('.work/agent/spectator-learning/learning/seed-11-c1/samples.npz')
     for name,text in [('baseline',initial),('candidate',candidate)]:
@@ -150,7 +150,7 @@ def run(preflight=False):
             if len(pair)==2:pairs.append({row['arm']:int(row['ingested']>=.05) for row in pair})
         accepted=len(pairs)>=2 and sum(x['candidate'] for x in pairs)>sum(x['baseline'] for x in pairs)
         if not preflight:
-            (ROOT/'best_skill.md').write_text((ROOT/('candidate_skill.md' if accepted else 'initial_skill.md')).read_text())
+            (ROOT/'private note best_skill').write_text((ROOT/('private note candidate_skill' if accepted else 'private note initial_skill')).read_text())
         assert digest(Path('data/weights.bin'))==graph_hash
         report={'status':'PASS','wall_runtime_seconds':elapsed,'exchanges':exchanges,'episodes':episode_summaries,
             'completed_matched_pairs':len(pairs),'baseline_successes':sum(x['baseline'] for x in pairs),

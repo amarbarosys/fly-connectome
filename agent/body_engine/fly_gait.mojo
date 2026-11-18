@@ -1,4 +1,4 @@
-"""Fly gait on the card (docs/plans/BRAIN_BODY_LOOP.md step 3, `live.mojo -DBRAIN=3`): flygym_demo's HybridTurningController for zero observations
+"""Fly gait on the card (private note BRAIN_BODY_LOOP step 3, `live.mojo -DBRAIN=3`): flygym_demo's HybridTurningController for zero observations
 (no retraction, no stumbling: flyloop's mapping, tools/fly_gait_oracle.py), one thread, float64, no host copy.
 
 Per control step (timestep dt = K x 0.1 ms) with descending drives (left, right):

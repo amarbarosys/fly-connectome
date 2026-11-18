@@ -1,4 +1,4 @@
-"""Every sense the world supplies, as Poisson rates on male CNS sensory neurons (docs/plans/FULL_FLY.md U2).
+"""Every sense the world supplies, as Poisson rates on male CNS sensory neurons (private note FULL_FLY U2).
 
 One registry: each sense is a list of (cell ids, Hz) built once per model and read from the engine's qpos on the CPU.
   vision   agent/eye_render.Eyes: rendered eye cams -> 6,291 R1-6 / L1-L3 cells (every EYE_EVERY steps, by the caller)

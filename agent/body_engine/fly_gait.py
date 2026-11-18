@@ -1,4 +1,4 @@
-"""Gate and export for fly_gait.mojo (the FlyGym gait on the card, live.mojo -DBRAIN=3; docs/plans/BRAIN_BODY_LOOP.md step 3).
+"""Gate and export for fly_gait.mojo (the FlyGym gait on the card, live.mojo -DBRAIN=3; private note BRAIN_BODY_LOOP step 3).
 
   python -m agent.body_engine.fly_gait build
   gpu-wait run --shared --vram 1 --priority 60 --timeout 900 --env PYTHONPATH=$PWD -- .venv/bin/python -m agent.body_engine.fly_gait check

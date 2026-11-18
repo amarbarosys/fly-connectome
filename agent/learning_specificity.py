@@ -129,7 +129,7 @@ def setup(arm):
         arm = 'real'
     rigid = arm.startswith('rigid:')  # rigid:LEVEL.K = labels:LEVEL.K then unpin() (prereg 4)
     if rigid: arm = 'labels:' + arm.split(':')[1]
-    if arm.startswith('labels:'):  # labels:LEVEL.K, LEVEL a key of .work/agent/shiu/ladder-labels.npz (TYPEBLOCK_PREREG.md)
+    if arm.startswith('labels:'):  # labels:LEVEL.K, LEVEL a key of .work/agent/shiu/ladder-labels.npz (private note TYPEBLOCK_PREREG)
         types = np.load(ROOT / '.work/agent/shiu/ladder-labels.npz')[arm.split(':')[1].split('.')[0]]
     pre = arm_edges(pre, post, arm, types if arm.startswith(('typeblock', 'labels:')) else names, w)
     if rigid: pre = unpin(pre, _reference_graph()[0].__array__(), post, types, arm.split('.')[-1])
@@ -185,7 +185,7 @@ SCHEDULES = {'AtoX': (A, 1), 'AtoNoX': (A, 0), 'Xonly': (None, 1)}  # (first rew
 
 
 def acquisition(g, seed, schedule, x):
-    """Second-odour acquisition (docs/plans/LEARNING_ACQUISITION.md): optional reward on A, then sniff x with the
+    """Second-odour acquisition (private note LEARNING_ACQUISITION): optional reward on A, then sniff x with the
     learners' dopamine 1 (AtoX, Xonly) or 0 (AtoNoX); probe x and A. Raw avoid counts carry the effect (no valence ceiling)."""
     pre, post, w, n, grp, kc, approach, avoid, dn, odour = g
     live = ShiuLive(pre, post, w, n=n, flies=FLIES, seed=seed)

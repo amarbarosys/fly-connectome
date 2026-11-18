@@ -1,4 +1,4 @@
-"""Brain-driven fly in the live engine, host transport (docs/plans/BRAIN_BODY_LOOP.md step 4, unit 5a): live.mojo -DBRAIN=1 on body-v2.
+"""Brain-driven fly in the live engine, host transport (private note BRAIN_BODY_LOOP step 4, unit 5a): live.mojo -DBRAIN=1 on body-v2.
 
   python -m agent.body_engine.fly_link build
   gpu-wait run --shared --vram 4 --priority 60 --timeout 3000 -- .venv/bin/python -m agent.body_engine.fly_link check

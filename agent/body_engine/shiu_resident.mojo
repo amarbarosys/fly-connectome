@@ -1,4 +1,4 @@
-"""The resident Shiu brain as an importable API (live.mojo -DBRAIN=3; docs/plans/BRAIN_BODY_LOOP.md step 4): the kernels of shiu_worker.mojo (imported, not
+"""The resident Shiu brain as an importable API (live.mojo -DBRAIN=3; private note BRAIN_BODY_LOOP step 4): the kernels of shiu_worker.mojo (imported, not
 copied: integrate, deliver, kick) launched on the CALLER's DeviceContext, so the brain, the sampler, the gait and the body share one context and nothing round-trips
 through the host. State stays on the card across `advance` calls with shiu_worker's resident "advance" semantics (no reset, one absolute tick, seed + 0).
 

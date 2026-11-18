@@ -1,4 +1,4 @@
-"""Flybody flight in the engine (docs/plans/FLIGHT.md steps 4-5): the flight model with its wing beat pattern generator,
+"""Flybody flight in the engine (private note FLIGHT steps 4-5): the flight model with its wing beat pattern generator,
 open loop (policy action 0), on live.mojo -DBRAIN=1 with K=4 (one frame = one 2e-4 s control step of four 5e-5 s steps).
 Per control step the host reads the wing angles from the engine's packet and sends Flybody's force control
 ctrl[wing] = target - qpos[wing] (FlightImitation.before_step, flybody/tasks/flight_imitation.py), every other ctrl 0;

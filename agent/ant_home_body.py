@@ -1,4 +1,4 @@
-"""ANT A8: the 89/128 CX in the ant body (docs/plans/ANT.md). CPU MuJoCo body, one homing decision per run.
+"""ANT A8: the 89/128 CX in the ant body (private note ANT). CPU MuJoCo body, one homing decision per run.
 Outbound: compass P-steering along paths7 legs; each leg's measured chord (heading, length) is the brain's input.
 Brain: m_trials with A7d gains decodes one home direction. Return: compass P-steering to that direction, T = outbound
 path time. Not continuous CX control: the CX decides once, a scripted compass controller holds the course.

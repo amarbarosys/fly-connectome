@@ -1,4 +1,4 @@
-"""Inspectable task policy; inputs/actions are defined in docs/loop.md."""
+"""Inspectable task policy; inputs/actions are defined in private note loop."""
 
 from __future__ import annotations
 

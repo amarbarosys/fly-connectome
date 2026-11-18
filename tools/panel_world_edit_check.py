@@ -1,4 +1,4 @@
-"""Live check for world_edit (docs/plans/CONTROL_PANEL.md phase 3), CPU only, through the panel bridge.
+"""Live check for world_edit (private note CONTROL_PANEL phase 3), CPU only, through the panel bridge.
 
 Two paused CPU fly runs, same seed. Both step 5 exchanges, run B gets a world_edit that moves its
 first food patch, both step 5 more. PASS when the edit is acknowledged at the boundary, logged in

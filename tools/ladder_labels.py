@@ -1,4 +1,4 @@
-"""Label arrays for the block-shuffle resolution ladder (docs/plans/TYPEBLOCK_PREREG.md), in the learning graph's
+"""Label arrays for the block-shuffle resolution ladder (private note TYPEBLOCK_PREREG), in the learning graph's
 node order (_reference_graph index, same as cells()). A blank label falls back to the next coarser one.
 class_valence = cell_class with MBONs split into approach / avoid (learning_specificity.mbons).
 

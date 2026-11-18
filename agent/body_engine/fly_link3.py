@@ -1,4 +1,4 @@
-"""Brain-driven fly in the live engine, ONE DeviceContext (unit 5b; docs/plans/BRAIN_BODY_LOOP.md step 4): live.mojo -DBRAIN=3.
+"""Brain-driven fly in the live engine, ONE DeviceContext (unit 5b; private note BRAIN_BODY_LOOP step 4): live.mojo -DBRAIN=3.
 
   python -m agent.body_engine.fly_link3 build
   gpu-wait run --shared --vram 4 --priority 60 --timeout 3000 --env PYTHONPATH=$PWD -- .venv/bin/python -m agent.body_engine.fly_link3 check

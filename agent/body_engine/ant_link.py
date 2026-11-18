@@ -1,4 +1,4 @@
-"""Model ant body in the engine (docs/plans/ANT.md unit A2): a tripod gait drives agent/ant_body.py over spider_link's
+"""Model ant body in the engine (private note ANT unit A2): a tripod gait drives agent/ant_body.py over spider_link's
 host transport (live.mojo -DBRAIN=1: ctrl over stdin, sensor packets on stdout).
 
 Gait: not an ant circuit, a stand-in so the brain units (A3-A5) have speed and turn drives that move the body. Per leg a

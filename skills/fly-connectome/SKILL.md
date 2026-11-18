@@ -41,7 +41,7 @@ What the repo can run, and what it refuses, is in `docs/CAPABILITIES.md`. Read i
 - **Seed clusters, not mirrored layouts.** Mirrored odor-steering layouts are not independent. Pool p-values per seed
   cluster (correction of 2026-10-02, `docs/releases/v0.1.0.md`).
 - **Degree-preserving shuffles are the connectome null.** The in-degree-only random family is a second control.
-  Report both (`docs/plans/CONNECTOME_BENEFIT.md`).
+  Report both (private note `CONNECTOME_BENEFIT`).
 - **Raw synapse weights flood the mushroom body.** Normalise per neuron before reading the Kenyon-cell code
   (`docs/releases/v0.5.0.md`).
 - **Parity is not biology.** The Rust/Mojo screener matches its Python reference on tested conditions; that is a

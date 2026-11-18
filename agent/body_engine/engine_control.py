@@ -1,4 +1,4 @@
-"""RuntimeControl for an engine runner (docs/plans/CONTROL_PANEL.md): the panel's socket reaches play's loop.
+"""RuntimeControl for an engine runner (private note CONTROL_PANEL): the panel's socket reaches play's loop.
 
 The runner calls serve(i, rates) once per control step from its rates_at (play.loop), on the host, between steps:
 requests are acknowledged at that boundary, as neural_single does. The session registers in RuntimeControl's

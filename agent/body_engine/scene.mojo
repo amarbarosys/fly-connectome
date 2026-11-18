@@ -1,4 +1,4 @@
-"""The play world's assets (docs/plans/WORLD.md, PLAY.md): seeded grass tufts and flowers (drawn only, no contact)
+"""The play world's assets (private note WORLD, private note PLAY): seeded grass tufts and flowers (drawn only, no contact)
 and the food and decoy domes at the plume sources, on Kinestride's terrain function, every part in world mm on
 body 0. Grouped by colour, five parts in all: the renderer holds 255 parts, the fly uses 69. Port of assets.py
 (kept as the reference of the checks below); the generator is this file's own PCG32, so a seed lays out different

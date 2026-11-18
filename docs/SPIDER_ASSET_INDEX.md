@@ -14,7 +14,7 @@ anatomy, cell types and web physics. Two datasets already carry passing checks
 | 3.0 MB | `hung-repo/1_webvibration/data/FFT_table_*.csv` | same | web spectra prey/control, vibration-world calibration |
 | 73 MB | `hung-repo/2_wavelet_hmm/data/*.npz` | same | leg-joint wavelet spectra, behaviour-state reference |
 | 64 KB | `hung-repo/4_glmhmm/data/F1s_*.npy` | same | GLM-HMM scores, feedback-loop reference |
-| 32 MB | `hung-videos/s006-s010.mp4` | Hung 2026 supplementary S1-S5 videos (PLoS) | S4 (`s009`) decoded with plot-scrape to `s4_labels.csv` and `s4_timeline.csv` (adds the pure-fly vibration z-score): 2 episodes, manual + GLM state per 0.1 s, colour->state inferred from Fig 5C legend (cyan static, straw crouch, orange high-freq), manual vs GLM 80-82%. S5 (`s010`) extracted: `s5_radii_traces.csv` (5 radii, ~7.5 s), `s5_spider_heading.csv`, notes `s5_extraction.md` |
+| 32 MB | `hung-videos/s006-s010.mp4` | Hung 2026 supplementary S1-S5 videos (PLoS) | S4 (`s009`) decoded with plot-scrape to `s4_labels.csv` and `s4_timeline.csv` (adds the pure-fly vibration z-score): 2 episodes, manual + GLM state per 0.1 s, colour->state inferred from Fig 5C legend (cyan static, straw crouch, orange high-freq), manual vs GLM 80-82%. S5 (`s010`) extracted: `s5_radii_traces.csv` (5 radii, ~7.5 s), `s5_spider_heading.csv`, notes private note `s5_extraction` |
 | 9.8 MB | `mortimer2019/Data/` (90 txt) | Mortimer 2019 J R Soc Interface, Dryad 10.5061/dryad.7rm572m | checks C, D: FEM web, 8 hub legs, 14 radii x mass, 4 distances x 3 strengths, Araneus + Zygiella |
 | 77 MB | `dahl2025/STUDY.mat` + 3 `.m` | Dahl 2025 eLife, OSF gpnct | individual recognition, P. regius; readme names it `SUBJ.mat` |
 | 565 MB | `rem2022/Retina3.0-DLC.zip` | Rossler 2022 PNAS, Zenodo 6616655 | DeepLabCut project: config, 24 model files, 841 labelled frames; tracks retinal tubes + body |
@@ -36,7 +36,7 @@ anatomy, cell types and web physics. Two datasets already carry passing checks
 | PMC7234261 | Aguilar-Arguello 2020 Curr Zool | detour route choice in *Marpissa marina* and *Trite planiceps* |
 | PMC5413887 | Cross & Jackson 2017 Interface Focus | *Portia africana* exact prey-number discrimination using an expectancy-violation detour task |
 | PMC3181266 | Girard 2011 PLoS One | peacock spider vibrational courtship |
-| book ch. | Winsor, Morehouse & Jakob 2023, Distributed Vision ch. 10 (doi 10.1007/978-3-031-23216-9_10) | spider vision review: eye roles, retina numbers, secondary->MB and principal->arcuate pathways; local PDF `~/Downloads/Distributed_Vision_Spiders.pdf`, text `winsor2023.txt`, notes `winsor2023-vision-spec.md` |
+| book ch. | Winsor, Morehouse & Jakob 2023, Distributed Vision ch. 10 (doi 10.1007/978-3-031-23216-9_10) | spider vision review: eye roles, retina numbers, secondary->MB and principal->arcuate pathways; local PDF `~/Downloads/Distributed_Vision_Spiders.pdf`, text `winsor2023.txt`, notes private note `winsor2023-vision-spec` |
 
 The first checked spider evidence packet is built by `tools/spider_corpus.py` into
 `.work/papers/spider/`. It imports these local texts without modifying the
@@ -49,7 +49,7 @@ PMC5413887) and supplies the checked Portia primary source. The checked count
 and unavailable count are recorded by the corpus checker. Steck 2024
 (PMC11756594) also remains unavailable. The evidence handoff is
 [`docs/SPIDER_EVIDENCE_CARD.md`](SPIDER_EVIDENCE_CARD.md). See
-[`docs/plans/SPIDER_EVIDENCE.md`](plans/SPIDER_EVIDENCE.md) for packet scope and
+private note `SPIDER_EVIDENCE` (private note: SPIDER_EVIDENCE) for packet scope and
 the reproducible gate.
 
 ### Portia source search via local crawl4ai
@@ -71,11 +71,11 @@ Steck 2024 (PMC11756594, no text), 2013 reversal learning, 2021 silk toughness.
 
 | Asset | What |
 |:------|:-----|
-| `INDEX.md` | running source log with pass thresholds pulled from Hung 2026 |
-| `video-kRQMOF5c2Z8.md` | claims from the jumping-spider video, paraphrased, to verify against papers |
+| private note `INDEX` | running source log with pass thresholds pulled from Hung 2026 |
+| private note `video-kRQMOF5c2Z8` | claims from the jumping-spider video, paraphrased, to verify against papers |
 | `video-assets-search.txt`, `../online-search.txt`, `../europepmc.txt` | raw search hits |
 | `hung-tree.tsv` | Hung repo file list (sizes), for the sparse clone |
-| `../orbweaver-spec.md`, `../spider-lit.md` | circuit spec v0, literature sweep |
+| private note `orbweaver-spec`, private note `spider-lit` | circuit spec v0, literature sweep |
 
 ## Re-fetch
 

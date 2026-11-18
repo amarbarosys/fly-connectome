@@ -1,4 +1,4 @@
-"""Brain settings (docs/plans/BRAIN_CONTROLS.md): every hand intervention as one declarative setting.
+"""Brain settings (private note BRAIN_CONTROLS): every hand intervention as one declarative setting.
 
 Two device primitives carry everything, so a setting adds no kernel, no launch and no per-cell state:
   scale rules  silence = (cells, any, 0), cut = (A, B, k), gain = (A, any, k): edge groups (1 B per edge) and the

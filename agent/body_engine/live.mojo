@@ -1,11 +1,11 @@
-"""Live view (docs/plans/BRAIN_BODY_LOOP.md step 2): the body engine and the renderer in one process and one
+"""Live view (private note BRAIN_BODY_LOOP step 2): the body engine and the renderer in one process and one
 DeviceContext. Per frame: one smooth launch (K steps, state kept on the card), then the renderer's clear, raster
 and shade passes read the poses straight from the engine's output buffer (rows xpos, xquat of bodies 1.., the
 layout render.mojo already reads), and one write(2) puts the RGBA frame on stdout. No pose is copied.
 
 build: mojo build $(cat DIR/sizes.txt) $(cat DIR/rsizes.txt) -DFLIES=1 -DSTAGE=7 -DK=k -DW=w -DH=h
        -DPROWS=7*(NBODY-1) live.mojo
-brain link (-DBRAIN=1 or 2, docs/plans/SPIDER_BRAIN.md unit 1; BRAIN=0 compiles none of it): each frame becomes one control
+brain link (-DBRAIN=1 or 2, private note SPIDER_BRAIN unit 1; BRAIN=0 compiles none of it): each frame becomes one control
        step. BRAIN=1: the ctrl for the step arrives on stdin (NU x F float32, [servo][animal]) and goes to the engine's
        ctrl buffer; BRAIN=2: spider_brain.mojo's gait kernel writes it on the card (drives from DIR/drive.bin, 2 x F float32:
        speed, turn). After the launch a sensor packet goes to stdout every PACKET-th step (arg 11, 0 = never, and at the last step):
@@ -13,7 +13,7 @@ brain link (-DBRAIN=1 or 2, docs/plans/SPIDER_BRAIN.md unit 1; BRAIN=0 compiles 
        [animal][eye][H x W] (eyes.mojo; DIR/eyes.bin the eye table, DIR/env.bin the prey's path). Frames (arg 10 = every n-th
        step, 0 = never) go to fd 4 instead of stdout. No target state anywhere in the packet.
 
-spectator (docs/plans/RENDERER.md; each flag compiles none of its block when 0): -DFOLLOW=1 follows the root bodies of DIR/roots.bin
+spectator (private note RENDERER; each flag compiles none of its block when 0): -DFOLLOW=1 follows the root bodies of DIR/roots.bin
        (body, radius per root; spectate.follow, on the card, same formula as follow_camera.fit_camera) instead of the fixed camera;
        -DHUD=1 draws the energy/health/stamina bars of animal 0 from DIR/game.bin (4 x F float32, [row][animal]), or from the engine's own rows
        under -DGAME=1 (smooth.mojo: work drain, stamina, death gates the servos; rules at the end of mf.bin); -DPROFILE=1 syncs

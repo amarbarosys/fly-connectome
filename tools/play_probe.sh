@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Forced one-sided loom probe paired over seeds (docs/plans/PLAY.md). usage: tools/play_probe.sh [N_SEEDS=3] [swap=0|1]
+# Forced one-sided loom probe paired over seeds (private note PLAY). usage: tools/play_probe.sh [N_SEEDS=3] [swap=0|1]
 # PASS: every seed's (see - blind) yaw delta has the right sign (left loom -> right turn: negative; right loom: positive) and the
 # median over seeds is beyond 10 deg on both sides. swap=1 must FAIL. One gpu-wait job per seed.
 set -euo pipefail

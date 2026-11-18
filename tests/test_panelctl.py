@@ -21,7 +21,7 @@ def test_state_shape_and_dead_sessions_dropped(tmp_path, monkeypatch):
 
 
 def test_hold_line_refuses_start(tmp_path, monkeypatch):
-    board = tmp_path / 'whiteboard.md'
+    board = tmp_path / 'private note whiteboard'
     board.write_text('# b\n- GPU HOLD: bench\n')
     monkeypatch.setattr(panelctl, 'BOARD', board)
     assert panelctl.hold() == 'GPU HOLD: bench'

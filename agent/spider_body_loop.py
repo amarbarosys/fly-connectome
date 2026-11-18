@@ -1,4 +1,4 @@
-"""Spider orientation (docs/plans/SPIDER_BRAIN.md U2b): the brain's eyes lead, the body follows.
+"""Spider orientation (private note SPIDER_BRAIN U2b): the brain's eyes lead, the body follows.
 
 The closed eye loop of agent/spider_eye_loop.py, now with the legs: every 10 ms the gait controller (spider_gait.gait,
 FREQ tetrapod, the stance-to-stride mapping the link was gated with) gets speed 0.6 and turn = trim + gaze / (TAU x yaw-per-turn), both measured by gait_rate with no brain,

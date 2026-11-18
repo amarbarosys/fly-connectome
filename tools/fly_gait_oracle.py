@@ -245,7 +245,7 @@ def diagnose_models(body_mjcf: Path, out: Path) -> None:
         pair_name = mujoco.mj_id2name(target, mujoco.mjtObj.mjOBJ_PAIR, i) or ""
         if any(tag in (n1 + " " + n2 + " " + pair_name).lower() for tag in ("wall", "stone", "arena", "ground_plane")):
             rows.append(f"- pair {i}: {pair_name}: {n1} x {n2}")
-    (out / "model_diff.md").write_text("\n".join(rows) + "\n")
+    (out / "private note model_diff").write_text("\n".join(rows) + "\n")
 
     # Transfer the exact warm state and controls by joint/actuator name, leaving body-v2's extra head servos at the
     # corresponding standing angle. Compare every common joint after each paired MuJoCo step.
@@ -418,7 +418,7 @@ def diagnose_models(body_mjcf: Path, out: Path) -> None:
     else:
         print(f"No mapped qpos divergence > 1e-6 over {nstep} steps; max_abs={max_d:.9g}")
     print(f"opposite-turn replay: {turns}")
-    print(f"model table: {out / 'model_diff.md'}; ctrl replay and receipt: {out}")
+    print(f"model table: {out / 'private note model_diff'}; ctrl replay and receipt: {out}")
 
 
 def main() -> None:

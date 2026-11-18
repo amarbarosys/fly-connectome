@@ -1,5 +1,5 @@
 """Model ant navigation centre: the male CNS central-complex subgraph read as a wiring hypothesis for the ant CX
-(docs/plans/ANT.md A3-A5). Shiu LIF on the GPU (agent/shiu.py ShiuGPU), one column per trial.
+(private note ANT A3-A5). Shiu LIF on the GPU (agent/shiu.py ShiuGPU), one column per trial.
 
 Compass: a stand-in for the sun / polarization sensor, cosine-tuned Poisson input on EPG cells by their protocerebral
 bridge (PB) glomerulus phase (instance 'EPG(PB08)_L4' -> L4 -> 3 x 45 deg). Heading is read from cells the cue does not
@@ -162,7 +162,7 @@ def home_decode(x, types, phase, fb, cand, s=1, o=0.0):
 
 
 def home(seed=73, k=32, slow=None, gate=True, arm=None, gain=None):
-    """A4 (docs/plans/ANT.md): home direction from the CX after scripted outbounds; seed claimed in docs/seeds_used.json."""
+    """A4 (private note ANT): home direction from the CX after scripted outbounds; seed claimed in docs/seeds_used.json."""
     rng = np.random.default_rng(seed)
     fit, test = paths(rng, k), paths(rng, k)
     cols = [(h, u, True, None) for h, u in zip(*fit[:2])] + [(h, u, True, None) for h, u in zip(*test[:2])]
@@ -189,7 +189,7 @@ def home(seed=73, k=32, slow=None, gate=True, arm=None, gain=None):
     print(f'heading-only baseline (last leg + 180): hits {base}/{k}')
     if not gate:
         return hits, base
-    if slow is not None:  # A4b gate (ANT.md)
+    if slow is not None:  # A4b gate (private note ANT)
         ok = [(f"real: {hits['real']}/{k} >= 26 and >= baseline {base} + 8", hits['real'] >= 26 and hits['real'] >= base + 8),
               (f"mutant shuffled CX: {hits['shuffled CX']}/{k} <= 12", hits['shuffled CX'] <= 12),
               (f"mutant no odometer: {hits['no odometer']}/{k} <= baseline {base} + 3", hits['no odometer'] <= base + 3)]
@@ -210,7 +210,7 @@ def home(seed=73, k=32, slow=None, gate=True, arm=None, gain=None):
 
 
 def home_fit(seed=74, arm=None):
-    """A4b fit: T x b grid on seed 74, best real TEST hits (ANT.md); prints the grid, returns (T, b)."""
+    """A4b fit: T x b grid on seed 74, best real TEST hits (private note ANT); prints the grid, returns (T, b)."""
     from agent import seeds
     seed = int(seed)
     seeds.claim('ant_cx_home_fit' + (f'_{arm}' if arm else ''), [seed])
@@ -248,7 +248,7 @@ def fitness(x, types, phase, fb, home_dir):
 
 
 def search(seed=79, shuffle=None, gens=30, pop=16, k=32, sigma=0.5, step=0.5):
-    """A5 search (ANT.md): diagonal ES on log2 gains; fresh paths per generation; returns the final mean g."""
+    """A5 search (private note ANT): diagonal ES on log2 gains; fresh paths per generation; returns the final mean g."""
     import time
     rng, g = np.random.default_rng(seed), np.zeros(2 * len(CLASSES))
     for gen in range(gens):
@@ -268,7 +268,7 @@ def search(seed=79, shuffle=None, gens=30, pop=16, k=32, sigma=0.5, step=0.5):
 
 
 def a5(seed=79, gate_seed=80, gens=30):
-    """A5: real and shuffled-wiring searches on `seed`, gate on `gate_seed` (ANT.md)."""
+    """A5: real and shuffled-wiring searches on `seed`, gate on `gate_seed` (private note ANT)."""
     from agent import seeds
     seeds.claim('ant_cx_a5_search', [int(seed)])
     seeds.claim('ant_cx_a5_gate', [int(gate_seed)])
@@ -344,7 +344,7 @@ def audit():
 
 
 def m_trials(cols, shuffle=None, seed=81, b=0.1, read=3000, exc=None, bias=0.0, gain=None):
-    """A6 brain with M (ANT.md): cols = (headings, speed multipliers, key) per column, one SEG-step segment per entry;
+    """A6 brain with M (private note ANT): cols = (headings, speed multipliers, key) per column, one SEG-step segment per entry;
     cue on EPG at each heading; M edges (M_PRE -> PFNd / PFNv) feed slow plane 0 scaled by the segment's speed, then
     scale 0 and cue off for `read` steps. Returns counts in the last 1000 cue steps, counts in the read window, the
     final levels m (columns, n) and the subgraph."""
@@ -486,7 +486,7 @@ def report(ok, name):
 
 
 def a6(probe=81, gate=82, tag='a6'):
-    """A6 (ANT.md): P0 audit, P1 persistence (freezes b), P2 conjunction, G6 home vector; stops at the first FAIL."""
+    """A6 (private note ANT): P0 audit, P1 persistence (freezes b), P2 conjunction, G6 home vector; stops at the first FAIL."""
     from agent import seeds
     report(audit(), 'P0 audit')
     seeds.claim(f'ant_cx_{tag}_probe', [int(probe)])
@@ -501,7 +501,7 @@ def a6(probe=81, gate=82, tag='a6'):
 
 
 def a6b(probe=83, gate=84):
-    """A6b (ANT.md): A6 with M on excitatory edges only."""
+    """A6b (private note ANT): A6 with M on excitatory edges only."""
     global M_EXC
     M_EXC = True
     a6(probe, gate, 'a6b')
@@ -567,7 +567,7 @@ def g6c(seed, b, R, pref, prefs, k=K6):
 
 
 def a6c(probe=85, gate=86):
-    """A6c (ANT.md): A6b + readout bias R (P3) + calibrated memory-cell phases; stops at the first FAIL."""
+    """A6c (private note ANT): A6b + readout bias R (P3) + calibrated memory-cell phases; stops at the first FAIL."""
     from agent import seeds
     global M_EXC
     M_EXC = True
@@ -589,7 +589,7 @@ def a6c(probe=85, gate=86):
 
 
 def a6d(probe=87, gate=88):
-    """A6d (ANT.md): A6b with M fed by the EPG compass cells only."""
+    """A6d (private note ANT): A6b with M fed by the EPG compass cells only."""
     global M_EXC, M_PRE
     M_EXC, M_PRE = True, r'^EPG'
     a6(probe, gate, 'a6d')
@@ -607,7 +607,7 @@ def paths7(rng, k):
 
 
 def a7(probe=89, gate=90, tag='a7', pre=None, grid=None):
-    """A7 (ANT.md): full CX + excitatory M; b fitted on `probe` by real TEST hits, gate on `gate`, A7 paths."""
+    """A7 (private note ANT): full CX + excitatory M; b fitted on `probe` by real TEST hits, gate on `gate`, A7 paths."""
     from agent import seeds
     global M_EXC, SUB, M_PRE
     M_EXC, SUB, M_PRE = True, cx_types(), pre or M_PRE
@@ -625,12 +625,12 @@ def a7(probe=89, gate=90, tag='a7', pre=None, grid=None):
 
 
 def a7c(probe=91, gate=92):
-    """A7c (ANT.md): A7 with M fed by non-PFN CX pres only."""
+    """A7c (private note ANT): A7 with M fed by non-PFN CX pres only."""
     a7(probe, gate, 'a7c', r'^(EPG|PEG|PEN_a|PEN_b|Delta7)')
 
 
 def a7e(probe=93, gate=94):
-    """A7e (ANT.md): A7c with b grid {0.2, 0.3, 0.5, 0.8}."""
+    """A7e (private note ANT): A7c with b grid {0.2, 0.3, 0.5, 0.8}."""
     a7(probe, gate, 'a7e', r'^(EPG|PEG|PEN_a|PEN_b|Delta7)', (0.2, 0.3, 0.5, 0.8))
 
 
@@ -672,7 +672,7 @@ def search7d(seed, shuffle=None, gens=30):
 
 
 def a7d(fit=95, gate=96, gens=30):
-    """A7d (ANT.md): calibration search on M column gains, real and shuffled wiring; gate on `gate`."""
+    """A7d (private note ANT): calibration search on M column gains, real and shuffled wiring; gate on `gate`."""
     from agent import seeds
     global M_EXC, SUB, M_PRE
     M_EXC, SUB, M_PRE = True, cx_types(), A7D['pre']
@@ -720,7 +720,7 @@ def train7f(seed, eta, shuffle=None, batches=60, k=32):
 
 
 def a7f(fit=97, gate=98, batches=60):
-    """A7f (ANT.md): eta chosen on `fit`, shuffled control trained identically, gate on `gate`."""
+    """A7f (private note ANT): eta chosen on `fit`, shuffled control trained identically, gate on `gate`."""
     from agent import seeds
     global M_EXC, SUB, M_PRE
     M_EXC, SUB, M_PRE = True, cx_types(), A7D['pre']

@@ -1,6 +1,6 @@
 """Brain v0 for the spider body (models/spider.py): an alternating-tetrapod gait generator with two drives.
 
-Not a spider circuit: a stand-in so the brain<->body link (docs/plans/SPIDER_BRAIN.md unit 1) has a controller whose
+Not a spider circuit: a stand-in so the brain<->body link (private note SPIDER_BRAIN unit 1) has a controller whose
 effect on the body is measurable. Per leg a phase advances at FREQ Hz; the coxa yaw sweeps +-YAW rad about the stance
 (forward in the second half of the cycle) and coxa_pitch lifts the foot during the forward sweep. Tetrapod groups
 l1 r2 l3 r4 and r1 l2 r3 l4 sit half a cycle apart. Drives: speed in [0, 1] scales the sweep (0: every servo at the

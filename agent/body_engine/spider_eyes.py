@@ -1,4 +1,4 @@
-"""Spider eyes and prey for unit 2 (docs/plans/SPIDER_BRAIN.md): the eye table eyes.mojo renders from, the environment table
+"""Spider eyes and prey for unit 2 (private note SPIDER_BRAIN): the eye table eyes.mojo renders from, the environment table
 that moves the prey, an independent pinhole reference, and the gate (`python -m agent.body_engine.spider_eyes check`, under gpu-wait).
 
 Eye geometry is a MODEL (jumping-spider layout from Winsor, Morehouse & Jakob 2023 via the existing spider_vision_test.py:

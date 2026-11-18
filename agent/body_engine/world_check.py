@@ -1,4 +1,4 @@
-"""Plume-world gates for the live view (-DWORLD=1; docs/plans/WORLD.md): the odor sites sample the plume, the HUD prints the sampled
+"""Plume-world gates for the live view (-DWORLD=1; private note WORLD): the odor sites sample the plume, the HUD prints the sampled
 concentration and draws the sources, all from one descriptor.
 
   python -m agent.body_engine.world_check build [spider|fly]

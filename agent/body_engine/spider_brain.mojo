@@ -1,4 +1,4 @@
-"""Brain v0 on the card (docs/plans/SPIDER_BRAIN.md unit 1, transport b): the alternating-tetrapod gait of
+"""Brain v0 on the card (private note SPIDER_BRAIN unit 1, transport b): the alternating-tetrapod gait of
 spider_gait.py (the oracle: same constants, same layout), one thread per (animal, servo), writing the engine's ctrl
 buffer [servo][animal] in place. The brain stage is then in the same process as the K-step launch: no host copy per
 control step. Drives per animal: speed, turn (rows 0 and 1 of the drive buffer, [row][animal]).

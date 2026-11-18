@@ -3,7 +3,7 @@ numbers, integer refractory, kernel order). Scaffold slice (the pre-review CPU s
 retina 1200 -> AM1 2000 -> AM2 2000 -> 12 eye-muscle motor neurons, fan-in 20 / 20 / 200, every slot empty at start;
 teaching signal per motor neuron (slip direction, motor layer ungated), fixed random feedback to AM1/AM2 (gated by
 their own spikes), prune/regrow on the device after every teach step (30 % slot budget). Fixes from astra's review
-(.work/team/astra-spider-pool.md): ungated motor layer, 5-substep refractory, per-step rewiring, paired controls.
+(private note astra-spider-pool): ungated motor layer, 5-substep refractory, per-step rewiring, paired controls.
 
 check  (1) parity: oracle vs GPU from the same nonzero weights, 3 steps x 32 columns: motor spike counts equal, layer
            activity >= 99.9 % equal (float32 sums in another order may flip a threshold), and one TEACH: weights within

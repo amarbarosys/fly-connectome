@@ -1,4 +1,4 @@
-"""The first real closed loop for the spider (docs/plans/SPIDER_BRAIN.md U2): rendered principal eye -> self-wiring brain ->
+"""The first real closed loop for the spider (private note SPIDER_BRAIN U2): rendered principal eye -> self-wiring brain ->
 eye-muscle motor neurons -> gaze -> the next rendered frame.
 
 Per 10 ms control step (live.mojo -DBRAIN=1 -DEYES=1 -DGAZE=1, K = 100 physics steps, the spider standing on its stance

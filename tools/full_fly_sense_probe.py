@@ -1,7 +1,7 @@
 """Brain-only probe for FULL_FLY U2 S3 (gravity and body touch), as tools/full_fly_eye_probe.py: forward DNs at 80 Hz plus
 one sense on one side, no body; per column the DN turn readout T (mcns_link steer). Gravity: roll 20 deg = the downhill
 side's Johnston's organ wind_gravity cells at RMAX x 20/30 Hz (agent/senses.py); touch: the left or right notum bristles at
-RMAX. Gate (pre-registered, FULL_FLY.md U2): T(left) vs T(right) paired over REPEATS columns, |t| >= 2.5; the side-swap
+RMAX. Gate (pre-registered, private note FULL_FLY U2): T(left) vs T(right) paired over REPEATS columns, |t| >= 2.5; the side-swap
 mutant (cells of the other side) reverses the sign of the left - right difference.
 Smell (U2 S1a): vinegar ORNs at 150 Hz on one antenna and 150 (1 - a) on the other; DNa02 / DNa01 left - right, no fitting.
   gpu-wait run --shared --vram 8 --preemptible --timeout 1200 --env PYTHONPATH=$PWD -- .venv/bin/python tools/full_fly_sense_probe.py [smell] [SEED]"""

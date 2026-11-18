@@ -1,4 +1,4 @@
-"""Gates G0-G7 of docs/plans/LEARNING_SPECIFICITY.md from the .work/agent/shiu/specificity receipts. Thresholds are the
+"""Gates G0-G7 of private note LEARNING_SPECIFICITY from the .work/agent/shiu/specificity receipts. Thresholds are the
 frozen ones (c273b7d + amendment 87bfbd4); nothing here is tuned to the data.
 
     .venv/bin/python tools/learning_specificity_report.py   -> prints every gate, writes report.json, exits 1 on a missing arm

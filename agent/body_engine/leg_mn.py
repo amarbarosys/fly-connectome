@@ -1,7 +1,7 @@
 """FULL_FLY U4a (attempt main): the left front leg driven by its own MCNS motor neurons, map from MN type names only.
 
 Brain: the MCNS Shiu brain (mcns_link.brain), forward DNs off; per column one MN group (a joint's agonist or antagonist
-types, docs/plans/FULL_FLY.md U4a table) at 150 Hz. Body: the standing fly in the engine (flat floor), the other legs and
+types, private note FULL_FLY U4a table) at 150 Hz. Body: the standing fly in the engine (flat floor), the other legs and
 the head at their standing targets, lf adhesion off; per control step (1 ms) the lf servo targets = standing angle +
 GAIN x (mean agonist rate - mean antagonist rate) over the last 20 ms. Mutant: the type -> joint assignment permuted.
 G1: every testable joint moves the predicted way under its agonist and the opposite way under its antagonist, each
@@ -23,7 +23,7 @@ from agent.body_engine.mcns_link import FWD_HZ, brain
 from agent.mcns_mapping import descending_name_sets
 
 JOINTS = ('coxa-yaw', 'coxa-pitch', 'coxa-roll', 'trochanterfemur-pitch', 'trochanterfemur-roll', 'tibia-pitch', 'tarsus1-pitch')
-MAP = {  # MN type -> (joint, sign); signs from the MJCF stance pose (FULL_FLY.md U4a)
+MAP = {  # MN type -> (joint, sign); signs from the MJCF stance pose (private note FULL_FLY U4a)
     'Pleural remotor/abductor MN': ('coxa-pitch', 1), 'Tergopleural/Pleural promotor MN': ('coxa-pitch', -1),
     'Sternal posterior rotator MN': ('coxa-roll', 1), 'Sternal anterior rotator MN': ('coxa-roll', -1),
     'Sternal adductor MN': ('coxa-yaw', -1),

@@ -1,4 +1,4 @@
-"""Exploratory (TYPEBLOCK_PREREG.md plan 3): why does class_valence.2 keep the learning gap and .0/.1/.3/.4 not?
+"""Exploratory (private note TYPEBLOCK_PREREG plan 3): why does class_valence.2 keep the learning gap and .0/.1/.3/.4 not?
 Reads stored receipts only. Per realisation, mean MBON spikes (learners, flies 0-7; controls 8-15) for odour A,
 before and after training.    python tools/ladder_diff.py [LEVEL]
 """

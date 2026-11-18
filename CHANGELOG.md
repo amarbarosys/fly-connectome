@@ -1,6 +1,6 @@
 # Changelog
 
-Full notes in `docs/releases/`. Newest first. Format: `~/iTools/dev/release-note/TEMPLATE.md`.
+Full notes in `docs/releases/`. Newest first. Format: private note `TEMPLATE`.
 
 - [v0.5.0](docs/releases/v0.5.0.md) (2026-10-07): The fly loop on one GPU context (BRAIN=3); walking straight in the gait kernel; play world and eyes.
 - [v0.4.0](docs/releases/v0.4.0.md) (2026-10-06): Play the fly through its neurons; learning specificity experiments; control panel bridge.

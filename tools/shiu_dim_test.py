@@ -1,6 +1,6 @@
 """Dim light on the current visual path: does the Shiu FlyWire brain's lamina respond to a weak photoreceptor drive?
 
-The old 'dim stripe broken' row (docs/plans/SENSORY_VALIDITY_GATES.md) is the legacy pooled-eye interface, which
+The old 'dim stripe broken' row (private note SENSORY_VALIDITY_GATES) is the legacy pooled-eye interface, which
 injects per-eye brightness into L1-L3 directly and never reaches a first spike at dim contrast (0.139 of threshold 1).
 Here the drive enters where light does: all R1-6 photoreceptors of the left eye at Poisson rates from dim to bright.
 Readout: lamina L1, L2, L3 spikes of the left side, 0-200 ms, K repeats. Mutant: R1-6 output edges scaled to 0.

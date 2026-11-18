@@ -54,7 +54,7 @@ The replay command refuses an existing directory and needs the existing CSR and 
 - Finish mapping/units coverage and named sensory/motor gaps before biological interpretation.
 - Then execute P1 sustained balance and live reset verification, with finite physics and recovery metrics.
 
-[Master plan](plans/FLY_WORLD_MASTER_PLAN.md) and [100 experiments](plans/FLY_WORLD_100_IDEAS.md) remain the program map.
+Master plan (private note: FLY_WORLD_MASTER_PLAN) and 100 experiments (private note: FLY_WORLD_100_IDEAS) remain the program map.
 
 
 ## CPU embodied replay and actual reset, 2026-09-30
@@ -65,26 +65,26 @@ The replay command refuses an existing directory and needs the existing CSR and 
 
 ## Bounded learned steering and retention: 2026-10-01
 
-[Protocol and receipts](plans/ODOR_MEMORY_PILOT.md): odor steering PASS; physical obstacle-avoidance improvement FAIL against the strong straight baseline; food retention with explicit rehearsal PASS. Independent audits validate raw trajectories and reward/intake accounting. GPU neural replay PASS on 24 recorded input cases, not full GPU physics or live UI. Models remain separate experimental artifacts; P2 is partial.
+Protocol and receipts (private note: ODOR_MEMORY_PILOT): odor steering PASS; physical obstacle-avoidance improvement FAIL against the strong straight baseline; food retention with explicit rehearsal PASS. Independent audits validate raw trajectories and reward/intake accounting. GPU neural replay PASS on 24 recorded input cases, not full GPU physics or live UI. Models remain separate experimental artifacts; P2 is partial.
 
 ## Ten-fly capacity, 2026-10-01
 
-[Measured report](plans/TEN_FLY_CAPACITY.md): bounded ten-arena feedback trial and independent 2,162-exchange audit PASS. Six CPU body workers plus GPU neural batching achieved 0.873 aggregate fly-seconds/wall-second. Vision, real-time ten-fly viewing and improved learning efficiency remain unverified.
+Measured report (private note: TEN_FLY_CAPACITY): bounded ten-arena feedback trial and independent 2,162-exchange audit PASS. Six CPU body workers plus GPU neural batching achieved 0.873 aggregate fly-seconds/wall-second. Vision, real-time ten-fly viewing and improved learning efficiency remain unverified.
 
 ## Spectator and matched learning budgets, 2026-10-01
 
-[Report](plans/SPECTATOR_PARALLEL_LEARNING.md): one visible read-only evaluator, atomic snapshot reload, and shutdown/disconnect regressions PASS. Three training seeds, ten unique shared held-out layouts: equal-experience policies both 29/30; ten-arena collection 4.60-4.67x faster. Equal collection-time completed-sample prefixes scored 14/30 serial and 29/30 ten, using frozen offline choices over actual physical turn rollouts. Independent 16,080-exchange training audit PASS. Weak shuffled labels in the third control, cached spectator sensory reference, and the one-decision/prescribed-feed scope limit interpretation.
+Report (private note: SPECTATOR_PARALLEL_LEARNING): one visible read-only evaluator, atomic snapshot reload, and shutdown/disconnect regressions PASS. Three training seeds, ten unique shared held-out layouts: equal-experience policies both 29/30; ten-arena collection 4.60-4.67x faster. Equal collection-time completed-sample prefixes scored 14/30 serial and 29/30 ten, using frozen offline choices over actual physical turn rollouts. Independent 16,080-exchange training audit PASS. Weak shuffled labels in the third control, cached spectator sensory reference, and the one-decision/prescribed-feed scope limit interpretation.
 
 ## SkillOpt patch bridge and extra asset activity, 2026-10-01
 
-[Report](plans/SKILLOPT_FLY_PILOT.md): assistant-proposed archived SkillOpt patch engine pilot, 150.12-second video/neural recording, five matched selection pairs (candidate 5/5, baseline 3/5). CPU-shadow neuron-ID audit and GPU feature/count parity PASS. Exact-ID sampled skeleton/synapse activity joins added; atlas/physiology identity crosswalks remain open. Autonomous optimizer loop and final generalization are unverified.
+Report (private note: SKILLOPT_FLY_PILOT): assistant-proposed archived SkillOpt patch engine pilot, 150.12-second video/neural recording, five matched selection pairs (candidate 5/5, baseline 3/5). CPU-shadow neuron-ID audit and GPU feature/count parity PASS. Exact-ID sampled skeleton/synapse activity joins added; atlas/physiology identity crosswalks remain open. Autonomous optimizer loop and final generalization are unverified.
 
 ## Calcium measurement pilot, 2026-10-01
 
-[Protocol and results](plans/CALCIUM_VALIDATION.md): the initial pilot failed its prediction gate. The source-informed follow-up preserved 288 source-clock-aligned records and accumulated 12,304 neural updates, with 47 annotated EPG neurons. Final median R² 0.002888 versus heading baseline -0.46105, time-shift p=0.70: prediction gate FAIL. No accepted observer or active neural dynamics update. Optical/biological clock calibration and ROI-to-neuron identity remain unverified.
+Protocol and results (private note: CALCIUM_VALIDATION): the initial pilot failed its prediction gate. The source-informed follow-up preserved 288 source-clock-aligned records and accumulated 12,304 neural updates, with 47 annotated EPG neurons. Final median R² 0.002888 versus heading baseline -0.46105, time-shift p=0.70: prediction gate FAIL. No accepted observer or active neural dynamics update. Optical/biological clock calibration and ROI-to-neuron identity remain unverified.
 
 ## Control and scientific validity audit, 2026-10-01
 
-[Control audit](plans/CONTROL_AUDIT.md): explicit natural/diagnostic profiles, local MCP with acknowledged pause/resume/reset/step/session stop, managed queued launch/cancellation, unique run directories and final-frame consumption guards. CPU and GPU-brain/CPU-body control integration PASS; GPU body physics and GUI interaction are not established by these tests. MCP registered in Codex; current native session catalog not reloaded.
+Control audit (private note: CONTROL_AUDIT): explicit natural/diagnostic profiles, local MCP with acknowledged pause/resume/reset/step/session stop, managed queued launch/cancellation, unique run directories and final-frame consumption guards. CPU and GPU-brain/CPU-body control integration PASS; GPU body physics and GUI interaction are not established by these tests. MCP registered in Codex; current native session catalog not reloaded.
 
-[Sensory/state gates](plans/SENSORY_VALIDITY_GATES.md): CPU mechanics PASS exposes scientific input/state validity failures. A saved warm state fires with zero sensory input; disconnected controls do not. Distinct static retinal cue bearings collapse to identical coarse visual ports. No parameters or real final calcium targets were changed/refitted. Training expansion waits for a defensible spatial/transduction/state calibration.
+Sensory/state gates (private note: SENSORY_VALIDITY_GATES): CPU mechanics PASS exposes scientific input/state validity failures. A saved warm state fires with zero sensory input; disconnected controls do not. Distinct static retinal cue bearings collapse to identical coarse visual ports. No parameters or real final calcium targets were changed/refitted. Training expansion waits for a defensible spatial/transduction/state calibration.

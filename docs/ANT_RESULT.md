@@ -7,7 +7,7 @@ wiring was allowed at most 41.
 
 The brain is the male CNS (MCNS) central complex (CX), read as a wiring hypothesis for the homologous ant CX. No ant
 connectome exists. The model is Shiu LIF, run on the CPU oracle (`agent/ant_cx.py`). Every pre-registration and every
-failed arm, A1 to A7d, is in `docs/plans/ANT.md`. The claim form throughout is "a model ant does X".
+failed arm, A1 to A7d, is in private note `ANT`. The claim form throughout is "a model ant does X".
 
 ## The test admits no shortcut
 

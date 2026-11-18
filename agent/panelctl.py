@@ -1,4 +1,4 @@
-"""One JSON bridge for the control panel (docs/plans/CONTROL_PANEL.md).
+"""One JSON bridge for the control panel (private note CONTROL_PANEL).
 
     python -m agent.panelctl state           -> everything the panel draws, one object
     python -m agent.panelctl act '<json>'    -> one action, its answer
@@ -7,7 +7,7 @@ Actions: {"do": "preflight"|"start", "profile": "natural"|"diagnostic"}, {"do": 
 {"do": "control", "session_id": ..., "action": <RuntimeControl action>, "steps": n},
 {"do": "port", "step": "source"|"brief"|"gate", "name": <queue row>}: the body-engine port lane (~/iTools/bin/mj-port); gate is
 detached (it runs under gpu-wait for up to an hour) and lands its receipt in .work/agent/body_engine/port/.
-Launches go through flyctl, so through gpu-wait (CLAUDE.md §17); this file never touches the GPU.
+Launches go through flyctl, so through gpu-wait (private note CLAUDE §17); this file never touches the GPU.
 """
 import json
 import os
@@ -22,7 +22,7 @@ sys.path.insert(0, str(ROOT))
 from agent.runtime_control import ACTIONS, REGISTRY, request_control
 
 GPU_DB = Path.home() / '.local/state/gpuwaitingroom/jobs.db'
-BOARD = Path.home() / 'Brain' / ROOT.name / 'whiteboard.md'
+BOARD = Path.home() / 'Brain' / ROOT.name / 'private note whiteboard'
 HOLD = re.compile(r'^\s*(?:[-*]\s*)?(GPU HOLD\b.*)$', re.M)
 LIVE_STATES = ('waiting', 'starting', 'running', 'reclaiming')
 JOB_COLUMNS = "id, state, json_extract(spec, '$.label') AS label, priority, started_at, submitted_at"
@@ -82,7 +82,7 @@ def port_queue():
         if not line.strip() or line.startswith('#'): continue
         name, fn, file, stage, status, note = (line.split('\t') + [''] * 6)[:6]
         r = {'name': name, 'function': fn, 'file': file, 'stage': stage, 'status': status, 'note': note, 'receipt': None,
-             'fields': (PORT / f'{fn}.fields.md').exists(), 'brief': (ROOT / f'.work/briefs/port-{fn}.md').exists(),
+             'fields': (PORT / f'{fn}private note .fields').exists(), 'brief': (ROOT / f'.work/briefs/port-{fn}.md').exists(),
              'running': (PORT / f'{stage}.running').exists()}
         try:
             j = json.loads((PORT / f'{stage}.receipt.json').read_text())

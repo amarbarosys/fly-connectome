@@ -1,4 +1,4 @@
-"""Brain of the fly on the card (live.mojo -DBRAIN=3; docs/plans/BRAIN_BODY_LOOP.md step 4): the resident Shiu brain (agent/body_engine/shiu_resident.mojo), the descending-neuron
+"""Brain of the fly on the card (live.mojo -DBRAIN=3; private note BRAIN_BODY_LOOP step 4): the resident Shiu brain (agent/body_engine/shiu_resident.mojo), the descending-neuron
 readout, the two drives and the FlyGym gait (fly_gait.mojo) in the SAME DeviceContext as the body and the renderer. Per control step, with no host copy between them:
   shiu_resident.advance(K ticks)  ->  dn_sum: spikes of the descending neurons per side (cumulative counts, atomics into 2 int32)
   ->  fly_drive: rate over the last WINDOW control steps / the side's reference rate, clipped to [0, 1]  ->  fly_gait: the ctrl buffer the engine reads.

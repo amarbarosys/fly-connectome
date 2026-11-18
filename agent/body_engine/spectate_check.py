@@ -1,4 +1,4 @@
-"""Spectator gates for live.mojo (-DFOLLOW=1 -DHUD=1 -DPROFILE=1; docs/plans/RENDERER.md): the camera follows the moving spider,
+"""Spectator gates for live.mojo (-DFOLLOW=1 -DHUD=1 -DPROFILE=1; private note RENDERER): the camera follows the moving spider,
 the HUD bars show the state buffer, hooks off changes no byte, and the frame cost and leak are measured in the integrated path.
 
   python -m agent.body_engine.spectate_check build        compile every variant on the CPU (run before the GPU job)

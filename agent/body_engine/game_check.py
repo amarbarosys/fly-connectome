@@ -1,4 +1,4 @@
-"""Game-state gates for the engine step (-DGAME=1, STAGE 7; docs/plans/GAME_LAYER.md): energy, health, stamina, dead per animal, per physics step.
+"""Game-state gates for the engine step (-DGAME=1, STAGE 7; private note GAME_LAYER): energy, health, stamina, dead per animal, per physics step.
 
   python -m agent.body_engine.game_check build [fly|spider]
   gpu-wait run --priority 60 --timeout 1800 -- .venv/bin/python -m agent.body_engine.game_check check [fly|spider]

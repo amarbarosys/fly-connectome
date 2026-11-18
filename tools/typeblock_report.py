@@ -1,4 +1,4 @@
-"""Score the preregistered typeblock arms (docs/plans/TYPEBLOCK_PREREG.md) with the G4 metric of
+"""Score the preregistered typeblock arms (private note TYPEBLOCK_PREREG) with the G4 metric of
 tools/learning_specificity_report.py: A valence gap after the A reward, per seed, real vs each arm.
 
     .venv/bin/python tools/typeblock_report.py [ARM_PREFIX]   -> table, verdict, writes specificity/<prefix>-report.json

@@ -1,4 +1,4 @@
-"""Model desert ant body (Cataglyphis-like) as MJCF for the body engine; ANT.md unit A1.
+"""Model desert ant body (Cataglyphis-like) as MJCF for the body engine; private note ANT unit A1.
 
 Built like kinestride.models.spider (same units mm/g/s, dt 0.1 ms, convex meshes, plane-mesh contact pairs with the
 fly's solref/solimp, position servos; its prism/ellipsoid/stand and servo constants are reused). Anatomy approximate

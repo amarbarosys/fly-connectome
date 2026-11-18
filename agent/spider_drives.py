@@ -1,4 +1,4 @@
-"""Spider drives and reflexes on top of the closed eye loop (docs/plans/SPIDER_BRAIN.md U2c): hunger, thirst, fear,
+"""Spider drives and reflexes on top of the closed eye loop (private note SPIDER_BRAIN U2c): hunger, thirst, fear,
 instinct (an orienting reflex from the secondary eyes) and water seeking. The brain (the trained scaffold pathway) still
 drives the principal eyes; the drives below are FIXED rules (not learned), each reading only the rendered eyes and the
 animal's own need levels, never a target's coordinates. One rule wins per step, in this order:

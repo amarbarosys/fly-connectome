@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Interactive play (docs/plans/PLAY.md). gpu-wait runs the job detached from this terminal, so this script keeps the
+# Interactive play (private note PLAY). gpu-wait runs the job detached from this terminal, so this script keeps the
 # terminal raw and relays it: keystrokes -> $IO/keys, the job's HUD $IO/hud -> screen. usage: play.sh [world [SEED]]
 set -euo pipefail
 cd "$(dirname "$0")/../.."

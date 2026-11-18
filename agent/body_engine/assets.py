@@ -1,4 +1,4 @@
-"""World assets for the renderer (docs/plans/WORLD.md): triangle meshes for the world body's box and ellipsoid geoms
+"""World assets for the renderer (private note WORLD): triangle meshes for the world body's box and ellipsoid geoms
 (walls, stones: they collide through the engine's convex pairs), seeded grass and flowers (drawn only, no contact), and
 the food and decoy markers at the plume sources. Every part is in world mm on body 0 (render.vertex draws it fixed).
 Grouped by colour, a few parts in all: the renderer holds 255 parts, the fly uses 69.
