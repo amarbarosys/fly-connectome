@@ -69,6 +69,7 @@ Toolchain: Mojo 1.1.0 and MAX 26.6.0 in `.venv`. Kinestride is installed editabl
 ```
 agent/              embodied agents, learning gates (verify_*.py), experiments
 agent/body_engine/  live viewer, game and world scenes, check.sh stages
+fly_arena/ fly_duel/ arena and duel packages, vendored under MIT (LICENSE in fly_arena/)
 fly-screen-rs/      Rust screening CLI
 docs/               CAPABILITIES.md, FLY_ASSET_INDEX.md, plans/, releases/, adr/, articles/
 skills/             agent skill for this repo (fly-connectome)
