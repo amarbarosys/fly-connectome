@@ -8,7 +8,7 @@ This is a network perturbation demonstrator, not an independently validated phar
 
 The commands below document the legacy single-compound Python workflow. For the current multi-condition batch build, follow the root [`README.md`](README.md): Rust `fly-screen` drives the resident Mojo GPU worker. A request for up to 50 conditions currently produces 48 rows so every compound retains all three dose levels.
 
-The recorded legacy run used the local Python environment and the Mojo engine in `/home/<user>/Projects/mojo/fly-spmv`:
+The recorded legacy run used the local Python environment and the Mojo engine in `$FLY_SPMV_DIR` (default `../../mojo/fly-spmv` from the repo root):
 
 ```bash
 ./.venv/bin/python screen_compound.py --steps 100 --panel

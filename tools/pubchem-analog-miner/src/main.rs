@@ -105,7 +105,7 @@ fn main() {
     println!(" Target Scaffold: {} ({})", filter.name.to_uppercase(), filter.target_role);
     println!("==========================================================================");
 
-    let smiles_path = PathBuf::from("/home/<user>/Projects/science/fly-connectome/data/chemical_universe/CID-SMILES");
+    let smiles_path = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/chemical_universe/CID-SMILES"));
     if !smiles_path.exists() {
         eprintln!("Error: PubChem SMILES file not found at {}", smiles_path.display());
         std::process::exit(1);

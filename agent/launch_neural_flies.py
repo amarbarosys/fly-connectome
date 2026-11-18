@@ -44,7 +44,7 @@ def run_inside():
 
 
 def submit(after=None):
-    cmd=['/home/<user>/.local/bin/gpu-wait','submit','--priority','10','--vram','1.0',
+    cmd=[os.path.expanduser('~/.local/bin/gpu-wait'),'submit','--priority','10','--vram','1.0',
          '--timeout','3600','--label','two-neural-flies-exclusive','--cwd',str(ROOT),'--json']
     if after:cmd+=['--after',after,'--after-success']
     cmd+=['--',str(ROOT/'.work/fly-research/arena-venv/bin/python'),str(Path(__file__).resolve()),'--inside']

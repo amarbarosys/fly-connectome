@@ -779,10 +779,10 @@ fn run() -> Result<(), String> {
     let host_started = Instant::now();
     let project = PathBuf::from(
         env::var("FLY_CONNECTOME_DIR")
-            .unwrap_or_else(|_| "/home/<user>/Projects/science/fly-connectome".into()),
+            .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/..").into()),
     );
     let engine_dir = PathBuf::from(
-        env::var("FLY_SPMV_DIR").unwrap_or_else(|_| "/home/<user>/Projects/mojo/fly-spmv".into()),
+        env::var("FLY_SPMV_DIR").unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../../mojo/fly-spmv").into()),
     );
     let engine = PathBuf::from(
         env::var("FLY_GPU_ENGINE")
@@ -899,7 +899,7 @@ fn run() -> Result<(), String> {
     }
 
     let gpu_job = env::var("FLY_GPUJOB")
-        .unwrap_or_else(|_| "/home/<user>/Projects/gpu-media/Blender/kit/gpujob".into());
+        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../../gpu-media/Blender/kit/gpujob").into());
     let worker_output_path = out_dir.join("worker.stdout");
     let compile_only = env::var("FLY_GPU_COMPILE_ONLY").as_deref() == Ok("1");
     let worker_command = r#"env FLY_DATA_DIR="$4" FLY_COMPILE_ONLY="$5" "$1" "$2" >"$3" 2>&1; rc=$?; cat "$3"; exit "$rc""#;

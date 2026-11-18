@@ -148,11 +148,11 @@ def gather(
 
 def main() raises:
     comptime assert 1 <= C <= 64, "neural worker supports one through 64 independent flies"
-    Python.add_to_path(getenv("FLY_PROJECT_ROOT", "/home/<user>/Projects/science/fly-connectome"))
+    Python.add_to_path(getenv("FLY_PROJECT_ROOT", "."))
     var bridge = Python.import_module("agent.neural_io")
     var arrays = Python.import_module("agent.neural_connectome")
-    var assets = getenv("FLY_NEURAL_ASSETS", "/home/<user>/Projects/science/fly-connectome/.work/neural-flies/assets")
-    var data_dir = getenv("FLY_DATA_DIR", "/home/<user>/Projects/science/fly-connectome/data") + "/"
+    var assets = getenv("FLY_NEURAL_ASSETS", "./.work/neural-flies/assets")
+    var data_dir = getenv("FLY_DATA_DIR", "./data") + "/"
     # CPU validation uses the same roster-bound loader as the independent oracle.
     _ = arrays.graph_arrays()
     var row_data = open(data_dir + "row_ptr.bin", "r").read_bytes()

@@ -22,7 +22,7 @@ import numpy as np
 from kinestride.model import FEET, export, load, meshes
 from agent.body_engine.spider_link import build
 
-R = Path('/home/<user>/Projects/science/fly-connectome')
+R = Path(__file__).resolve().parents[2]
 FL = R / '.work/flight-body'
 OUT = R / '.work/agent/body_engine/flight'
 K = 4  # flight dt 5e-5, Flybody control step 2e-4

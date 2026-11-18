@@ -35,7 +35,7 @@ W, H, K = 640, 360, 10
 CAM = ['0', '0', '10', '0', '0', '0', '45']  # overwritten every frame by follow
 ROOT_BODY, ROOT_RADIUS = 1, 8.0  # the spider's root body and a sphere around it covering the legs (mm)
 CHECKER = APP / 'spectator_integration_check.py'
-PATCH = Path('/home/<user>/Projects/science/fly-connectome/.work/team/status/spectator-hooks/integration-gates.patch')
+PATCH = Path(__file__).resolve().parents[2] / '.work/team/status/spectator-hooks/integration-gates.patch'
 
 
 def hud_geometry():

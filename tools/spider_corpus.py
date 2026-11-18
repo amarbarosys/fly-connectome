@@ -17,8 +17,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_DOCS = Path('/home/<user>/Projects/science/fly-connectome/.work/spider-docs')
-DEFAULT_OUT = Path('/home/<user>/Projects/science/fly-connectome/.work/papers/spider')
+DEFAULT_DOCS = ROOT / '.work/spider-docs'
+DEFAULT_OUT = ROOT / '.work/papers/spider'
 
 # Curated starting packet. IDs are stable corpus identifiers; DOI/PMCID provide
 # deduplication keys. Unavailable records remain visible and unchecked.

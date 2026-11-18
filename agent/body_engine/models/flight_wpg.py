@@ -5,11 +5,12 @@ Flybody's FlightImitation.before_step turns them into force control: ctrl[wing] 
 Run with the flight venv: .work/neural-flies/flight-venv/bin/python agent/body_engine/models/flight_wpg.py OUT_DIR [N]
 (writes OUT_DIR/wpg.npz: target, qpos0, qvel0, wing_qadr, wing_act, names)"""
 import sys
+from pathlib import Path
 
 import numpy as np
 from flybody.fly_envs import flight_imitation
 
-ROOT = '/home/<user>/Projects/science/fly-connectome'
+ROOT = str(Path(__file__).resolve().parents[3])
 out, n = sys.argv[1], int(sys.argv[2]) if len(sys.argv) > 2 else 2500
 env = flight_imitation(wpg_pattern_path=f'{ROOT}/.work/neural-flies/flight-data/wing_pattern_fmech.npy',
                        terminal_com_dist=float('inf'), random_state=np.random.RandomState(1))

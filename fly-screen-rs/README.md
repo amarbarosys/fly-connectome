@@ -7,10 +7,10 @@ GPU simulation. Python remains an independent scientific oracle.
 ## Build and preflight
 
 ```sh
-cd /home/<user>/Projects/mojo/fly-spmv
-mojo build src/fly_batch_gpu.mojo -o .work/fly_batch_gpu
+# from the fly-connectome root; FLY_SPMV_DIR overrides the sibling checkout
+(cd "${FLY_SPMV_DIR:-../../mojo/fly-spmv}" && mojo build src/fly_batch_gpu.mojo -o .work/fly_batch_gpu)
 
-cd /home/<user>/Projects/science/fly-connectome/fly-screen-rs
+cd fly-screen-rs
 cargo test --bin fly-screen
 cargo build --release --bin fly-screen
 FLY_DRY_ONLY=1 FLY_CONDITIONS=50 FLY_STEPS=100 target/release/fly-screen

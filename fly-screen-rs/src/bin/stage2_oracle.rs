@@ -382,7 +382,7 @@ fn parse_mojo(stdout: &str) -> Result<MojoOutput, String> {
 
 fn toy_binary() -> PathBuf {
     PathBuf::from(std::env::var("TOY_BATCH_GPU")
-        .unwrap_or_else(|_| "/home/<user>/Projects/mojo/fly-spmv/.work/toy_batch_gpu".to_string()))
+        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../../mojo/fly-spmv/.work/toy_batch_gpu").to_string()))
 }
 
 fn work_dir() -> PathBuf {
@@ -725,7 +725,7 @@ fn main() {
     let binary = toy_binary();
     if !binary.exists() {
         println!(
-            "FAIL stage2: {} is missing. Build it with:\n  mojo build /home/<user>/Projects/mojo/fly-spmv/src/toy_batch_gpu.mojo -o {}",
+            "FAIL stage2: {} is missing. Build it with:\n  mojo build $FLY_SPMV_DIR/src/toy_batch_gpu.mojo -o {}",
             binary.display(),
             binary.display()
         );

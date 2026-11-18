@@ -9,7 +9,7 @@ ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
 from agent.launch_neural_flies import desktop_environment
 WORK=ROOT/'.work/neural-flies';STATE=WORK/'flyctl.json'
-GPU='/home/<user>/.local/bin/gpu-wait';PY=ROOT/'.work/fly-research/arena-venv/bin/python'
+GPU=str(Path.home()/'.local/bin/gpu-wait');PY=ROOT/'.work/fly-research/arena-venv/bin/python'
 
 def call(args):
     r=subprocess.run(args,text=True,capture_output=True)
