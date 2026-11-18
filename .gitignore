@@ -13,8 +13,10 @@ MUJOCO_LOG.TXT
 codex-session-*.md
 FILE_INDEX.tsv
 INDEX.md
-.claude/*
-!.claude/skills/
+.claude/
+.mcp.json
+docs/plans/
+agent/*.md
 .cache/
 *.mutant-lock
 *.mutant-orig.*
