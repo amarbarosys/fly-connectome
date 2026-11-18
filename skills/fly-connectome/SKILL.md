@@ -37,7 +37,7 @@ What the repo can run, and what it refuses, is in `docs/CAPABILITIES.md`. Read i
 ## Rules that cost us before
 
 - **Pre-register before the claim run.** Commit the gate and its thresholds, then run the claim. Keep FAIL results in
-  history (see `docs/HISTORY.md`, commits `3be3f7f`, `63a2a63`, `938df7c`).
+  history (see `docs/HISTORY.md`, commits `68762a2`, `9c18ab5`, `78a9e1f`).
 - **Seed clusters, not mirrored layouts.** Mirrored odor-steering layouts are not independent. Pool p-values per seed
   cluster (correction of 2026-10-02, `docs/releases/v0.1.0.md`).
 - **Degree-preserving shuffles are the connectome null.** The in-degree-only random family is a second control.
@@ -46,7 +46,7 @@ What the repo can run, and what it refuses, is in `docs/CAPABILITIES.md`. Read i
   (`docs/releases/v0.5.0.md`).
 - **Parity is not biology.** The Rust/Mojo screener matches its Python reference on tested conditions; that is a
   software result (`README.md`, Conversion boundary).
-- **Physics core changes go to Kinestride.** The core moved there on 2026-10-09 (`0c10868`).
+- **Physics core changes go to Kinestride.** The core moved there on 2026-10-09 (`0d0eb56`).
 
 ## Porting a stage
 

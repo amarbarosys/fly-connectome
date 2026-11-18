@@ -25,16 +25,16 @@ Brain dynamics (same file):
 
 Learning, from commit messages:
 
-- `7df4b0c`: a 294-label cell-type wiring table, with no original edge kept, recovers the learning gap (5/5).
-- `63a2a63`: the 50 ms eligibility gate FAILs on held-out odours.
+-: a 294-label cell-type wiring table, with no original edge kept, recovers the learning gap (5/5).
+- `9c18ab5`: the 50 ms eligibility gate FAILs on held-out odours.
 
 Ant central complex (pre-registered gates, each committed before its claim run):
 
-- `3be3f7f`: A7c FAIL on the real bar, 74/128 home hits.
-- `8c82896`: A7d calibration reaches 89/128, search FAIL.
-- `938df7c`: A8 FAIL on seed 101.
+- `68762a2`: A7c FAIL on the real bar, 74/128 home hits.
+- `fed8ca9`: A7d calibration reaches 89/128, search FAIL.
+- `78a9e1f`: A8 FAIL on seed 101.
 
-Screening (README at `938df7c`, Conversion boundary): the Rust/Mojo build matched the corrected Python reference for all
+Screening (README at `78a9e1f`, Conversion boundary): the Rust/Mojo build matched the corrected Python reference for all
 tested conditions at about 24x throughput. These are software parity results, not biological validation.
 
 GPU physics: closed. Correct physics was reached after three ROCm-fork fixes, but it did not beat six CPU workers, so
@@ -80,8 +80,8 @@ Run receipts go to `.work/runs/<run-id>/` and are gitignored.
 
 ## Relation to Kinestride
 
-The body engine started here. Its physics core moved to Kinestride, the batched GPU body engine, in commit `0c10868`
-(2026-10-09), and its agent skill in `79b5057`. Kinestride lives at github.com/amarbarosys/kinestride. This repo keeps
+The body engine started here. Its physics core moved to Kinestride, the batched GPU body engine, in commit `0d0eb56`
+(2026-10-09), and its agent skill in. Kinestride lives at github.com/amarbarosys/kinestride. This repo keeps
 the app side: brain links, the live viewer, game and world scenes, and their `check.sh` stages.
 
 ## For coding agents
@@ -97,7 +97,7 @@ Claude Code: `ln -s "$PWD/skills/fly-connectome" .claude/skills/fly-connectome`.
 - The ant and learning gates are FAIL on their real bars at several steps (see [docs/HISTORY.md](docs/HISTORY.md)).
 - Screening parity is software parity only.
 - Much of the pipeline is still Python (single-compound runner, chemistry database, graph build); the screening Python
-  path is kept as the reference oracle (README at `938df7c`).
+  path is kept as the reference oracle (README at `78a9e1f`).
 
 ## Data
 
