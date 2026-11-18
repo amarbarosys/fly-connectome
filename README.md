@@ -1,87 +1,104 @@
-# Fly connectome project
+# fly-connectome
 
-**Physics engine:** the batched GPU body engine's core now lives in its own repo, Kinestride (`~/Projects/mojo/kinestride`, installed editable in `.venv`). `agent/body_engine/` keeps the app side: brain links, the live viewer, game and world scenes, and their `check.sh` stages.
+A whole-brain connectome pipeline and embodied neural fly agents for adult *Drosophila melanogaster*. It runs on the
+FlyWire v783 connectome (139,255 neurons, 10.5M synapses), uses MuJoCo biomechanics (NeuroMechFly), and runs its brain
+and a GPU perturbation kernel (AMD RX 7900 XTX). It is a research record: negative results and FAIL gates stay in the history.
 
+## Results
 
-Whole-brain connectome pipeline and embodied neural fly agents for adult
-*Drosophila melanogaster*, built on FlyWire v783 (139,255
-neurons, 10.5M synapses) with MuJoCo biomechanics (NeuroMechFly) and a GPU
-perturbation kernel on AMD RX 7900 XTX.
+Matched comparison, [docs/plans/CONNECTOME_BENEFIT.md](docs/plans/CONNECTOME_BENEFIT.md), numbers from
+[docs/releases/v0.5.0.md](docs/releases/v0.5.0.md):
 
-Current connectome result: across 32 independent seed clusters (64 mirrored odor-steering layouts),
-the real graph did not outperform degree-preserving shuffles (pooled p=0.7551); it outperformed
-the in-degree-only random family (pooled p=0.001472). The real arm scored 56/64 and missed its
-frozen gate.
+- Across 32 independent seed clusters (64 mirrored odor-steering layouts), the real graph did not outperform
+  degree-preserving shuffles (pooled p = 0.7551). It did outperform the in-degree-only random family (pooled p = 0.001472).
+  The real arm scored 56/64 and missed its frozen gate.
+- Correction 2026-10-02: seed clusters replace mirrored layouts as the unit of independence. Old pooled values were
+  0.6990 and 0.000489.
 
-Brain dynamics: with raw synapse-count weights, recurrent activity floods the mushroom body (79% of
-Kenyon cells active, odour identity lost). Per-neuron normalised gain 35 restores a sparse, distinct
-Kenyon-cell code, but mushroom-body output and descending neurons stay silent, so dopamine-gated
-learning on that code is not yet demonstrated (`agent.verify_sparse_learning` records FAIL).
-See [the matched comparison](docs/plans/CONNECTOME_BENEFIT.md) and the [capability map](docs/CAPABILITIES.md).
+Brain dynamics (same file):
 
-Correction 2026-10-02: p-values recomputed with seed clusters (mirrored layouts are not independent); old pooled values 0.6990 (shuffles) and 0.000489 (random) are now 0.7551 and 0.001472; conclusions unchanged: no measured advantage over degree-preserving shuffles, and the real graph remains ahead of the random-column family.
+- With raw synapse-count weights, recurrent activity floods the mushroom body: 79% of Kenyon cells active, odour
+  identity lost.
+- With per-neuron normalised gain 35, the Kenyon-cell code is sparse and distinct. Mushroom-body output and descending
+  neurons stay silent, so dopamine-gated learning on that code is not yet demonstrated (`agent.verify_sparse_learning`
+  records FAIL).
 
-Key areas: five multi-omics data layers, embodied agent system
-with checkpoint/restore, and a Rust/Mojo screening rebuild. The compound
-screening engine and chemoinformatics database now live in the separate
-`fly-pharma` repository. GPU physics on RX 7900 XTX is closed: correct physics was reached after three ROCm-fork fixes, but it did not beat six CPU workers, so CPU MuJoCo remains the backend; our own MuJoCo port is in progress ([body engine](docs/plans/BODY_ENGINE.md)). See [GPU body port status](docs/plans/GPU_BODY_PORT.md) and the
-[master plan](docs/plans/FLY_WORLD_MASTER_PLAN.md) for the full program.
+Learning, from commit messages:
 
-## Screening build (Rust/Mojo)
+- `7df4b0c`: a 294-label cell-type wiring table, with no original edge kept, recovers the learning gap (5/5).
+- `63a2a63`: the 50 ms eligibility gate FAILs on held-out odours.
 
-- Rust source and crate: [`fly-screen-rs/`](fly-screen-rs/)
-- Mojo resident GPU worker: in sibling repo `fly-spmv/src/fly_batch_gpu.mojo`
-- Built local executable: `fly-screen-rs/target/release/fly-screen`
-- Run receipts/results: `.work/runs/<run-id>/` (created by the executable, gitignored)
-- Tool state never lands in the tree: `mutant-check` locks live in `$XDG_RUNTIME_DIR/mutant-check/` (iTools `3dbcdad`); `.cache/`, `*.mutant-orig.*`, `mpv-shot*.jpg` are gitignored. Health check 2026-10-07 (pytest 31/31, play check 7/7, walls FAIL known): `~/Brain/fly-connectome/notes/2026-10-07-health-check.md`
-- Capability map tightened 2026-10-07 (GPU physics row retired, calcium state continuous, spider/play/worm negatives recorded, eye-neuron gate redesigned): [`docs/CAPABILITIES.md`](docs/CAPABILITIES.md), `~/Brain/fly-connectome/notes/2026-10-07-tighten-capabilities.md`
-- Migration status and remaining gates: [`docs/plans/SCREENING_REBUILD_PLAN.md`](docs/plans/SCREENING_REBUILD_PLAN.md)
+Ant central complex (pre-registered gates, each committed before its claim run):
 
-Build the Mojo worker and Rust CLI:
+- `3be3f7f`: A7c FAIL on the real bar, 74/128 home hits.
+- `8c82896`: A7d calibration reaches 89/128, search FAIL.
+- `938df7c`: A8 FAIL on seed 101.
+
+Screening (README at `938df7c`, Conversion boundary): the Rust/Mojo build matched the corrected Python reference for all
+tested conditions at about 24x throughput. These are software parity results, not biological validation.
+
+GPU physics: closed. Correct physics was reached after three ROCm-fork fixes, but it did not beat six CPU workers, so
+CPU MuJoCo remains the backend ([docs/releases/v0.5.0.md](docs/releases/v0.5.0.md)).
+
+Full release history: [docs/HISTORY.md](docs/HISTORY.md).
+
+## Quick start
 
 ```sh
-# From the fly-spmv sibling repo:
-mojo build src/fly_batch_gpu.mojo -o .work/fly_batch_gpu
+pytest -m "not gpu"                      # CPU tests; GPU tests are -m gpu (see pytest.ini)
 
-# From this repo:
 cd fly-screen-rs
-cargo build --release --bin fly-screen
+cargo build --release --bin fly-screen   # Rust screening CLI
+FLY_DRY_ONLY=1 FLY_CONDITIONS=50 FLY_STEPS=100 target/release/fly-screen   # CPU-only manifest preflight
 ```
 
-Run a batch (queues a GPU job):
+A batch run (`target/release/fly-screen` without `FLY_DRY_ONLY`) queues a GPU job. The Mojo worker is built from the
+sibling repo `fly-spmv`: `mojo build src/fly_batch_gpu.mojo -o .work/fly_batch_gpu`.
 
-```sh
-cd fly-screen-rs
-target/release/fly-screen
+Toolchain: Mojo 1.1.0 and MAX 26.6.0 in `.venv`. Kinestride is installed editable into `.venv`.
+
+## Checks
+
+- `pytest`: `testpaths` are `tests` and `agent/tests` (`pytest.ini`).
+- Body-engine stages: `agent/body_engine/check.sh`.
+- Device compile check without a batch: `FLY_GPU_COMPILE_ONLY=1 target/release/fly-screen`.
+- What runs and what is refused: [docs/CAPABILITIES.md](docs/CAPABILITIES.md).
+
+## What is here
+
+```
+agent/              embodied agents, learning gates (verify_*.py), experiments
+agent/body_engine/  live viewer, game and world scenes, check.sh stages
+fly-screen-rs/      Rust screening CLI
+docs/               CAPABILITIES.md, FLY_ASSET_INDEX.md, plans/, releases/, adr/, articles/
+skills/             agent skill for this repo (fly-connectome)
+tests/              pytest
 ```
 
-CPU-only manifest preflight:
+Run receipts go to `.work/runs/<run-id>/` and are gitignored.
 
-```sh
-FLY_DRY_ONLY=1 FLY_CONDITIONS=50 FLY_STEPS=100 target/release/fly-screen
-```
+## Relation to Kinestride
 
-For a device-side kernel compile check without running a batch, use
-`FLY_GPU_COMPILE_ONLY=1 target/release/fly-screen`; see the Rust README for
-the distinction between CPU preflight and GPU compilation.
+The body engine started here. Its physics core moved to Kinestride, the batched GPU body engine, in commit `0c10868`
+(2026-10-09), and its agent skill in `79b5057`. Kinestride lives at github.com/amarbarosys/kinestride. This repo keeps
+the app side: brain links, the live viewer, game and world scenes, and their `check.sh` stages.
 
-## Conversion boundary
+## For coding agents
 
-| Area | Implementation | Status |
-|---|---|---|
-| Batched screening orchestration, catalog, Hill gains, manifest, Parquet receipt | Rust (`fly-screen-rs`) | Implemented, semantic/schema review open |
-| Batched connectome simulation and compact GPU telemetry | Mojo (`fly-spmv`) | Implemented, parity checked |
-| Single-compound runner, chemistry DB, graph build, receptor extraction, wet-lab verification, agent experiments | Python | Not converted, some by design |
-| Python screening path | Python | Retained as independent oracle/reference |
+Read `skills/fly-connectome/SKILL.md` first. For porting a MuJoCo stage, use the `body-engine` skill in Kinestride.
 
-The Rust/Mojo build matched the corrected Python reference for all tested
-conditions at ~24x throughput. These are software parity results, not biological
-validation.
+Claude Code: `ln -s "$PWD/skills/fly-connectome" .claude/skills/fly-connectome`.
 
-## Navigation
+## Where it is wrong
 
-- Asset index: [`docs/FLY_ASSET_INDEX.md`](docs/FLY_ASSET_INDEX.md)
-- Worm (C. elegans) connectome: [`docs/WORM_ASSET_INDEX.md`](docs/WORM_ASSET_INDEX.md)
-- Plans and protocols: [`docs/plans/`](docs/plans/)
-- Tests: `pytest tests/` (see `pytest.ini` for markers)
-- Toolchain: Mojo 1.1.0 / MAX 26.6.0 in `.venv` (builds go through `~/iTools/bin/mojo-cached`, which uses the `.venv/bin/mojo` of the repo or worktree holding the source)
+- The real connectome does not beat degree-preserving shuffles.
+- Sparse Kenyon-cell coding is not yet tied to learning.
+- The ant and learning gates are FAIL on their real bars at several steps (see [docs/HISTORY.md](docs/HISTORY.md)).
+- Screening parity is software parity only.
+- Much of the pipeline is still Python (single-compound runner, chemistry database, graph build); the screening Python
+  path is kept as the reference oracle (README at `938df7c`).
+
+## License
+
+Apache-2.0, see [LICENSE](LICENSE). Portions are translated from MuJoCo (Apache-2.0, DeepMind).
+Data sources, such as the FlyWire v783 connectome and its annotations, keep their own terms; this license does not cover them.
