@@ -98,6 +98,17 @@ Claude Code: `ln -s "$PWD/skills/fly-connectome" .claude/skills/fly-connectome`.
 - Much of the pipeline is still Python (single-compound runner, chemistry database, graph build); the screening Python
   path is kept as the reference oracle (README at `938df7c`).
 
+## Data
+
+No FlyWire data is in this repo (`data/` is gitignored). Fetch it yourself and cite it per [codex.flywire.ai](https://codex.flywire.ai):
+
+```sh
+tools/fetch_flywire.sh   # annotations (flyconnectome/flywire_annotations @ a83b277) and column assignment
+```
+
+The synapse tables and proofread roster have no URL in the code. Get them from https://zenodo.org/records/10676866 into `data/`.
+FlyWire's terms apply to all of it; this repo's license does not cover it.
+
 ## License
 
 Apache-2.0, see [LICENSE](LICENSE). Portions are translated from MuJoCo (Apache-2.0, DeepMind).
